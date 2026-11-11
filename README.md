@@ -1,0 +1,22 @@
+# IDPS final year project
+
+A network Intrusion Detection and Prevention System that detects attacks in network flows with
+ML (XGBoost plus an anomaly detector), explains each alert with SHAP and LIME, blocks malicious
+IPs through nftables with safety rules (allowlist, TTL, dry-run), and exposes everything to a SOC
+dashboard. It is developed and tested only inside an isolated Docker lab.
+
+## Setup
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
+```
+
+Optional flow extractors (can be hard to install on macOS): `pip install -e ".[capture]"`.
+
+## Docs
+
+- Project plan: [docs/PLAN.md](docs/PLAN.md)
+- Lab network and attack scripts: [lab/README.md](lab/README.md)

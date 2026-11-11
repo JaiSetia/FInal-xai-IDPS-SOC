@@ -1,0 +1,93 @@
+# Isolated IDPS lab. attacker -> sensor (router, inline) -> victim/dvwa.
+# Run attacks only against these containers.
+name: idps-lab
+
+networks:
+  attack_net:
+    driver: bridge
+    # Not "internal": Docker drops packets on internal networks whose destination
+    # is outside the subnet, which would stop the sensor from routing. Instead,
+    # every container deletes its default route at start, so the lab still has
+    # no route to the outside world.
+    ipam:
+      config:
+        - subnet: 10.10.1.0/24
+  victim_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.2.0/24
+
+services:
+  sensor:
+    # The repo is copied into the image rather than bind-mounted, because macOS
+    # blocks Docker from mounting folders under ~/Desktop. Rebuild after code
+    # changes: docker compose up -d --build sensor
+    build:
+      context: ..
+      dockerfile: lab/sensor/Dockerfile
+    container_name: idps-sensor
+    command: ["sh", "-c", "ip route del default 2>/dev/null; exec sleep infinity"]
+    hostname: sensor
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    networks:
+      attack_net:
+        ipv4_address: 10.10.1.2
+      victim_net:
+        ipv4_address: 10.10.2.2
+
+  attacker:
+    # Attack scripts are copied in at build time (no bind mount; see sensor).
+    build:
+      context: .
+      dockerfile: attacker/Dockerfile
+    container_name: idps-attacker
+    hostname: attacker
+    cap_add: [NET_ADMIN]
+    environment:
+      SENSOR_IP: 10.10.1.2
+      VICTIM_NET: 10.10.2.0/24
+    networks:
+      attack_net:
+        ipv4_address: 10.10.1.10
+    depends_on: [sensor]
+
+  victim:
+    build: ./victim
+    container_name: idps-victim
+    hostname: victim
+    cap_add: [NET_ADMIN]
+    environment:
+      SENSOR_IP: 10.10.2.2
+      ATTACK_NET: 10.10.1.0/24
+      LAB_VICTIM_PASSWORD: ${LAB_VICTIM_PASSWORD:?copy lab/.env.example to lab/.env}
+    networks:
+      victim_net:
+        ipv4_address: 10.10.2.10
+    depends_on: [sensor]
+
+  dvwa:
+    image: vulnerables/web-dvwa
+    # The image is only published for amd64; on Apple Silicon it runs under emulation.
+    platform: linux/amd64
+    container_name: idps-dvwa
+    hostname: dvwa
+    cap_add: [NET_ADMIN]
+    # Adds the return route, then hands over to the image's own entrypoint.
+    # The image is Debian-based and may lack iproute2; if so the route add is
+    # skipped with a warning (see lab/README.md for the workaround).
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        (ip route add 10.10.1.0/24 via 10.10.2.2 ||
+        route add -net 10.10.1.0 netmask 255.255.255.0 gw 10.10.2.2) ||
+        echo "WARNING: could not add route to attack_net";
+        (ip route del default || route del default) 2>/dev/null;
+        exec /main.sh
+    networks:
+      victim_net:
+        ipv4_address: 10.10.2.11
+    depends_on: [sensor]

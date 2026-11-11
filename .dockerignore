@@ -1,0 +1,11 @@
+.git
+.claude
+**/.env
+**/.venv
+**/venv
+**/__pycache__
+**/node_modules
+data
+models
+notebooks
+*.pcap
