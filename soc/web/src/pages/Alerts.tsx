@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api, query } from "../api/client";
 import { ALERT_STATUSES, SEVERITIES, type Alert, type Page } from "../api/types";
 import { Card, ErrorText, SeverityBadge, StatusText, useLoad } from "../components/common";
@@ -26,8 +26,10 @@ function matches(a: Alert, f: Filters): boolean {
 
 export default function Alerts() {
   const navigate = useNavigate();
-  const [draft, setDraft] = useState<Filters>(EMPTY);
-  const [filters, setFilters] = useState<Filters>(EMPTY);
+  const [params] = useSearchParams();
+  const initial: Filters = { ...EMPTY, ip: params.get("ip") ?? "" };
+  const [draft, setDraft] = useState<Filters>(initial);
+  const [filters, setFilters] = useState<Filters>(initial);
   const [fresh, setFresh] = useState<Set<number>>(new Set());
   const [cursor, setCursor] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);

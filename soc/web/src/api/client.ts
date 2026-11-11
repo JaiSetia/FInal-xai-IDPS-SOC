@@ -94,3 +94,36 @@ export function wsUrl(path: string): string {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${window.location.host}${BASE}${path}`;
 }
+
+/** POST and read a streamed NDJSON reply line by line (the assistant's chat endpoint). */
+export async function streamNdjson(path: string, json: unknown, onEvent: (e: Record<string, unknown>) => void,
+  signal?: AbortSignal): Promise<void> {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(BASE + path, { method: "POST", headers, body: JSON.stringify(json), signal });
+  if (res.status === 401 && token) setToken(null);
+  if (!res.ok || !res.body) {
+    const text = await res.text();
+    throw new ApiError(res.status, detailMessage(text ? safeJson(text) : null, `${res.status} ${res.statusText}`));
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const emitLine = (line: string) => {
+    if (!line.trim()) return;
+    const event = safeJson(line.trim());
+    if (event && typeof event === "object") onEvent(event as Record<string, unknown>);
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      emitLine(buffer.slice(0, nl));
+      buffer = buffer.slice(nl + 1);
+    }
+  }
+  buffer += decoder.decode(); // flush a multi-byte character split across chunks
+  emitLine(buffer); // a last line without a trailing newline
+}

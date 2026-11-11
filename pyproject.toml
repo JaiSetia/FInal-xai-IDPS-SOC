@@ -26,6 +26,8 @@ dependencies = [
     "pydantic",
     "pydantic-settings",
     "pyjwt",
+    "anthropic",  # SOC assistant
+    "geoip2",  # attack world map (MaxMind GeoLite2)
     "argon2-cffi",
 ]
 

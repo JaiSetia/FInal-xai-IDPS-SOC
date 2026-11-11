@@ -121,3 +121,72 @@ UTC.
 
 Tables: `users`, `sensor_tokens`, `alerts`, `blocks`, `actions`, `cases`, `case_notes`,
 `audit_log`.
+
+## Maps
+
+- **Attack map** (`GET /geo/attacks?hours=24`, dashboard "Attack map"): the busiest attack
+  sources placed on a world map, with lines to the protected site.
+  - Real locations need the free MaxMind **GeoLite2 City** database: create a MaxMind
+    account, download `GeoLite2-City.mmdb`, and set `IDPS_SOC_GEOIP_DB` to its path.
+    Without it, public addresses can't be placed (the page says so).
+  - Lab addresses are private and have no real location. `IDPS_SOC_GEO_DEMO=true` gives them
+    made-up, stable locations named "Demo: ..."; the page labels these as not real. Keep it off
+    for real results.
+  - `IDPS_SOC_HOME_LAT`, `IDPS_SOC_HOME_LON` and `IDPS_SOC_HOME_LABEL` set where the attack
+    lines end (the protected site).
+- **Topology** (`GET /topology?hours=1`, dashboard "Topology"): hosts seen in alerts and the
+  source-to-target pairs between them, coloured by highest severity. Both maps refresh on new
+  alerts from the live feed.
+
+## SOC assistant
+
+A chat panel ("Assistant", and "Explain this alert with the assistant" on every alert) backed
+by Claude through the Anthropic Python SDK (`soc/assistant/`).
+
+**Turning it on.** Set `ANTHROPIC_API_KEY` in the API server's environment (never in the
+browser). Without it the assistant is switched off, the page says so, and everything else
+works. Each message costs API usage; limits below keep it bounded.
+
+| Setting (`IDPS_SOC_` prefix) | Default | Meaning |
+|---|---|---|
+| `ASSISTANT_MODEL` | `claude-opus-5-5` | Model used |
+| `ASSISTANT_EFFORT` | `medium` | Reasoning effort (`low` is cheaper and faster) |
+| `ASSISTANT_RATE_PER_10MIN` | 20 | Messages per user per 10 minutes |
+| `ASSISTANT_MAX_TURNS` | 30 | Messages per conversation |
+
+Requests use server-side fallbacks (`fallbacks: "default"`), so if the model declines a
+request the API retries it on a fallback model automatically. The system prompt and tool list
+are constant and prompt-cached.
+
+**What it can do.** It calls fixed tools (`soc/assistant/tools.py`); it never writes SQL:
+`search_alerts`, `get_alert` (with the SHAP/LIME explanation), `top_attackers`, `list_blocks`,
+`get_case`, `metrics_summary`, `get_playbook` (the response playbooks in `docs/playbooks/`,
+mapped to MITRE ATT&CK), and `propose_block`. Tool arguments are validated before anything
+runs, and at most 8 tool rounds run per reply.
+
+**Safety.**
+- `propose_block` only creates a **pending** action. Nothing happens until an analyst confirms
+  it on the Actions page, and the usual block allowlist checks apply.
+- Alert fields come from network traffic, so an attacker can influence them (prompt
+  injection). Tool results are wrapped in `<soc_data>` and the system prompt tells the model to
+  treat them as data and point out embedded instructions. The confirm-before-act rule is what
+  makes this safe even if the model is fooled.
+- Conversations are private to their user. API errors are reported without internal details.
+
+**Endpoints.** `GET /assistant/status`, `GET /assistant/conversations`,
+`GET /assistant/conversations/{id}`, and `POST /assistant/chat` (streams NDJSON events:
+`conversation`, `text`, `tool`, `tool_result`, `action_proposed`, `error`, `done`).
+
+**Evaluation.** For the report, write about 30 questions with answers you can check against the
+database (for example "top attacker in the last hour") and score answer accuracy, the share of
+correct block proposals, and response time.
+
+## Upgrading an existing database
+
+Tables are created with `create_all`, which adds missing tables but **not** new columns on
+existing tables (proper migrations with Alembic are a later step). After pulling a change that
+adds a column, either start from a fresh database or add the column by hand, for example:
+
+```sh
+sqlite3 soc.db "ALTER TABLE assistant_conversations ADD COLUMN busy_since DATETIME;"
+```

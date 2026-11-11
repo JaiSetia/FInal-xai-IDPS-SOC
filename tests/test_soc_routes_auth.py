@@ -33,7 +33,8 @@ def test_every_non_public_route_requires_a_token(soc_app):
         if (method, path) in PUBLIC:
             continue
         url = path.replace("{alert_id}", "1").replace("{case_id}", "1") \
-            .replace("{action_id}", "1").replace("{user_id}", "1").replace("{sensor_id}", "1")
+            .replace("{action_id}", "1").replace("{user_id}", "1").replace("{sensor_id}", "1") \
+            .replace("{conversation_id}", "1")
         assert "{" not in url, f"unhandled path parameter in {path}"
         r = client.request(method, url, json={})
         assert r.status_code == 401, f"{method} {path} returned {r.status_code} without a token"

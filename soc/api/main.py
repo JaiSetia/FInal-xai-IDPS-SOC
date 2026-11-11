@@ -15,7 +15,8 @@ from fastapi.responses import JSONResponse
 from soc.api import auth
 from soc.api.broadcast import AlertBroadcaster
 from soc.api.db import init_db, make_engine, make_session_factory
-from soc.api.routes import actions, admin, alerts, blocks, cases, live, metrics
+from soc.api.geo import GeoLocator
+from soc.api.routes import actions, admin, alerts, assistant, blocks, cases, geo, live, metrics
 from soc.api.security import LoginThrottle
 from soc.api.settings import SocSettings, get_settings
 
@@ -31,6 +32,13 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
     init_db(engine)
     app.state.engine = engine
     app.state.session_factory = make_session_factory(engine)
+    app.state.geo = GeoLocator(settings.geoip_db, settings.geo_demo)
+    # The assistant is off (None) when no Anthropic credentials are configured.
+    from soc.assistant.llm import make_llm
+
+    app.state.assistant_llm = make_llm(settings.assistant_model, settings.assistant_effort)
+    app.state.assistant_limiter = None
+    app.state.assistant_slots = None
     app.state.broadcaster = AlertBroadcaster(settings.ws_max_connections, settings.ws_queue_size)
     app.state.login_throttle = LoginThrottle(
         settings.login_max_failures, settings.login_max_failures_per_ip,
@@ -54,7 +62,7 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(auth.router)
-    for module in (alerts, live, blocks, actions, cases, metrics, admin):
+    for module in (alerts, live, blocks, actions, cases, metrics, geo, assistant, admin):
         app.include_router(module.router)
     return app
 

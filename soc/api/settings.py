@@ -52,6 +52,23 @@ class SocSettings(BaseSettings):
     # empty, every block request is refused (503), so a forgotten setting fails closed.
     # From the environment: IDPS_SOC_BLOCK_ALLOWLIST=10.10.1.1,10.10.2.1,192.168.1.0/24
     block_allowlist: Annotated[list[IPvAnyNetwork], NoDecode] = Field(default_factory=list)
+    # Attack world map. GeoLite2 City database path (free MaxMind account needed); without it,
+    # public addresses can't be placed. geo_demo gives lab (private) addresses made-up,
+    # clearly labelled locations for demonstrations. home_* is where the protected site is.
+    geoip_db: str | None = None
+    geo_demo: bool = False
+    home_lat: float | None = Field(default=None, ge=-90, le=90)
+    home_lon: float | None = Field(default=None, ge=-180, le=180)
+    home_label: str = Field(default="Protected site", max_length=64)
+    # SOC assistant (Claude). Needs Anthropic credentials in the API's environment
+    # (ANTHROPIC_API_KEY); without them the assistant is switched off and the rest works.
+    assistant_model: str = "claude-opus-5-5"
+    assistant_effort: str = Field(default="medium", pattern="^(low|medium|high|xhigh|max)$")
+    # Cost and abuse limits: messages per user per 10 minutes, and turns per conversation.
+    assistant_rate_per_10min: int = Field(default=20, ge=1, le=1000)
+    assistant_max_turns: int = Field(default=30, ge=1, le=200)
+    # Replies running at once across all users (each holds a model call open).
+    assistant_max_concurrent: int = Field(default=4, ge=1, le=100)
     # Browser origins allowed to call the API (the dashboard's dev server by default).
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173"])

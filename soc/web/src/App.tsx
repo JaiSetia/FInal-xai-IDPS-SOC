@@ -3,6 +3,7 @@ import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom"
 import { useAuth } from "./auth";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Actions from "./pages/Actions";
+import Assistant from "./pages/Assistant";
 import Admin from "./pages/Admin";
 import AlertDetail from "./pages/AlertDetail";
 import Alerts from "./pages/Alerts";
@@ -13,6 +14,9 @@ import Login from "./pages/Login";
 
 // The charting library is large, so the metrics page loads on demand.
 const Metrics = lazy(() => import("./pages/Metrics"));
+// Map libraries are large too.
+const WorldMap = lazy(() => import("./pages/WorldMap"));
+const TopologyMap = lazy(() => import("./pages/TopologyMap"));
 
 export default function App() {
   const { me, loading, logout } = useAuth();
@@ -27,10 +31,13 @@ export default function App() {
         <div className="brand">IDPS SOC<small>XAI intrusion detection</small></div>
         <nav className="nav" aria-label="Main">
           <NavLink to="/alerts">Alerts</NavLink>
+          <NavLink to="/assistant">Assistant</NavLink>
           <NavLink to="/actions">Actions</NavLink>
           <NavLink to="/blocks">Blocks</NavLink>
           <NavLink to="/cases">Cases</NavLink>
           <NavLink to="/metrics">Metrics</NavLink>
+          <NavLink to="/map">Attack map</NavLink>
+          <NavLink to="/topology">Topology</NavLink>
           {me.role === "admin" && <NavLink to="/admin">Admin</NavLink>}
         </nav>
         <div className="spacer" />
@@ -46,10 +53,13 @@ export default function App() {
           <Route path="/alerts" element={<Alerts />} />
           <Route path="/alerts/:id" element={<AlertDetail />} />
           <Route path="/actions" element={<Actions />} />
+          <Route path="/assistant" element={<Assistant />} />
           <Route path="/blocks" element={<Blocks />} />
           <Route path="/cases" element={<Cases />} />
           <Route path="/cases/:id" element={<CaseDetail />} />
           <Route path="/metrics" element={<Suspense fallback={<p className="muted">Loading…</p>}><Metrics /></Suspense>} />
+          <Route path="/map" element={<Suspense fallback={<p className="muted">Loading…</p>}><WorldMap /></Suspense>} />
+          <Route path="/topology" element={<Suspense fallback={<p className="muted">Loading…</p>}><TopologyMap /></Suspense>} />
           {me.role === "admin" && <Route path="/admin" element={<Admin />} />}
           <Route path="*" element={<p className="muted">Page not found.</p>} />
         </Routes>

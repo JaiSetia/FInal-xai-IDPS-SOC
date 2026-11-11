@@ -151,3 +151,75 @@ tr.fresh td { animation: flash 1.6s ease-out; }
   main { padding: 16px; }
   .shap-row { grid-template-columns: 110px 1fr 60px; }
 }
+
+/* --- maps ----------------------------------------------------------------------------- */
+.notice-box { border-left: 3px solid var(--warn); padding: 10px 14px; }
+.map-svg { width: 100%; height: auto; display: block; }
+.map-sphere { fill: var(--surface-2); }
+.map-graticule { fill: none; stroke: var(--border); stroke-width: 0.5; opacity: 0.6; }
+.map-land { fill: var(--bg); stroke: var(--border); stroke-width: 0.6; }
+.map-arc { fill: none; stroke-width: 1.4; opacity: 0.55; stroke-dasharray: 6 4; animation: arc-flow 1.6s linear infinite; }
+.map-arc.hot { stroke-width: 2.6; opacity: 1; }
+@keyframes arc-flow { to { stroke-dashoffset: -20; } }
+.map-point { opacity: 0.85; stroke: var(--surface); stroke-width: 1; }
+.map-point.demo { fill-opacity: 0.35; stroke: var(--text); stroke-width: 1.5; stroke-dasharray: 3 2; }
+.map-point.hot { animation: pulse 0.8s ease-in-out 4; }
+@keyframes pulse { 50% { opacity: 0.3; } }
+.map-home circle { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
+.map-home text { fill: var(--text); font-size: 13px; font-weight: 600; }
+@media (prefers-reduced-motion: reduce) {
+  .map-arc, .map-point.hot, tr.fresh td { animation: none; }
+}
+
+.sev-fill-low { fill: var(--sev-low); }
+.sev-fill-medium { fill: var(--sev-medium); }
+.sev-fill-high { fill: var(--sev-high); }
+.sev-fill-critical { fill: var(--sev-critical); }
+.sev-stroke-low { stroke: var(--sev-low); }
+.sev-stroke-medium { stroke: var(--sev-medium); }
+.sev-stroke-high { stroke: var(--sev-high); }
+.sev-stroke-critical { stroke: var(--sev-critical); }
+
+.grid.cols-topo { grid-template-columns: minmax(0, 1fr) 280px; }
+.topo-canvas { height: 600px; overflow: hidden; }
+.topo-node.react-flow__node { background: var(--surface); color: var(--text); border: 2px solid var(--border); border-radius: 8px; text-align: left; }
+.topo-node.selected { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent); }
+.sev-border-low { border-color: var(--sev-low) !important; }
+.sev-border-medium { border-color: var(--sev-medium) !important; }
+.sev-border-high { border-color: var(--sev-high) !important; }
+.sev-border-critical { border-color: var(--sev-critical) !important; }
+.topo-edge .react-flow__edge-path { stroke: inherit; stroke-width: 1.6; }
+.react-flow__edge.sev-stroke-low .react-flow__edge-path { stroke: var(--sev-low); }
+.react-flow__edge.sev-stroke-medium .react-flow__edge-path { stroke: var(--sev-medium); }
+.react-flow__edge.sev-stroke-high .react-flow__edge-path { stroke: var(--sev-high); }
+.react-flow__edge.sev-stroke-critical .react-flow__edge-path { stroke: var(--sev-critical); }
+.react-flow__edge-textbg { fill: var(--surface); }
+.react-flow__edge-text { fill: var(--text); font-size: 11px; }
+.react-flow__controls button { background: var(--surface); color: var(--text); border-color: var(--border); }
+.react-flow__background { background: var(--surface); }
+@media (max-width: 760px) {
+  .grid.cols-topo { grid-template-columns: 1fr; }
+  .topo-canvas { height: 420px; }
+}
+
+/* --- assistant ------------------------------------------------------------------------ */
+.grid.cols-chat { grid-template-columns: minmax(0, 1fr) 260px; align-items: start; }
+.chat { display: flex; flex-direction: column; min-height: 70vh; }
+.chat-log { flex: 1; overflow-y: auto; max-height: 64vh; display: flex; flex-direction: column; gap: 12px; padding-bottom: 8px; }
+.bubble { max-width: 88%; padding: 10px 12px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bubble.user { align-self: flex-end; background: var(--accent); color: var(--accent-text); }
+.bubble.assistant { align-self: flex-start; background: var(--surface-2); }
+.bubble.user a { color: inherit; text-decoration: underline; }
+.chat-tools { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+.chip { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.chip.bad { color: var(--danger); border-color: var(--danger); }
+.proposal { margin-top: 8px; padding: 8px 10px; border-left: 3px solid var(--warn); background: var(--surface); border-radius: 6px; white-space: normal; }
+.chat-input { display: flex; gap: 8px; align-items: flex-end; margin-top: 8px; }
+.chat-input textarea { flex: 1; min-height: 44px; resize: vertical; }
+.conv { display: flex; flex-direction: column; align-items: flex-start; width: 100%; text-align: left; margin-top: 6px; background: transparent; }
+.conv.active { background: var(--surface-2); border-color: var(--accent); }
+.conv-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+@media (max-width: 760px) {
+  .grid.cols-chat { grid-template-columns: 1fr; }
+  .bubble { max-width: 100%; }
+}

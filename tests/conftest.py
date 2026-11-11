@@ -26,6 +26,7 @@ def soc_settings(monkeypatch):
 @pytest.fixture
 def soc_app(soc_settings):
     app = create_app(soc_settings)
+    app.state.assistant_llm = None  # tests never call the real model; they install a fake
     with app.state.session_factory() as db:
         auth.create_user(db, "admin", ADMIN_PW, Role.ADMIN)
         auth.create_user(db, "analyst", ANALYST_PW, Role.ANALYST)

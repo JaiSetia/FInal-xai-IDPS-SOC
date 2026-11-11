@@ -198,3 +198,20 @@ class AuditEntry(Base):
     action: Mapped[str] = mapped_column(String(64), index=True)
     target: Mapped[str] = mapped_column(String(128), default="")
     details: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class AssistantConversation(Base):
+    """One analyst's chat with the SOC assistant. `messages` is the exact Messages API history
+    (thinking and tool blocks included), sent back unchanged on the next turn."""
+
+    __tablename__ = "assistant_conversations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(120), default="")
+    messages: Mapped[list] = mapped_column(JSON, default=list)
+    user_turns: Mapped[int] = mapped_column(Integer, default=0)
+    # Set while a reply is running, so a second message can't race it (cleared when saved).
+    busy_since: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)

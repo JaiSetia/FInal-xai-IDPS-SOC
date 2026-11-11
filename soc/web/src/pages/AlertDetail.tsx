@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, query } from "../api/client";
 import { ALERT_STATUSES, type Action, type AlertDetail as AlertDetailT, type CaseDetail, type CaseSummary, type Page } from "../api/types";
 import { Card, ErrorText, SeverityBadge, useAction, useLoad } from "../components/common";
@@ -14,6 +14,7 @@ export default function AlertDetail() {
   const { data: cases } = useLoad(
     () => api<Page<CaseSummary>>(`/cases${query({ status: "open", limit: 100 })}`), []);
   const act = useAction();
+  const navigate = useNavigate();
   const [notice, setNotice] = useState<string | null>(null);
   const [caseId, setCaseId] = useState("");
   const [newCase, setNewCase] = useState("");
@@ -118,7 +119,8 @@ export default function AlertDetail() {
           )}
         </Card>
       </div>
-      <Card title="Why the model flagged this flow">
+      <Card title="Why the model flagged this flow"
+        actions={<button onClick={() => navigate(`/assistant?alert=${alert.id}`)}>Explain this alert with the assistant</button>}>
         <ExplanationChart explanation={alert.explanation} />
       </Card>
     </>
