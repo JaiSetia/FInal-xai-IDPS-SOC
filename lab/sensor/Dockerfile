@@ -1,13 +1,28 @@
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip python3-venv tcpdump nftables iproute2 iputils-ping \
+        python3 python3-pip python3-venv tcpdump tcpreplay nftables iproute2 iputils-ping \
     && rm -rf /var/lib/apt/lists/*
-WORKDIR /opt/idps
+
 # Build context is the repo root (see lab/docker-compose.yml); .dockerignore keeps
-# data, models, secrets and git history out of the image.
-COPY pyproject.toml README.md ./
+# data, secrets and git history out of the image.
+WORKDIR /opt/idps
+COPY pyproject.toml README.md requirements.lock ./
 COPY idps ./idps
 COPY soc ./soc
-# Forwarding is enabled via the compose sysctl; the sensor routes attack_net <-> victim_net.
-CMD ["sleep", "infinity"]
+# Trained models are copied in because bind mounts of ~/Desktop are blocked on macOS.
+COPY models ./models
+
+# Install the project into a venv (Ubuntu 24.04 blocks system-wide pip installs).
+# requirements.lock pins exact versions so shap/numpy/xgboost don't drift apart.
+RUN python3 -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir -c /opt/idps/requirements.lock /opt/idps
+ENV PATH="/opt/venv/bin:$PATH"
+# Capture on the attack-side interface; start.sh gives it this fixed name.
+ENV IDPS_INTERFACE=lab_attack
+
+COPY lab/sensor/nftables.conf /etc/idps-lab/nftables.conf
+COPY lab/sensor/start.sh /start.sh
+RUN chmod +x /start.sh
+HEALTHCHECK --interval=2s --timeout=2s --retries=15 CMD test -f /tmp/ready
+CMD ["/start.sh"]

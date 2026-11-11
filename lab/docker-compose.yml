@@ -1,14 +1,22 @@
 # Isolated IDPS lab. attacker -> sensor (router, inline) -> victim/dvwa.
 # Run attacks only against these containers.
+#
+# Isolation (see lab/README.md):
+# - The networks are not "internal", because Docker drops packets on internal
+#   networks whose destination is outside the subnet, which stops the sensor
+#   routing. Instead no container has a default route.
+# - attacker, victim and dvwa have no NET_ADMIN. Each shares the network
+#   namespace of a small "*-net" container that sets its routes and firewall
+#   rules (no Docker DNS, no gateway access) and then idles, so nothing inside
+#   an endpoint can undo them.
+# - The sensor forwards only between the two lab subnets (sensor/nftables.conf).
+# - Every setup step fails closed: endpoints start only once their *-net
+#   container reports healthy.
 name: idps-lab
 
 networks:
   attack_net:
     driver: bridge
-    # Not "internal": Docker drops packets on internal networks whose destination
-    # is outside the subnet, which would stop the sensor from routing. Instead,
-    # every container deletes its default route at start, so the lab still has
-    # no route to the outside world.
     ipam:
       config:
         - subnet: 10.10.1.0/24
@@ -27,7 +35,6 @@ services:
       context: ..
       dockerfile: lab/sensor/Dockerfile
     container_name: idps-sensor
-    command: ["sh", "-c", "ip route del default 2>/dev/null; exec sleep infinity"]
     hostname: sensor
     cap_add: [NET_ADMIN, NET_RAW]
     sysctls:
@@ -38,56 +45,78 @@ services:
       victim_net:
         ipv4_address: 10.10.2.2
 
+  attacker-net:
+    build: ./netns
+    container_name: idps-attacker-net
+    hostname: attacker
+    cap_add: [NET_ADMIN]
+    environment:
+      PEER_NET: 10.10.2.0/24
+      SENSOR_IP: 10.10.1.2
+      GATEWAY_IP: 10.10.1.1
+    networks:
+      attack_net:
+        ipv4_address: 10.10.1.10
+    depends_on:
+      sensor: {condition: service_healthy}
+
   attacker:
     # Attack scripts are copied in at build time (no bind mount; see sensor).
     build:
       context: .
       dockerfile: attacker/Dockerfile
     container_name: idps-attacker
-    hostname: attacker
+    network_mode: service:attacker-net
+    depends_on:
+      attacker-net: {condition: service_healthy}
+
+  victim-net:
+    build: ./netns
+    container_name: idps-victim-net
+    hostname: victim
     cap_add: [NET_ADMIN]
     environment:
-      SENSOR_IP: 10.10.1.2
-      VICTIM_NET: 10.10.2.0/24
+      PEER_NET: 10.10.1.0/24
+      SENSOR_IP: 10.10.2.2
+      GATEWAY_IP: 10.10.2.1
     networks:
-      attack_net:
-        ipv4_address: 10.10.1.10
-    depends_on: [sensor]
+      victim_net:
+        ipv4_address: 10.10.2.10
+    depends_on:
+      sensor: {condition: service_healthy}
 
   victim:
     build: ./victim
     container_name: idps-victim
-    hostname: victim
-    cap_add: [NET_ADMIN]
+    network_mode: service:victim-net
     environment:
-      SENSOR_IP: 10.10.2.2
-      ATTACK_NET: 10.10.1.0/24
-      LAB_VICTIM_PASSWORD: ${LAB_VICTIM_PASSWORD:?copy lab/.env.example to lab/.env}
-    networks:
-      victim_net:
-        ipv4_address: 10.10.2.10
-    depends_on: [sensor]
+      # Checked by the victim's entrypoint, so `docker compose down` still works without .env.
+      # Note: anyone with Docker access can read it with `docker inspect`; it is lab-only.
+      LAB_VICTIM_PASSWORD: ${LAB_VICTIM_PASSWORD:-}
+    depends_on:
+      victim-net: {condition: service_healthy}
 
-  dvwa:
-    image: vulnerables/web-dvwa
-    # The image is only published for amd64; on Apple Silicon it runs under emulation.
-    platform: linux/amd64
-    container_name: idps-dvwa
+  dvwa-net:
+    build: ./netns
+    container_name: idps-dvwa-net
     hostname: dvwa
     cap_add: [NET_ADMIN]
-    # Adds the return route, then hands over to the image's own entrypoint.
-    # The image is Debian-based and may lack iproute2; if so the route add is
-    # skipped with a warning (see lab/README.md for the workaround).
-    entrypoint:
-      - /bin/sh
-      - -c
-      - >
-        (ip route add 10.10.1.0/24 via 10.10.2.2 ||
-        route add -net 10.10.1.0 netmask 255.255.255.0 gw 10.10.2.2) ||
-        echo "WARNING: could not add route to attack_net";
-        (ip route del default || route del default) 2>/dev/null;
-        exec /main.sh
+    environment:
+      PEER_NET: 10.10.1.0/24
+      SENSOR_IP: 10.10.2.2
+      GATEWAY_IP: 10.10.2.1
     networks:
       victim_net:
         ipv4_address: 10.10.2.11
-    depends_on: [sensor]
+    depends_on:
+      sensor: {condition: service_healthy}
+
+  dvwa:
+    # Pinned by digest so the target web app never changes between experiments.
+    image: vulnerables/web-dvwa@sha256:dae203fe11646a86937bf04db0079adef295f426da68a92b40e3b181f337daa7
+    # The image is only published for amd64; on Apple Silicon it runs under emulation.
+    platform: linux/amd64
+    container_name: idps-dvwa
+    network_mode: service:dvwa-net
+    depends_on:
+      dvwa-net: {condition: service_healthy}

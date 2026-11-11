@@ -11,20 +11,26 @@ requires-python = ">=3.11"
 dependencies = [
     "numpy",
     "pandas",
+    "pyarrow",
+    "nfstream",
     "scikit-learn",
+    "joblib",
     "xgboost",
     "shap",
     "lime",
     "scapy",
     "fastapi",
     "uvicorn",
+    "websockets",  # uvicorn needs it to serve the /ws/alerts live feed
     "sqlalchemy",
     "pydantic",
     "pydantic-settings",
+    "pyjwt",
+    "argon2-cffi",
 ]
 
 [project.optional-dependencies]
-capture = ["nfstream", "cicflowmeter"]
+capture = ["nfstream"]  # already a core dependency; kept so ".[capture]" still works
 dev = ["pytest", "ruff", "httpx"]
 
 [tool.setuptools.packages.find]

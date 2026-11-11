@@ -1,0 +1,76 @@
+"""Every SOC route except /health and /auth/login must require authentication."""
+
+import pytest
+from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
+
+PUBLIC = {("GET", "/health"), ("POST", "/auth/login")}
+
+
+def flat_routes(routes, prefix=""):
+    """app.routes with included routers expanded (newer FastAPI nests them)."""
+    for route in routes:
+        if hasattr(route, "original_router"):
+            yield from flat_routes(route.original_router.routes,
+                                   prefix + route.include_context.prefix)
+        else:
+            yield prefix, route
+
+
+def http_endpoints(app):
+    for prefix, route in flat_routes(app.routes):
+        if isinstance(route, APIRoute):
+            for method in route.methods - {"HEAD", "OPTIONS"}:
+                yield method, (prefix + route.path)
+
+
+def test_every_non_public_route_requires_a_token(soc_app):
+    client = TestClient(soc_app)
+    endpoints = sorted(http_endpoints(soc_app))
+    assert len(endpoints) > 30  # the walk really found the routers
+    checked = 0
+    for method, path in endpoints:
+        if (method, path) in PUBLIC:
+            continue
+        url = path.replace("{alert_id}", "1").replace("{case_id}", "1") \
+            .replace("{action_id}", "1").replace("{user_id}", "1").replace("{sensor_id}", "1")
+        assert "{" not in url, f"unhandled path parameter in {path}"
+        r = client.request(method, url, json={})
+        assert r.status_code == 401, f"{method} {path} returned {r.status_code} without a token"
+        r = client.request(method, url, json={}, headers={"Authorization": "Bearer junk"})
+        assert r.status_code == 401, f"{method} {path} accepted a junk token"
+        checked += 1
+    assert checked == len(endpoints) - len(PUBLIC)
+
+
+def test_public_routes_are_only_health_and_login(soc_app):
+    client = TestClient(soc_app)
+    assert client.get("/health").status_code == 200
+    # docs are off by default, so they are not an unauthenticated side door
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(path).status_code == 404
+
+
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/admin/users"), ("POST", "/admin/users"), ("GET", "/admin/sensors"),
+    ("POST", "/admin/sensors"), ("GET", "/admin/audit"), ("PATCH", "/admin/users/1/role"),
+    ("POST", "/admin/users/1/disable"), ("POST", "/admin/users/1/enable"),
+    ("POST", "/admin/users/1/reset-password"), ("POST", "/admin/sensors/1/revoke"),
+])
+def test_analysts_cannot_use_admin_routes(client, analyst_headers, method, path):
+    assert client.request(method, path, json={}, headers=analyst_headers).status_code == 403
+
+
+@pytest.mark.parametrize("method,path", [
+    ("POST", "/ingest/alerts"), ("POST", "/ingest/blocks"), ("GET", "/sensor/actions"),
+    ("POST", "/sensor/actions/1/result"),
+])
+def test_sensor_routes_reject_user_tokens(client, analyst_headers, admin_headers, method, path):
+    for headers in (analyst_headers, admin_headers):
+        assert client.request(method, path, json={}, headers=headers).status_code == 401
+
+
+def test_sensor_token_is_not_a_user_token(client, sensor_headers):
+    for path in ("/alerts", "/blocks", "/actions", "/cases", "/metrics/summary", "/topology",
+                 "/admin/users", "/auth/me"):
+        assert client.get(path, headers=sensor_headers).status_code == 401, path

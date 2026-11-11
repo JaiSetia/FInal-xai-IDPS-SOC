@@ -1,11 +1,18 @@
+# Context for the sensor image (repo root). Keep data, secrets and history out.
 .git
 .claude
 **/.env
+**/.env.*
 **/.venv
 **/venv
 **/__pycache__
 **/node_modules
+**/.terraform
+**/*.tfstate*
+**/*.tfvars
+**/*.pem
+**/*.key
 data
-models
 notebooks
-*.pcap
+**/*.pcap
+**/*.pcapng
