@@ -1,5 +1,7 @@
 # Exact versions for the sensor image and dev installs (pip install -c requirements.lock ...).
 # Regenerate: docker exec idps-sensor /opt/venv/bin/pip freeze --exclude idps
+# Does not cover the cloud extra (boto3 needs python-dateutil<3, this file pins 4.0.0):
+# see requirements-cloud.lock.
 annotated-doc==0.0.6
 annotated-types==0.8.0
 anyio==4.16.0

@@ -158,7 +158,11 @@ Run every attack only against your own lab machines.
   Say so in the report and compare it with the lab sensor's latency.
 - Blocking: add a deny rule for the attacker IP to the target subnet's **network ACL** (security groups
   can't deny), removed again when its TTL runs out. The same allowlist and dry-run rules apply.
-- The collector's IAM role may only read the flow logs and edit that one network ACL.
+- The collector's IAM role may only read the flow logs and edit that one network ACL. (One exception:
+  `ec2:DescribeNetworkAcls` cannot be limited to a resource, so it is granted on `*`; it is read-only.)
+- Caddy's certificate is self-issued: Let's Encrypt's validation servers are not in the admin address
+  list that port 80 is restricted to. The database password is generated on the host, not kept in SSM.
+  Details: `infra/README.md`, `docs/cloud.md`.
 
 **Testing in AWS**
 - AWS allows security testing of your own resources for most services without asking first, but

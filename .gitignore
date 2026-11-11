@@ -29,3 +29,10 @@ node_modules/
 !*.tfvars.example
 *.pem
 *.key
+# Terraform plans and crash logs (plans can contain secrets); .terraform.lock.hcl is committed
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+# Cloud collector local state (checkpoint, block state, unsent alerts)
+cloud_state/

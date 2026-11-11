@@ -33,6 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 capture = ["nfstream"]  # already a core dependency; kept so ".[capture]" still works
+cloud = ["boto3"]  # idps.cloud: VPC Flow Logs from S3, network ACL blocking (imported lazily)
 dev = ["pytest", "ruff", "httpx"]
 
 [tool.setuptools.packages.find]
