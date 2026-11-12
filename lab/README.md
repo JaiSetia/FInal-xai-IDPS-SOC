@@ -46,5 +46,30 @@ docker compose cp capture.pcap attacker:/tmp/capture.pcap
 docker compose exec attacker /attacks/replay.sh /tmp/capture.pcap
 ```
 
+## Running detection on the sensor
+
+The sensor image already contains `models/` and `idps/`. Run the live loop on the attack-side
+interface while an attack script runs from the attacker container:
+
+```sh
+docker compose exec \
+    -e IDPS_ALLOWLIST=10.10.1.1,10.10.1.2,10.10.2.0/24 \
+    sensor python -m idps.live --interface lab_attack --model models/friday_xgboost.joblib
+```
+
+`IDPS_ALLOWLIST` must contain the servers you protect (here the whole victim network
+10.10.2.0/24, which includes the victim and DVWA) plus the gateway and the sensor. It is the real
+guarantee that a server is never blocked: a flow can start with the server's reply, so the server
+can appear as the source (the loop corrects the obvious cases, but an allowlist is what you can
+rely on). Do not allowlist the attacker's network.
+
+Dry-run is on by default: detections that would be blocked are logged (`would_block`), nothing is
+changed in nftables. Real blocking needs `IDPS_DRY_RUN=false` and `IDPS_ALLOWLIST` (the lab
+gateways and the sensor itself).
+
+The sensor has no route to the host, so unless a SOC is reachable it writes alerts as JSON lines to
+`/opt/idps/data/processed/live_alerts.jsonl` (read with `docker compose exec sensor cat ...`).
+Settings, metrics and expected latency: [../docs/live.md](../docs/live.md).
+
 Code and scripts are copied into the images (macOS blocks Docker from mounting folders under
 `~/Desktop`), so rebuild after changing them: `docker compose up -d --build`.

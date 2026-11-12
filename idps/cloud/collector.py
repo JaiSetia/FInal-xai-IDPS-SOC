@@ -23,14 +23,9 @@ from __future__ import annotations
 import io
 import json
 import logging
-import math
 import os
 import re
-import ssl
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -38,8 +33,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import joblib
-import numpy as np
-import pandas as pd
 
 from idps.cloud.flowlogs import (
     CLOUD_EXTRACTOR,
@@ -54,28 +47,31 @@ from idps.cloud.nacl import NaclBlocker, _aws_errors
 from idps.respond.engine import ResponseEngine
 from idps.respond.nft import BlockerError
 from idps.respond.policy import BENIGN_LABELS, Action, Detection
+from idps.soc_client import (  # noqa: F401  re-exported: the SOC client moved to idps.soc_client
+    MAX_BATCH,
+    MAX_MS,
+    MAX_OUTBOX_ALERTS,
+    Outbox,
+    Prediction,
+    SocClient,
+    SocError,
+    SocRejectedError,
+    alert_payload,
+    score_frame,
+)
+from idps.soc_client import write_json as _write_json
 
 log = logging.getLogger("idps.cloud.collector")
 
-MAX_BATCH = 500  # soc/api/routes/alerts.py MAX_BATCH
-MAX_MS = 4_102_444_800_000  # soc/api/routes/alerts.py MAX_MS (year 2100)
+CollectorError = SocError  # the cloud collector's name for "outside our control, retry next cycle"
+
 MAX_LOOKBACK_DAYS = 31
 LOG_SUFFIXES = (".log", ".log.gz")
 SETTLE_SECONDS = 300.0  # only objects older than this are read (delivery can lag)
 REMEMBER_WINDOW = timedelta(hours=2)  # processed keys are remembered this long
-MAX_OUTBOX_ALERTS = 20_000  # oldest unsent alerts are dropped beyond this
 SEND_ATTEMPTS = 3
 RETRY_BASE_SECONDS = 2.0
 MAX_CYCLE_BACKOFF_SECONDS = 900.0
-RETRYABLE_4XX = frozenset({408, 425, 429})
-
-
-class CollectorError(RuntimeError):
-    """Something outside our control failed (SOC unreachable, S3 error): retry next cycle."""
-
-
-class SocRejectedError(CollectorError):
-    """The SOC answered with a 4xx: the batch itself is refused, retrying cannot help."""
 
 
 # --- Configuration ----------------------------------------------------------------------------
@@ -190,113 +186,7 @@ def load_cloud_bundle(path: str | Path):
     return bundle
 
 
-@dataclass(frozen=True)
-class Prediction:
-    label: str
-    confidence: float
-    anomaly_score: float | None = None
-
-
-def score_frame(bundle, df: pd.DataFrame) -> list[Prediction]:
-    """Classify every row. Works with any object shaped like idps.detect.bundle.Bundle."""
-    if df.empty:
-        return []
-    X = df[bundle.features].astype(float)
-    proba = np.asarray(bundle.predict_proba(X))
-    classes = [str(c) for c in bundle.label_encoder.classes_]
-    idx = proba.argmax(axis=1)
-    conf = proba[np.arange(len(idx)), idx]
-    anomaly = None
-    if getattr(bundle, "anomaly", None) is not None:
-        anomaly = np.asarray(bundle.anomaly_scores(X), dtype=float)
-    return [
-        Prediction(classes[i], float(c), None if anomaly is None else float(anomaly[n]))
-        for n, (i, c) in enumerate(zip(idx, conf, strict=True))
-    ]
-
-
-# --- Alerts -----------------------------------------------------------------------------------
-
-def alert_payload(row: dict, pred: Prediction) -> dict | None:
-    """One entry of the POST /ingest/alerts body (soc.api.routes.alerts.AlertIn), or None if the
-    row could not be accepted (one bad alert would make the SOC reject the whole batch)."""
-    if not (math.isfinite(pred.confidence) and 0.0 <= pred.confidence <= 1.0):
-        return None
-    if not (0 <= row["start_ms"] <= row["end_ms"] <= MAX_MS):
-        return None
-    payload = {
-        "src_ip": row["src_ip"], "src_port": int(row["src_port"]),
-        "dst_ip": row["dst_ip"], "dst_port": int(row["dst_port"]),
-        "protocol": int(row["protocol"]),
-        "start_ms": int(row["start_ms"]), "end_ms": int(row["end_ms"]),
-        "predicted_class": pred.label[:64].strip() or "unknown",
-        "confidence": round(pred.confidence, 6),
-        # No SHAP for the cloud model yet: an explanation with no features, but it names the source.
-        "explanation": {"predicted_class": pred.label[:64], "confidence": round(pred.confidence, 6),
-                        "output_space": "probability", "top_features": []},
-    }
-    if pred.anomaly_score is not None and math.isfinite(pred.anomaly_score):
-        payload["anomaly_score"] = pred.anomaly_score
-    return payload
-
-
-class SocClient:
-    """POST /ingest/alerts with a sensor token. Standard library only (no extra dependency).
-
-    The SOC's certificate is issued by Caddy's own CA (infra/templates/soc-user-data.sh.tftpl), so
-    pass `ca_file` (IDPS_SOC_CA_FILE): the PEM of that root certificate. Without it the system
-    trust store is used and verification fails for the lab SOC. Verification is never switched off.
-    """
-
-    def __init__(self, url: str, token: str, timeout: float = 15.0, ca_file: str | None = None) -> None:
-        parsed = urllib.parse.urlsplit(url)
-        loopback = parsed.hostname in ("localhost", "127.0.0.1", "::1")
-        if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
-            raise ValueError("IDPS_SOC_URL must be https:// (plain http only for localhost): "
-                             "the sensor token would travel in clear text")
-        self.endpoint = url.rstrip("/") + "/ingest/alerts"
-        self._token = token
-        self.timeout = timeout
-        handlers: list = [_NoRedirect]  # never send the token elsewhere
-        if parsed.scheme == "https":
-            try:
-                context = ssl.create_default_context(cafile=ca_file)
-            except (OSError, ssl.SSLError) as exc:
-                raise ValueError(f"cannot load IDPS_SOC_CA_FILE {ca_file!r}: {exc}") from exc
-            handlers.append(urllib.request.HTTPSHandler(context=context))
-        self._opener = urllib.request.build_opener(*handlers)
-
-    def post_alerts(self, alerts: list[dict]) -> dict:
-        body = json.dumps({"alerts": alerts}).encode()
-        request = urllib.request.Request(
-            self.endpoint, data=body, method="POST",
-            headers={"Authorization": f"Bearer {self._token}",
-                     "Content-Type": "application/json"})
-        try:
-            with self._opener.open(request, timeout=self.timeout) as resp:
-                return json.loads(resp.read() or b"{}")
-        except urllib.error.HTTPError as exc:
-            message = f"SOC rejected the alerts: HTTP {exc.code}"
-            if 400 <= exc.code < 500 and exc.code not in RETRYABLE_4XX:
-                raise SocRejectedError(message) from exc
-            raise CollectorError(message) from exc
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-            raise CollectorError(f"cannot reach the SOC: {exc}") from exc
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None
-
-
 # --- Checkpoint and listing -------------------------------------------------------------------
-
-def _write_json(path: Path, payload) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload))
-    os.replace(tmp, path)
-
 
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
@@ -395,48 +285,6 @@ def list_new_objects(s3, bucket: str, prefix: str, checkpoint: Checkpoint, now: 
         day += timedelta(days=1)
     found.sort(key=lambda o: (o["LastModified"], o["Key"]))
     return found
-
-
-# --- Outbox: alerts waiting for the SOC -------------------------------------------------------
-
-class Outbox:
-    """Batches of alerts that the SOC has not accepted yet, persisted in `outbox.json`."""
-
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self.batches: list[list[dict]] = []
-        try:
-            data = json.loads(self.path.read_text())
-            batches = data["batches"]
-            if not all(isinstance(b, list) for b in batches):
-                raise TypeError("batches must be lists")
-            self.batches = batches
-        except FileNotFoundError:
-            pass
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            log.error("ignoring unreadable outbox %s: %s", self.path, exc)
-
-    def __len__(self) -> int:
-        return sum(len(b) for b in self.batches)
-
-    def add(self, alerts: list[dict]) -> int:
-        """Queue alerts in batches of MAX_BATCH; returns how many old alerts had to be dropped."""
-        for i in range(0, len(alerts), MAX_BATCH):
-            self.batches.append(alerts[i:i + MAX_BATCH])
-        dropped = 0
-        while len(self) > MAX_OUTBOX_ALERTS and self.batches:
-            dropped += len(self.batches.pop(0))
-        if dropped:
-            log.error("outbox over %d alerts: dropped the %d oldest", MAX_OUTBOX_ALERTS, dropped)
-        self.save()
-        return dropped
-
-    def pop_first(self) -> None:
-        self.batches.pop(0)
-        self.save()
-
-    def save(self) -> None:
-        _write_json(self.path, {"version": 1, "batches": self.batches})
 
 
 # --- The collector ----------------------------------------------------------------------------

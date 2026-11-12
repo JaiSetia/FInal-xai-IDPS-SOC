@@ -1,0 +1,207 @@
+# Live detection (`python -m idps.live`)
+
+One process joins the pieces: capture, features, model, SHAP, alert and response engine.
+
+```
+interface or PCAP ─> NFStream flows ─> micro-batch ─> model ─> (non-BENIGN) ─> SHAP top 5 ─┬─> response engine (dry-run by default)
+                                                                                           └─> alert: SOC outbox, or a JSON-lines file
+```
+
+## Run it
+
+Replay a capture (as fast as possible; for demos and tests):
+
+```sh
+python -m idps.live --pcap capture.pcap --model models/friday_xgboost.joblib \
+    --alerts-file data/processed/live_alerts.jsonl
+```
+
+Live, on an interface (root or `CAP_NET_RAW`):
+
+```sh
+python -m idps.live --interface eth0 --model models/friday_xgboost.joblib
+```
+
+Options: `--max-flows N`, `--duration SECONDS` (live only), `--batch-size`, `--batch-seconds`,
+`--min-alert-confidence`, `--alerts-file`. `--model` defaults to `IDPS_MODEL_PATH`
+(`models/model.joblib`). Ctrl-C or SIGTERM flushes the last batch and the outbox, then stops.
+
+Exit codes: 0 normal stop, 1 the capture failed while running, 2 it could not start.
+
+### It refuses to run without a matching model
+
+The bundle is loaded once at startup with the sha256 check and with the capture settings this
+process will use (extractor from `IDPS_EXTRACTOR`, default `nfstream`, idle and active timeout
+120 s). A missing, tampered or unreadable model, or one trained with a different extractor or
+timeouts, ends the run with exit code 2 and a message. There is no "detection without a model" mode.
+
+## Settings
+
+Shared with the rest of the IDPS: `IDPS_MODEL_PATH`, `IDPS_DRY_RUN` (default `true`),
+`IDPS_ALLOWLIST` (see the next section), `IDPS_CONFIDENCE_THRESHOLD` (block threshold, default 0.9),
+`IDPS_BLOCK_TTL_SECONDS`, `IDPS_EXTRACTOR`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `IDPS_LIVE_MIN_ALERT_CONFIDENCE` | 0.5 | Alerts below this are not sent. Blocking is not affected: it uses `IDPS_CONFIDENCE_THRESHOLD` |
+| `IDPS_LIVE_BATCH_SIZE` | 64 | Score a micro-batch at this many flows... |
+| `IDPS_LIVE_BATCH_SECONDS` | 2.0 | ...or this long after its first flow, whichever comes first |
+| `IDPS_LIVE_TOP_K` | 5 | Features per SHAP explanation |
+| `IDPS_LIVE_MAX_EXPLANATIONS_PER_BATCH` | 50 | Alerts per batch that get SHAP; the rest are sent without |
+| `IDPS_LIVE_BACKGROUND_SIZE` | 50 | First BENIGN flows kept as SHAP background (only models that need one) |
+| `IDPS_LIVE_OUTBOX_MAX_ALERTS` | 5000 | Cap of the SOC outbox |
+| `IDPS_LIVE_OUTBOX_FILE` | `data/processed/live_outbox.json` | Where unsent alerts are saved |
+| `IDPS_LIVE_ALERTS_FILE` | `data/processed/live_alerts.jsonl` | Alerts when no SOC is configured (mode 0600) |
+| `IDPS_LIVE_METRICS_SECONDS` | 10 | Period of the metrics log line |
+| `IDPS_SOC_URL` | unset | SOC base URL, `https://` (plain `http://` only for localhost) |
+| `IDPS_SOC_SENSOR_TOKEN` (alias `IDPS_SOC_TOKEN`) | unset | Sensor token from `python -m soc.api create-sensor`. Never logged |
+| `IDPS_SOC_CA_FILE` | unset | PEM of the CA that signed the SOC certificate |
+
+Setting only one of URL and token is an error (exit 2), not a silent fallback to the file. Only
+the `IDPS_`-prefixed names are read; a bare `SOC_URL` or `SOC_TOKEN` in the environment is ignored.
+The token is stripped, must not contain whitespace or control characters (exit 2 otherwise, without
+printing it), is held as a secret and never appears in logs or error messages.
+
+## Protect your servers: the allowlist is the safeguard
+
+**Every server you protect MUST be in `IDPS_ALLOWLIST`**, next to the gateway, DNS, the SOC host
+and the analyst's address, for example `IDPS_ALLOWLIST=10.10.1.1,10.10.2.0/24`. Real blocking
+(`IDPS_DRY_RUN=false`) refuses to start with an empty allowlist, but it cannot know which servers
+matter; you have to say so.
+
+Why: NFStream names the sender of a flow's *first captured packet* `src_ip`. A capture that starts
+mid-conversation, or a long flow cut by the 120 s timeout, yields flows that begin with the
+server's reply, so the server shows up as the source. A full replay of the Friday capture produced
+1,207 such alerts for the victim web server. Two layers handle it:
+
+1. **Reply direction heuristic** (`block_candidate` in `idps/live/detector.py`). For TCP/UDP, if
+   `src_port < dst_port`, `dst_port >= 32768` and `src_port < 32768`, the flow is read as a reply
+   and the response engine is given `dst_ip` (the likely offender) instead of `src_ip`. Ports 0
+   and other protocols use `src_ip`. The alert payload is not changed (it shows the flow as
+   observed). Redirected detections are counted in the metric `reply_direction` and logged.
+2. **The allowlist**, which is the real guarantee. The heuristic can be imitated (an attacker
+   sending from port 80 to a high port makes the *victim* the block candidate) and it can be wrong
+   in the other direction; an allowlisted address is never blocked, whatever the model says.
+
+## Alerts: SOC or file
+
+* **No SOC configured:** each alert is appended to the JSON-lines file, in the format the SOC
+  ingests (`soc/api/routes/alerts.py`), so the file can be posted later.
+* **SOC configured:** alerts go into an in-memory outbox and a sender thread posts them in batches
+  of at most 500 (the SOC's `MAX_BATCH`). If the SOC is down or slow, detection and blocking do not
+  wait: the outbox grows, the sender retries with a pause that doubles up to 60 s. A 4xx answer
+  drops that batch (retrying cannot help) and is counted. At shutdown one last attempt is made
+  and anything unsent is saved to the outbox file, which the next run sends first.
+
+## Bounded memory and what is shed
+
+| Pressure | What happens | Counted as |
+|---|---|---|
+| More alerts in a batch than `MAX_EXPLANATIONS_PER_BATCH` | The most confident ones get SHAP, the rest go out with an empty `top_features` | `dropped.explanations` |
+| Outbox 80% full | No SHAP until it drains, except for detections that can lead to a block (below) | `dropped.explanations` |
+| Outbox over its cap | Oldest alerts are dropped | `dropped.alerts` |
+| Alert file not writable | The alerts of that batch are lost, detection continues | `dropped.alerts` |
+| SOC answers 401/403/404 | The alerts are kept (it is the sensor's URL/token that is wrong), one ERROR line per streak, retried with backoff | `errors.soc_config` |
+| A batch fails unexpectedly | Logged with a traceback, the batch is skipped, detection continues (never re-run: some of its flows may already have reached the response engine) | `errors.batch` |
+| Scoring slower than capture | The flow queue is bounded (4 batches); the reader waits instead of growing memory | none |
+
+A block is always audited with its explanation: whatever the budget, the first `min_flows` (5)
+detections at or above the block threshold per blockable address in a batch are explained, because
+the block is triggered by one of them. That is at most 5 SHAP calls per distinct address per
+batch, and addresses on the allowlist are skipped.
+
+Explanations are shed first because the alert itself (who, what, how sure) matters more than
+its detail. Every shedding event is also logged as a warning.
+
+On stop (SIGINT/SIGTERM, `--duration`) or end of input every flow that already left the capture is
+scored, including the ones queued behind the open batch. With `--max-flows` the queue's surplus
+beyond the limit is discarded and counted (`flows_discarded`). What NFStream still holds inside
+the capture is not processed.
+
+The outbox file and the JSONL file are created with mode 0600 and a symbolic link at their path is
+refused. An outbox file is checked when loaded (batches of JSON objects, re-chunked to 500, trimmed
+to the cap, at most 64 MiB); one that fails is moved to `<name>.corrupt-<timestamp>`, never
+overwritten.
+
+The SHAP background is the first `IDPS_LIVE_BACKGROUND_SIZE` BENIGN flows the loop sees. Tree
+models (XGBoost, random forest) need none, so for them it is unused. A kernel explainer (MLP, slow,
+not meant for live use) is built once from that sample. A fixed first-N sample is simple and
+reproducible, but it reflects the start of the run, not later traffic.
+
+## Metrics
+
+Every `IDPS_LIVE_METRICS_SECONDS` and once at the end, one JSON line on logger `idps.live`:
+
+```json
+{"event": "metrics", "uptime_s": 12.0, "flows": 62, "flows_per_s": 422.1, "alerts": 60,
+ "dry_run": true, "blocks": 1, "would_block": 1, "blocked": 0,
+ "dropped": {"explanations": 0, "alerts": 0, "alerts_rejected_by_soc": 0},
+ "shap_ms_per_alert": {"p50": 0.3, "p95": 0.4, "n": 60},
+ "latency_flow_end_to_alert_s": {"p50": 1.1, "p95": 2.3, "n": 60}, "outbox_pending": 0}
+```
+
+`blocks` is would-block in dry-run and real blocks otherwise. Percentiles cover the last 2000
+samples. The plan's budget is SHAP under 50 ms per alert: XGBoost TreeExplainer takes well under
+1 ms in the replay test; a kernel explainer would not meet it. `latency_flow_end_to_alert_s` is
+recorded in live mode only; in replay the flows are old, so it would just measure the file's age.
+
+## What latency to expect
+
+From the end of a flow to its alert is the wait for the micro-batch (up to `IDPS_LIVE_BATCH_SECONDS`,
+2 s by default) plus a few milliseconds for scoring and SHAP. But **NFStream only emits a flow when
+it ends or when a timeout fires** (idle 120 s, active 120 s). A short scan or SYN flood flow ends
+quickly and alerts within seconds. A long-lived connection, such as a slow attack or a brute-force
+session kept open, is only reported when the 120 s active timeout cuts it, so its alert can be up
+to two minutes late. The timeouts are not changed for this: the model was trained on flows made
+with 120 s timeouts, and different ones would produce different features (the startup check
+refuses a model trained with other settings). If lower latency matters, the fix is to retrain
+with shorter timeouts, not to change them here.
+
+Replay uses the flows' own timestamps for the response engine's windows, so blocks in a replay are
+deterministic.
+
+## Known limitations
+
+* **Heuristic direction.** See above; spoofable, which is why the allowlist is mandatory for servers.
+* **Late alerts for long flows** (NFStream timeouts, see above).
+* **The SHAP background is the first N benign flows**, not a rolling sample.
+* **A batch that fails unexpectedly is skipped**, not retried, so its alerts are lost (counted in
+  `errors.batch`).
+* **A crash loses the unsent alerts** since the last checkpoint (every metrics period) and the
+  batch that was in flight; a clean stop saves them.
+* **The outbox file is rewritten whole** at each checkpoint, which costs a little I/O when the
+  backlog is large.
+* **Dropped alerts are not spilled to disk** when the outbox is over its cap: only counted.
+* **Live interface capture** has been exercised with PCAP replay only; NFStream starts its worker
+  processes from the reader thread, which Python 3.12 reports as a "multi-threaded fork" warning.
+* **Latency is per flow end**, not per packet: nothing is detected before a flow is emitted.
+* **Detection of the same attacker is per flow**: the response engine decides on N flows in a
+  window, so the first flows of an attack are alerted but not yet blocked.
+* **Shutdown race with a slow SOC.** If the sender thread is still posting when the 30 s join
+  times out, the batch in flight may end up neither delivered nor saved. A crash right after a
+  successful post re-sends that batch on restart, and the SOC has no idempotency key, so it may
+  store the same alerts twice.
+* **MLP models only:** the SHAP background for the kernel explainer is fixed when the first BENIGN
+  flow arrives, so it can be a single row.
+* **Collector log text:** in the cloud collector, `CollectorError` is now an alias of `SocError`,
+  so S3 failures are logged as `SocError`. Its behaviour is unchanged.
+* **The reader thread can outlive shutdown** in live capture, because it is blocked inside
+  NFStream. Flows NFStream is still tracking at that moment are never scored.
+* **Redirects from the SOC URL are retried forever** as "SOC unavailable" instead of being
+  reported as a configuration error. Fix the URL.
+* **`live_alerts.jsonl` is not rotated.** Rotate it with logrotate or a similar tool on long runs.
+
+## Friday replay check (12 Nov 2026)
+
+`python -m idps.live --pcap Friday-WorkingHours.pcap --model models/friday_xgboost.joblib`, run
+in dry-run:
+
+- **Speed:** 513,501 flows in about 2 min 16 s, about 3,800–5,000 flows/s. SHAP p50 0.12 ms and
+  p95 0.28 ms per alert, with no errors.
+- **Alerts:** 223,421.
+- **Reply detection:** it moved 1,127 detections to the other side of the flow.
+- **Without the allowlist:** the protected web server 192.168.10.50 still collected 2 would-blocks.
+  These came from scan replies sent from high ports (for example 58080 → 39492), which port
+  numbers alone can't tell apart from real attacks.
+- **With `IDPS_ALLOWLIST=192.168.10.50,192.168.10.3`:** only the attacker 172.16.0.1 and the five
+  bot-infected hosts were marked for blocking.

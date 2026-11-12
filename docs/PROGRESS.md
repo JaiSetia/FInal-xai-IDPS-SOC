@@ -7,9 +7,10 @@ Status as of 12 November 2026. Results on real data are in [results.md](results.
 Most of the system is built and tested: the Docker lab, the feature pipeline, training, explanations,
 automatic blocking, the SOC API and dashboard, both maps, the SOC assistant, and the AWS setup.
 The models are now trained on the real CIC-IDS2017 Friday capture, and the explanations pass the
-faithfulness test. The main piece left to build is the live detection loop that joins everything.
+faithfulness test. The live detection loop now joins everything and has replayed the full Friday
+capture. What's left is running it on the lab sensor with real blocking, then the final tests and the write-up.
 
-- **Automated tests:** 485 pass, 3 skipped (Python), 7 pass (dashboard). Lint and type checks are clean.
+- **Automated tests:** 537 pass, 3 skipped (Python), 7 pass (dashboard). Lint and type checks are clean.
 - **Reviews:** every part was reviewed by a separate reviewer model, and all high and medium findings were fixed.
 
 ## Progress against the milestones
@@ -20,7 +21,7 @@ faithfulness test. The main piece left to build is the live detection loop that 
 | 2–3 | Feature pipeline (PCAP → flows → features, labels) | ✅ Done. Ran on the real Friday PCAP: 513,501 flows, 99.76% matched to labels |
 | 4–5 | Models trained and evaluated | ✅ Done on Friday. Test macro-F1 0.729: PortScan 1.00, DDoS 0.93, Bot 0 (dataset label error, see [results.md](results.md)) |
 | 6 | XAI: SHAP, LIME, global plots, faithfulness | ✅ Done. SHAP removes 38.6× more confidence than random features, LIME 16.9× |
-| 7 | Live detection loop on the sensor | ⬜ Not built (needs a trained model) |
+| 7 | Live detection loop on the sensor | 🟡 Built and tested: capture → model → SHAP → alert (SOC outbox or JSONL) → response engine, replay-tested with `friday_xgboost.joblib` (see [live.md](live.md)). Live interface capture and the sensor container not yet run |
 | 8 | Response engine + nftables | ✅ Built and tested in dry-run. Not yet tried with the real firewall in the lab |
 | 9 | SOC API with JWT auth and WebSocket | ✅ Done |
 | 10–11 | SOC dashboard pages | ✅ Done |
@@ -105,7 +106,7 @@ faithfulness test. The main piece left to build is the live detection loop that 
 ## What's left
 
 **Next build step:**
-- Build the live detection loop (week 7): capture → model → alert → block, using `models/friday_xgboost.joblib`.
+- Run the live detection loop (week 7) on the sensor in the lab: `python -m idps.live --interface lab_attack`.
 
 **Optional, for stronger results:**
 - Add more CIC-IDS2017 days to test across days. Friday alone shows the pipeline works, not that it generalises.

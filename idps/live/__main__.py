@@ -1,0 +1,179 @@
+"""python -m idps.live (--interface NAME | --pcap FILE): detect, explain, alert, respond.
+
+Exit codes: 0 clean stop, 1 runtime failure (e.g. the capture failed), 2 cannot start (bad
+settings, model missing/tampered/trained with a different extractor). Without a model there is no
+detection: it never starts "in a degraded mode".
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import signal
+import sys
+import threading
+
+log = logging.getLogger("idps.live")
+
+SOC_SEND_TIMEOUT = 5.0  # seconds; the sender thread waits this long per POST, detection never does
+
+
+def _fail(message: str, code: int = 2) -> int:
+    print(f"error: {message}", file=sys.stderr)
+    return code
+
+
+def _validation_message(exc) -> str:
+    """A pydantic ValidationError as text WITHOUT the rejected input (it could be the token)."""
+    return "; ".join(f"{'.'.join(str(p) for p in e['loc']) or 'settings'}: {e['msg']}"
+                     for e in exc.errors(include_input=False, include_url=False))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="python -m idps.live", description=__doc__.split("\n\n")[0])
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--interface", metavar="NAME", help="sniff this interface (needs root / CAP_NET_RAW)")
+    source.add_argument("--pcap", metavar="FILE",
+                        help="replay a capture as fast as possible (demos, tests); no flow-end latency is recorded")
+    parser.add_argument("--model", help="model bundle (default: IDPS_MODEL_PATH, models/model.joblib)")
+    parser.add_argument("--max-flows", type=int, help="stop after this many flows")
+    parser.add_argument("--duration", type=float,
+                        help="stop after this many seconds (live capture only)")
+    parser.add_argument("--batch-size", type=int, help="flush a micro-batch at this many flows (IDPS_LIVE_BATCH_SIZE)")
+    parser.add_argument("--batch-seconds", type=float,
+                        help="... or this many seconds after its first flow (IDPS_LIVE_BATCH_SECONDS)")
+    parser.add_argument("--min-alert-confidence", type=float,
+                        help="alert floor (IDPS_LIVE_MIN_ALERT_CONFIDENCE)")
+    parser.add_argument("--alerts-file", help="JSON-lines file used when no SOC is configured (IDPS_LIVE_ALERTS_FILE)")
+    return parser
+
+
+def run(args: argparse.Namespace) -> int:
+    from pydantic import ValidationError
+
+    from idps.capture import (
+        DEFAULT_ACTIVE_TIMEOUT,
+        DEFAULT_IDLE_TIMEOUT,
+        flows_from_interface,
+        flows_from_pcap,
+        select_backend,
+    )
+    from idps.config import get_settings
+    from idps.detect.bundle import load_bundle
+    from idps.features import FEATURE_COLUMNS, extraction_meta
+    from idps.live.config import LiveSettings
+    from idps.live.detector import LiveDetector
+    from idps.live.metrics import Metrics
+    from idps.live.sinks import JsonlSink, SocSink
+    from idps.respond.engine import ResponseEngine
+    from idps.respond.nft import BlockerError
+    from idps.soc_client import Outbox, SocClient
+
+    try:
+        settings = get_settings()  # IDPS_DRY_RUN (default on), IDPS_ALLOWLIST, ...
+        overrides = {k: v for k, v in {
+            "batch_size": args.batch_size, "batch_seconds": args.batch_seconds,
+            "min_alert_confidence": args.min_alert_confidence,
+            "alerts_file": args.alerts_file}.items() if v is not None}
+        live = LiveSettings(**overrides)
+    except ValidationError as exc:
+        return _fail(_validation_message(exc))
+    if args.pcap and not os.path.isfile(args.pcap):
+        return _fail(f"no such capture file: {args.pcap}")
+    if args.duration is not None and args.duration <= 0:
+        return _fail("--duration must be positive")
+    if args.pcap and args.duration is not None:
+        log.warning("--duration is ignored in replay mode (a capture file ends by itself)")
+    if args.max_flows is not None and args.max_flows < 1:
+        return _fail("--max-flows must be at least 1")
+    if live.soc_half_configured:
+        return _fail("set both IDPS_SOC_URL and IDPS_SOC_SENSOR_TOKEN (or neither, to write "
+                     "alerts to a file)")
+
+    # The capture settings the model must have been trained with (see idps/capture).
+    try:
+        backend = select_backend()
+    except (ValueError, RuntimeError) as exc:
+        return _fail(str(exc))
+    meta = extraction_meta(backend, DEFAULT_IDLE_TIMEOUT, DEFAULT_ACTIVE_TIMEOUT)
+
+    model_path = args.model or settings.model_path
+    try:
+        bundle = load_bundle(model_path, live_meta=meta, live_columns=FEATURE_COLUMNS)
+    except Exception as exc:  # noqa: BLE001  unpickling can fail in any way; all of them mean "no model"
+        return _fail(f"cannot load the model {model_path}: {exc}\n"
+                     "refusing to run without a model that matches this capture setup "
+                     f"(extractor {backend}, timeouts {DEFAULT_IDLE_TIMEOUT:g}/{DEFAULT_ACTIVE_TIMEOUT:g} s)")
+    log.info("model %s (%s), classes %s", model_path, bundle.model_name,
+             list(bundle.label_encoder.classes_))
+
+    try:
+        engine = ResponseEngine(settings)
+    except (BlockerError, ValueError, OSError) as exc:
+        return _fail(f"response engine: {exc}")
+
+    metrics = Metrics()
+    outbox = None
+    try:
+        if live.soc_configured:
+            client = SocClient(live.soc_url, live.soc_token.get_secret_value(),
+                               timeout=SOC_SEND_TIMEOUT, ca_file=live.soc_ca_file)
+            outbox = Outbox(live.outbox_file, max_alerts=live.outbox_max_alerts, merge=True)
+            sink = SocSink(client.post_alerts, outbox, metrics)
+            log.info("alerts go to the SOC at %s (unsent ones wait in %s)", live.soc_url,
+                     live.outbox_file)
+        else:
+            sink = JsonlSink(live.alerts_file, metrics)
+            log.info("no SOC configured: alerts are appended to %s", live.alerts_file)
+    except (ValueError, OSError) as exc:
+        return _fail(str(exc))
+
+    try:
+        detector = LiveDetector(bundle, engine, sink, live, meta, metrics=metrics,
+                                live=bool(args.interface),
+                                outbox_capacity=live.outbox_max_alerts if outbox else None)
+    except (TypeError, ValueError) as exc:
+        sink.close()
+        return _fail(f"cannot build the SHAP explainer: {exc}")
+    log.info("dry-run %s; alert floor %.2f, block threshold %.2f", "ON" if engine.dry_run else "OFF",
+             live.min_alert_confidence, settings.confidence_threshold)
+
+    stop = threading.Event()
+
+    def on_signal(signum, _frame):
+        log.info("signal %s: flushing the last batch and the outbox, then stopping", signum)
+        stop.set()
+        signal.signal(signum, signal.SIG_DFL)  # a second signal ends it at once
+
+    previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
+    code = 0
+    try:
+        try:  # startup errors of the capture (bad interface name, ...) are "cannot start"
+            if args.interface:
+                flows = flows_from_interface(args.interface, backend=backend,
+                                             max_flows=args.max_flows, duration=args.duration)
+            else:
+                flows = flows_from_pcap(args.pcap, backend=backend)
+        except (OSError, ValueError, RuntimeError) as exc:
+            return _fail(f"cannot start the capture: {exc}")
+        try:
+            detector.run(flows, stop, max_flows=args.max_flows,
+                         duration=args.duration if args.interface else None)
+        except Exception as exc:  # noqa: BLE001  capture failures (permissions, interface down, ...)
+            code = _fail(f"{type(exc).__name__}: {exc}", 1)
+    finally:
+        sink.close()
+        for s, handler in previous.items():
+            signal.signal(s, handler)
+    return code
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    return run(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

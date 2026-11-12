@@ -18,7 +18,9 @@ class Settings(BaseSettings):
     confidence_threshold: float = Field(default=0.9, ge=0.5, le=1.0)
     # Log what would be blocked instead of touching nftables.
     dry_run: bool = True
-    # Addresses or networks that must never be blocked (gateway, DNS, SOC host, analyst).
+    # Addresses or networks that must never be blocked: gateway, DNS, SOC host, analyst AND the
+    # servers being protected (a flow's source can be a server's reply, so the allowlist is the
+    # real safeguard for them).
     # From the environment: IDPS_ALLOWLIST=10.10.1.1,10.10.2.0/24
     allowlist: Annotated[list[IPvAnyNetwork], NoDecode] = Field(default_factory=list)
 
