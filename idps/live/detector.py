@@ -30,6 +30,7 @@ from idps.detect.bundle import Bundle
 from idps.explain.shap_explain import Explainer
 from idps.features import to_frame
 from idps.live.config import LiveSettings
+from idps.live.heartbeat import is_heartbeat
 from idps.live.metrics import Metrics
 from idps.live.sinks import Sink
 from idps.respond.engine import ResponseEngine
@@ -95,6 +96,7 @@ class LiveDetector:
         outbox_capacity: int | None = None,
         clock: Callable[[], float] = time.monotonic,
         wall: Callable[[], float] = time.time,
+        heartbeat=None,
     ) -> None:
         self.bundle, self.engine, self.sink, self.settings = bundle, engine, sink, settings
         self.meta = meta
@@ -102,6 +104,8 @@ class LiveDetector:
         self.live = live
         self.outbox_capacity = outbox_capacity
         self._clock, self._wall = clock, wall
+        # The running Heartbeat (or None): its flow is dropped before scoring, see heartbeat.py.
+        self.heartbeat = heartbeat
         self._background: list[pd.Series] = []  # the first background_size BENIGN flows seen
         self.explainer: Explainer | None = None
         try:
@@ -189,6 +193,11 @@ class LiveDetector:
         extraction) is logged at error level and counted in `errors.batch`, and detection goes on
         with the next batch. Callers must not retry the same flows: some of them may already have
         reached the response engine."""
+        key = getattr(self.heartbeat, "key", None)
+        kept = [f for f in flows if not is_heartbeat(f, key)] if key else flows
+        if len(kept) != len(flows):
+            self.metrics.add("heartbeat_flows", len(flows) - len(kept))
+        flows = kept
         if not flows:
             return []
         try:

@@ -45,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="... or this many seconds after its first flow (IDPS_LIVE_BATCH_SECONDS)")
     parser.add_argument("--min-alert-confidence", type=float,
                         help="alert floor (IDPS_LIVE_MIN_ALERT_CONFIDENCE)")
+    parser.add_argument("--no-heartbeat", action="store_true",
+                        help="live mode: do not send the 1 s UDP heartbeat that keeps NFStream's flow "
+                             "clock moving on a quiet link (see idps/live/heartbeat.py)")
     parser.add_argument("--alerts-file", help="JSON-lines file used when no SOC is configured (IDPS_LIVE_ALERTS_FILE)")
     return parser
 
@@ -64,6 +67,7 @@ def run(args: argparse.Namespace) -> int:
     from idps.features import FEATURE_COLUMNS, extraction_meta
     from idps.live.config import LiveSettings
     from idps.live.detector import LiveDetector
+    from idps.live.heartbeat import Heartbeat
     from idps.live.metrics import Metrics
     from idps.live.sinks import JsonlSink, SocSink
     from idps.respond.engine import ResponseEngine
@@ -148,9 +152,22 @@ def run(args: argparse.Namespace) -> int:
 
     previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
     code = 0
+    heartbeat = None
     try:
         try:  # startup errors of the capture (bad interface name, ...) are "cannot start"
             if args.interface:
+                # Only NFStream needs it: the scapy backend expires flows on a wall-clock timer.
+                if not args.no_heartbeat and backend == "nfstream":
+                    heartbeat = Heartbeat(args.interface)
+                    try:
+                        heartbeat.start()
+                        detector.heartbeat = heartbeat
+                        log.info("heartbeat: one UDP broadcast per second on %s keeps flows "
+                                 "expiring on a quiet link", args.interface)
+                    except OSError as exc:
+                        heartbeat = None
+                        log.warning("no heartbeat (%s): on a quiet link, finished flows are only "
+                                    "reported when more traffic arrives", exc)
                 flows = flows_from_interface(args.interface, backend=backend,
                                              max_flows=args.max_flows, duration=args.duration)
             else:
@@ -163,6 +180,8 @@ def run(args: argparse.Namespace) -> int:
         except Exception as exc:  # noqa: BLE001  capture failures (permissions, interface down, ...)
             code = _fail(f"{type(exc).__name__}: {exc}", 1)
     finally:
+        if heartbeat is not None:
+            heartbeat.stop()
         sink.close()
         for s, handler in previous.items():
             signal.signal(s, handler)

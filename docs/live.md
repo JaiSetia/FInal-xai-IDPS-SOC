@@ -149,13 +149,33 @@ recorded in live mode only; in replay the flows are old, so it would just measur
 
 From the end of a flow to its alert is the wait for the micro-batch (up to `IDPS_LIVE_BATCH_SECONDS`,
 2 s by default) plus a few milliseconds for scoring and SHAP. But **NFStream only emits a flow when
-it ends or when a timeout fires** (idle 120 s, active 120 s). A short scan or SYN flood flow ends
-quickly and alerts within seconds. A long-lived connection, such as a slow attack or a brute-force
-session kept open, is only reported when the 120 s active timeout cuts it, so its alert can be up
-to two minutes late. The timeouts are not changed for this: the model was trained on flows made
+it ends or when a timeout fires** (idle 120 s, active 120 s). In the lab a port scan's flows (a
+SYN answered by a RST) were not treated as ended: they came out when the 120 s idle timeout fired,
+so their alerts arrived about 121 s after the scan (p50 121.2 s, p95 121.8 s). A long-lived
+connection, such as a slow attack or a brute-force session kept open, is only reported when the
+120 s active timeout cuts it, so its alert is also up to two minutes late. The timeouts are not changed for this: the model was trained on flows made
 with 120 s timeouts, and different ones would produce different features (the startup check
 refuses a model trained with other settings). If lower latency matters, the fix is to retrain
 with shorter timeouts, not to change them here.
+
+### The heartbeat (live mode)
+
+NFStream's flow clock only moves when a packet arrives. On a quiet link (the lab right after an
+attack) nothing arrives, so finished flows are never emitted: a scan followed by silence produced
+no flows at all in 200 s. In live mode with the NFStream backend, the loop therefore sends one
+1-byte UDP broadcast (`255.255.255.255:9`, the discard port) out of the capture interface every
+second. NFStream captures it and its clock moves on.
+
+Only the heartbeat's own flow is dropped before scoring: UDP from the heartbeat socket's own
+address and port to that broadcast address, with nothing coming back. It is counted in
+`heartbeat_flows` and never reaches the model, the SOC or the response engine. Anyone else's
+traffic to `255.255.255.255:9`, an attacker's broadcast flood included, is scored as usual, and
+nothing is dropped when no heartbeat is running.
+
+It needs Linux (`SO_BINDTODEVICE`). If it can't start for good (no such interface, no permission)
+the loop logs a warning and runs without it; if the interface is only down for a while, it keeps
+retrying every second. The scapy backend expires flows on a wall-clock timer and doesn't need
+it. Turn it off with `--no-heartbeat`.
 
 Replay uses the flows' own timestamps for the response engine's windows, so blocks in a replay are
 deterministic.
@@ -172,8 +192,14 @@ deterministic.
 * **The outbox file is rewritten whole** at each checkpoint, which costs a little I/O when the
   backlog is large.
 * **Dropped alerts are not spilled to disk** when the outbox is over its cap: only counted.
-* **Live interface capture** has been exercised with PCAP replay only; NFStream starts its worker
-  processes from the reader thread, which Python 3.12 reports as a "multi-threaded fork" warning.
+* **NFStream starts its worker processes from the reader thread**, which Python 3.12 reports as a
+  "multi-threaded fork" warning. It has caused no problem in replay or in the lab.
+* **The heartbeat is visible on the link**: one 1-byte broadcast a second from the sensor's
+  address, so it shows that a sensor is there. A host that listens on UDP 9 receives it.
+* **The heartbeat needs an IPv4 address on the capture interface.** On a port without one (a
+  SPAN port) Linux may pick another interface's address as the source. Not tested.
+* **Heartbeat flows count towards `--max-flows`**: about one per 120 s, so slightly fewer real
+  flows are scored than the number given.
 * **Latency is per flow end**, not per packet: nothing is detected before a flow is emitted.
 * **Detection of the same attacker is per flow**: the response engine decides on N flows in a
   window, so the first flows of an attack are alerted but not yet blocked.
@@ -205,3 +231,19 @@ in dry-run:
   numbers alone can't tell apart from real attacks.
 - **With `IDPS_ALLOWLIST=192.168.10.50,192.168.10.3`:** only the attacker 172.16.0.1 and the five
   bot-infected hosts were marked for blocking.
+
+## Lab sensor check (12 Nov 2026)
+
+Live capture on `lab_attack` in the Docker lab, `models/friday_xgboost.joblib`,
+`IDPS_ALLOWLIST=10.10.1.1,10.10.1.2,10.10.2.0/24`, attack `lab/attacks/portscan.sh` (nmap SYN scan
+of ports 1–1024 on the victim):
+
+- **Dry-run (180 s):** all 1,024 scan flows were scored and alerted as PortScan, 121 s after the
+  scan (the idle timeout). One `would_block`, for the attacker 10.10.1.10 (confidence 0.99999);
+  no victim, gateway or sensor address was marked. 810 alerts had a SHAP explanation (p95 0.42 ms),
+  214 went out without one because of the 50-per-batch cap. No errors.
+- **Real blocking** (`IDPS_DRY_RUN=false`, `IDPS_BLOCK_TTL_SECONDS=60`): 10.10.1.10 was added to
+  `inet idps blocked4` with a 60 s timeout. While it was blocked the attacker got no answer from
+  DVWA (HTTP timeout) or the victim (ping 100% loss), and the drop rule counted 6 packets. At
+  exactly 60 s nftables removed the element by itself, and DVWA (HTTP 302) and ping worked again.
+- **Without the heartbeat** the same scan produced no flows at all, which is why it exists.

@@ -8,9 +8,10 @@ Most of the system is built and tested: the Docker lab, the feature pipeline, tr
 automatic blocking, the SOC API and dashboard, both maps, the SOC assistant, and the AWS setup.
 The models are now trained on the real CIC-IDS2017 Friday capture, and the explanations pass the
 faithfulness test. The live detection loop now joins everything and has replayed the full Friday
-capture. What's left is running it on the lab sensor with real blocking, then the final tests and the write-up.
+capture, then run live on the lab sensor and blocked a real port scan with nftables. What's left is
+the final tests, the security audit and the write-up.
 
-- **Automated tests:** 537 pass, 3 skipped (Python), 7 pass (dashboard). Lint and type checks are clean.
+- **Automated tests:** 542 pass, 5 skipped (Python), 7 pass (dashboard). Lint and type checks are clean.
 - **Reviews:** every part was reviewed by a separate reviewer model, and all high and medium findings were fixed.
 
 ## Progress against the milestones
@@ -21,8 +22,8 @@ capture. What's left is running it on the lab sensor with real blocking, then th
 | 2–3 | Feature pipeline (PCAP → flows → features, labels) | ✅ Done. Ran on the real Friday PCAP: 513,501 flows, 99.76% matched to labels |
 | 4–5 | Models trained and evaluated | ✅ Done on Friday. Test macro-F1 0.729: PortScan 1.00, DDoS 0.93, Bot 0 (dataset label error, see [results.md](results.md)) |
 | 6 | XAI: SHAP, LIME, global plots, faithfulness | ✅ Done. SHAP removes 38.6× more confidence than random features, LIME 16.9× |
-| 7 | Live detection loop on the sensor | 🟡 Built and tested: capture → model → SHAP → alert (SOC outbox or JSONL) → response engine, replay-tested with `friday_xgboost.joblib` (see [live.md](live.md)). Live interface capture and the sensor container not yet run |
-| 8 | Response engine + nftables | ✅ Built and tested in dry-run. Not yet tried with the real firewall in the lab |
+| 7 | Live detection loop on the sensor | ✅ Done. Capture → model → SHAP → alert → response engine. Replayed the full Friday capture, then ran live on the lab sensor: a port scan was alerted and the attacker marked for blocking (see [live.md](live.md)) |
+| 8 | Response engine + nftables | ✅ Done. Real nftables blocking tested in the lab: the attacker was cut off, and the block expired by itself after its 60 s time limit |
 | 9 | SOC API with JWT auth and WebSocket | ✅ Done |
 | 10–11 | SOC dashboard pages | ✅ Done |
 | 12 | World attack map and topology map | ✅ Done (demo locations until a GeoLite2 key is added) |
@@ -105,9 +106,6 @@ capture. What's left is running it on the lab sensor with real blocking, then th
 
 ## What's left
 
-**Next build step:**
-- Run the live detection loop (week 7) on the sensor in the lab: `python -m idps.live --interface lab_attack`.
-
 **Optional, for stronger results:**
 - Add more CIC-IDS2017 days to test across days. Friday alone shows the pipeline works, not that it generalises.
 
@@ -117,7 +115,6 @@ capture. What's left is running it on the lab sensor with real blocking, then th
 - Add a MaxMind GeoLite2 key so real attacker locations show on the map.
 
 **Can be done now:**
-- Test real blocking with nftables in the Docker lab.
 - Fix the remaining low-priority review findings:
   - map timers during alert floods;
   - back/forward with the Alerts `?ip=` filter;

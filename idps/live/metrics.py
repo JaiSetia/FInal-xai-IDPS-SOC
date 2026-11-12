@@ -24,6 +24,7 @@ COUNTERS = (
     "response_errors",    # the response engine raised on a detection
     "batch_errors",       # a whole batch failed unexpectedly (logged at error level, loop continues)
     "reply_direction",    # detections handed to the response engine with dst_ip (flow was a reply)
+    "heartbeat_flows",    # our own heartbeat flows, dropped before scoring (see idps.live.heartbeat)
     "flows_discarded",    # flows read from the capture but not scored (stop with --max-flows)
     "soc_config_errors",  # SOC answered 401/403/404: alerts kept, configuration needs fixing
 )
@@ -93,6 +94,7 @@ class Metrics:
             "errors": {"explain": counts["explain_errors"], "response": counts["response_errors"],
                        "batch": counts["batch_errors"], "soc_config": counts["soc_config_errors"]},
             "reply_direction": counts["reply_direction"],
+            "heartbeat_flows": counts["heartbeat_flows"],
             "flows_discarded": counts["flows_discarded"],
             "explained": counts["explained"],
             "alerts_sent": counts["alerts_sent"],

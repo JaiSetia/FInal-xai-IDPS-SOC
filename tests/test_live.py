@@ -1,5 +1,6 @@
 """Live detection loop: replay end to end, batching, SOC outage, response safety, shedding."""
 
+import errno
 import json
 import logging
 import os
@@ -775,3 +776,162 @@ def test_startup_errors_of_the_capture_exit_2_and_close_the_sink(model_file, tmp
     assert cli.main(["--interface", "nope0", "--model", str(model_file),
                      "--alerts-file", str(out)]) == 2
     assert "cannot start the capture" in capsys.readouterr().err
+
+
+# --- Heartbeat: keeps NFStream's flow clock moving on a quiet link ------------------------------
+
+HB_KEY = ("10.10.1.2", 50000)
+
+
+def heartbeat_flow(i=0, **changes) -> Flow:
+    from idps.live.heartbeat import HEARTBEAT_DST, HEARTBEAT_PORT
+
+    values = dict.fromkeys((f.name for f in fields(Flow)), 0)
+    start = 1_700_000_000_000 + i * 1000
+    values.update(src_ip=HB_KEY[0], dst_ip=HEARTBEAT_DST, src_port=HB_KEY[1],
+                  dst_port=HEARTBEAT_PORT, protocol=17, start_ms=start, end_ms=start + 120_000,
+                  fwd_packets=120, fwd_bytes=120 * 29)
+    values.update(changes)
+    return Flow(**values)
+
+
+class FakeHeartbeat:
+    key = HB_KEY
+
+
+def test_is_heartbeat_matches_only_our_own_socket():
+    from idps.live.heartbeat import is_heartbeat
+
+    assert is_heartbeat(heartbeat_flow(), HB_KEY)
+    assert not is_heartbeat(heartbeat_flow(), None)  # no heartbeat running: nothing is dropped
+    assert not is_heartbeat(make_flow(9), HB_KEY)  # TCP to port 9
+    assert not is_heartbeat(heartbeat_flow(dst_ip="10.10.2.10"), HB_KEY)
+    assert not is_heartbeat(heartbeat_flow(protocol=6), HB_KEY)
+    # An attacker broadcasting to the same address and port is not our heartbeat ...
+    assert not is_heartbeat(heartbeat_flow(src_ip="10.10.1.10", src_port=4444), HB_KEY)
+    assert not is_heartbeat(heartbeat_flow(src_port=50001), HB_KEY)
+    # ... and neither is a flow that got an answer.
+    assert not is_heartbeat(heartbeat_flow(bwd_packets=1), HB_KEY)
+
+
+def test_heartbeat_flows_never_reach_the_model_sink_or_engine(bundle):
+    sink = ListSink()
+    engine = _RecordingEngine(ResponseEngine(Settings(dry_run=True), blocker=FakeBlocker()))
+    det = detector(bundle, sink, engine=engine)
+    det.heartbeat = FakeHeartbeat()
+    det.run(iter([heartbeat_flow(i) for i in range(5)] + [make_flow(80, i) for i in range(8)]))
+    assert det.metrics.counts["heartbeat_flows"] == 5
+    assert det.metrics.counts["flows"] == 8  # only the real flows were scored
+    assert sink.alerts, "the real flows must produce alerts, or this test checks nothing"
+    assert all(a["dst_ip"] != "255.255.255.255" for a in sink.alerts)
+    assert engine.detections, "the real flows must reach the engine"
+    assert all(d.src_ip != HB_KEY[0] for d in engine.detections)
+
+
+def test_a_batch_of_only_heartbeats_is_a_no_op(bundle):
+    sink = ListSink()
+    det = detector(bundle, sink)
+    det.heartbeat = FakeHeartbeat()
+    assert det.handle_batch([heartbeat_flow(0), heartbeat_flow(1)]) == []
+    assert det.metrics.counts["flows"] == 0 and det.metrics.counts["batch_errors"] == 0
+
+
+def test_foreign_broadcasts_are_scored_and_nothing_is_dropped_without_a_heartbeat(bundle):
+    sink = ListSink()
+    det = detector(bundle, sink)
+    det.heartbeat = FakeHeartbeat()
+    det.handle_batch([heartbeat_flow(0, src_ip="10.10.1.10", src_port=4444)])
+    assert det.metrics.counts["flows"] == 1 and det.metrics.counts["heartbeat_flows"] == 0
+    det.heartbeat = None
+    det.handle_batch([heartbeat_flow(1)])
+    assert det.metrics.counts["flows"] == 2
+
+
+class FakeSocket:
+    def __init__(self, *args, fail=0, error=errno.ENETDOWN):
+        self.options, self.sent, self.closed = [], [], False
+        self.fail, self.error, self.connected = fail, error, None  # fail the first `fail` sends
+
+    def setsockopt(self, level, option, value):
+        self.options.append((option, value))
+
+    def connect(self, address):
+        self.connected = address
+
+    def getsockname(self):
+        return HB_KEY
+
+    def send(self, data):
+        if self.fail > 0:
+            self.fail -= 1
+            raise OSError(self.error, os.strerror(self.error))
+        self.sent.append((data, self.connected))
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def bindtodevice(monkeypatch):
+    import socket
+
+    monkeypatch.setattr(socket, "SO_BINDTODEVICE", 25, raising=False)  # Linux's value
+    return 25
+
+
+def test_heartbeat_sends_broadcasts_bound_to_the_interface_until_stopped(bindtodevice):
+    from idps.live.heartbeat import HEARTBEAT_DST, HEARTBEAT_PAYLOAD, HEARTBEAT_PORT, Heartbeat
+
+    sock = FakeSocket()
+    hb = Heartbeat("lab_attack", interval=0.01, sock_factory=lambda *a: sock)
+    hb.start()
+    assert hb.key == HB_KEY
+    wait_for(lambda: len(sock.sent) >= 3)
+    hb.stop()
+    hb.stop()  # idempotent
+    assert sock.closed
+    assert (bindtodevice, b"lab_attack\0") in sock.options
+    assert set(sock.sent) == {(HEARTBEAT_PAYLOAD, (HEARTBEAT_DST, HEARTBEAT_PORT))}
+
+
+def test_heartbeat_permanent_start_failure_closes_the_socket_and_raises(bindtodevice):
+    from idps.live.heartbeat import Heartbeat
+
+    sock = FakeSocket(fail=1, error=errno.ENODEV)
+    hb = Heartbeat("nope0", sock_factory=lambda *a: sock)
+    with pytest.raises(OSError):
+        hb.start()
+    assert sock.closed
+
+
+def test_heartbeat_temporary_failure_is_retried_and_recovers(bindtodevice, caplog):
+    from idps.live.heartbeat import Heartbeat
+
+    sock = FakeSocket(fail=3)  # the interface is down for the first three tries
+    hb = Heartbeat("lab_attack", interval=0.01, sock_factory=lambda *a: sock)
+    with caplog.at_level(logging.INFO, logger="idps.live"):
+        hb.start()  # does not raise
+        assert hb.failing
+        wait_for(lambda: len(sock.sent) >= 2)
+        hb.stop()
+    assert not hb.failing
+    failures = [r for r in caplog.records if "failed" in r.getMessage()]
+    assert len(failures) == 1  # logged once per streak
+    assert any("works again" in r.getMessage() for r in caplog.records)
+
+
+def test_heartbeat_without_so_bindtodevice_raises_oserror(monkeypatch):
+    import socket
+
+    from idps.live.heartbeat import Heartbeat
+
+    monkeypatch.delattr(socket, "SO_BINDTODEVICE", raising=False)
+    with pytest.raises(OSError, match="Linux only"):
+        Heartbeat("lab_attack", sock_factory=FakeSocket).start()
+
+
+def test_heartbeat_interval_must_be_positive():
+    from idps.live.heartbeat import Heartbeat
+
+    with pytest.raises(ValueError):
+        Heartbeat("lab_attack", interval=0)

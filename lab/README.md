@@ -64,8 +64,22 @@ can appear as the source (the loop corrects the obvious cases, but an allowlist 
 rely on). Do not allowlist the attacker's network.
 
 Dry-run is on by default: detections that would be blocked are logged (`would_block`), nothing is
-changed in nftables. Real blocking needs `IDPS_DRY_RUN=false` and `IDPS_ALLOWLIST` (the lab
-gateways and the sensor itself).
+changed in nftables. Real blocking needs `IDPS_DRY_RUN=false` and `IDPS_ALLOWLIST`. To try it with
+a short block time:
+
+```sh
+docker compose exec \
+    -e IDPS_DRY_RUN=false -e IDPS_BLOCK_TTL_SECONDS=60 \
+    -e IDPS_ALLOWLIST=10.10.1.1,10.10.1.2,10.10.2.0/24 \
+    sensor python -m idps.live --interface lab_attack --model models/friday_xgboost.joblib
+docker compose exec attacker sh /attacks/portscan.sh      # in a second terminal
+docker compose exec sensor nft list table inet idps       # after about 2 minutes
+```
+
+The alerts and the block come about two minutes after the scan: NFStream reports a flow when its
+120 s idle timeout fires. The loop sends a one-second UDP heartbeat out of the interface so this
+also happens on a quiet link (see [../docs/live.md](../docs/live.md)). The block disappears by
+itself when its time runs out. Measured results are in the "Lab sensor check" section there.
 
 The sensor has no route to the host, so unless a SOC is reachable it writes alerts as JSON lines to
 `/opt/idps/data/processed/live_alerts.jsonl` (read with `docker compose exec sensor cat ...`).
