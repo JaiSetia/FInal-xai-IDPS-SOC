@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--keep-duplicates", action="store_true",
                    help="do not drop exact duplicate rows within each split")
     t.add_argument("--allow-low-match-rate", action="store_true",
-                   help="train on label files whose match rate is below 50% or unknown")
+                   help="train on label files whose match rate is below 50%% or unknown")
     t.add_argument("--drop-feature", action="append", default=[], metavar="NAME",
                    help="exclude a model feature, e.g. dst_port (repeatable)")
     t.add_argument("--seed", type=int, default=SEED)
@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("data")
     e.add_argument("--report", default=None)
     e.add_argument("--allow-low-match-rate", action="store_true",
-                   help="evaluate on a label file whose match rate is below 50% or unknown")
+                   help="evaluate on a label file whose match rate is below 50%% or unknown")
     e.set_defaults(fn=_evaluate)
 
     args = parser.parse_args(argv)
