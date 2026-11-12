@@ -10,6 +10,11 @@
 #   rules (no Docker DNS, no gateway access) and then idles, so nothing inside
 #   an endpoint can undo them.
 # - The sensor forwards only between the two lab subnets (sensor/nftables.conf).
+# - The lab SOC sits on a third network, mgmt_net, shared only with the sensor
+#   (lab_mgmt). The sensor never forwards to or from it (rules bound to interfaces,
+#   strict reverse-path filtering), so attacker and victim can't reach the SOC.
+#   The SOC has no default route, accepts only TCP 8443 and opens no connections
+#   (soc/netguard.sh); its port is published on 127.0.0.1 only, for the dashboard.
 # - Every setup step fails closed: endpoints start only once their *-net
 #   container reports healthy.
 name: idps-lab
@@ -25,6 +30,15 @@ networks:
     ipam:
       config:
         - subnet: 10.10.2.0/24
+  mgmt_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.3.0/24
+
+volumes:
+  soc_data: {}     # SOC only: database, JWT secret, TLS keys
+  soc_shared: {}   # ca.pem and the sensor token; read-only in the sensor
 
 services:
   sensor:
@@ -39,11 +53,61 @@ services:
     cap_add: [NET_ADMIN, NET_RAW]
     sysctls:
       net.ipv4.ip_forward: "1"
+      # Drop packets whose source address doesn't belong behind the interface they came in on.
+      net.ipv4.conf.all.rp_filter: "1"
+      net.ipv4.conf.default.rp_filter: "1"
     networks:
       attack_net:
         ipv4_address: 10.10.1.2
       victim_net:
         ipv4_address: 10.10.2.2
+      mgmt_net:
+        ipv4_address: 10.10.3.2
+    volumes:
+      - soc_shared:/run/idps-soc:ro
+
+  soc-net:
+    # Holds the SOC's network namespace: no default route, inbound TCP 8443 only, outbound
+    # replies only (soc/netguard.sh). The SOC itself has no capabilities to change that.
+    build:
+      context: .
+      dockerfile: soc/Dockerfile.net
+    container_name: idps-soc-net
+    hostname: soc
+    cap_add: [NET_ADMIN]
+    ports:
+      - "127.0.0.1:8443:8443"   # the dashboard, from this machine only
+    networks:
+      mgmt_net:
+        ipv4_address: 10.10.3.10
+
+  soc:
+    # Same image as the sensor (it already holds idps/ and soc/), different command. Rebuild
+    # both after code changes: docker compose up -d --build sensor soc
+    build:
+      context: ..
+      dockerfile: lab/sensor/Dockerfile
+    container_name: idps-soc
+    command: ["/opt/idps/lab/soc/start.sh"]
+    network_mode: service:soc-net
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      LAB_SOC_ADMIN_PASSWORD: ${LAB_SOC_ADMIN_PASSWORD:-}
+      # Analysts can't confirm a block of these (the lab gateways, sensor, victims, SOC).
+      IDPS_SOC_BLOCK_ALLOWLIST: 10.10.1.1,10.10.1.2,10.10.2.0/24,10.10.3.0/24
+      # Made-up, clearly labelled map locations for the lab's private addresses.
+      IDPS_SOC_GEO_DEMO: ${LAB_SOC_GEO_DEMO:-false}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import ssl,urllib.request; urllib.request.urlopen('https://127.0.0.1:8443/health', context=ssl.create_default_context(cafile='/run/idps-soc/ca.pem'), timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - soc_data:/var/lib/idps-soc
+      - soc_shared:/run/idps-soc
+    depends_on:
+      soc-net: {condition: service_healthy}
 
   attacker-net:
     build: ./netns

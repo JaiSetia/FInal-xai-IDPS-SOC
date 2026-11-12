@@ -8,10 +8,11 @@ Most of the system is built and tested: the Docker lab, the feature pipeline, tr
 automatic blocking, the SOC API and dashboard, both maps, the SOC assistant, and the AWS setup.
 The models are now trained on the real CIC-IDS2017 Friday capture, and the explanations pass the
 faithfulness test. The live detection loop now joins everything and has replayed the full Friday
-capture, then run live on the lab sensor and blocked a real port scan with nftables. What's left is
-the final tests, the security audit and the write-up.
+capture, then run live on the lab sensor and blocked a real port scan with nftables. The lab now has
+its own SOC, so live alerts, SHAP explanations and blocks show up on the dashboard as they happen.
+What's left is the final tests, the security audit and the write-up.
 
-- **Automated tests:** 542 pass, 5 skipped (Python), 7 pass (dashboard). Lint and type checks are clean.
+- **Automated tests:** 565 pass, 3 skipped (Python), 7 pass (dashboard). Lint and type checks are clean.
 - **Reviews:** every part was reviewed by a separate reviewer model, and all high and medium findings were fixed.
 
 ## Progress against the milestones
@@ -25,7 +26,7 @@ the final tests, the security audit and the write-up.
 | 7 | Live detection loop on the sensor | ✅ Done. Capture → model → SHAP → alert → response engine. Replayed the full Friday capture, then ran live on the lab sensor: a port scan was alerted and the attacker marked for blocking (see [live.md](live.md)) |
 | 8 | Response engine + nftables | ✅ Done. Real nftables blocking tested in the lab: the attacker was cut off, and the block expired by itself after its 60 s time limit |
 | 9 | SOC API with JWT auth and WebSocket | ✅ Done |
-| 10–11 | SOC dashboard pages | ✅ Done |
+| 10–11 | SOC dashboard pages | ✅ Done. Live in the lab: alerts, blocks and metrics update as a real attack happens |
 | 12 | World attack map and topology map | ✅ Done (demo locations until a GeoLite2 key is added) |
 | 13 | SOC assistant: tools, streaming chat, playbooks | ✅ Done. Switched off until a Claude API key is added |
 | 14 | Assistant proposes blocks, analyst confirms | ✅ Done and tested |
@@ -38,6 +39,7 @@ the final tests, the security audit and the write-up.
 
 ### 1. Lab (`lab/`)
 - Three machines in Docker: **attacker → sensor → victim** (DVWA, a deliberately vulnerable web app).
+- A lab SOC on its own management network that only the sensor can reach. The SOC itself can't open any connection.
 - All traffic must pass through the sensor, which runs an nftables firewall.
 - Containers refuse to start if the network isn't isolated (health checks fail closed).
 - Attack scripts in `lab/attacks/` can only target the lab victim.
@@ -136,3 +138,4 @@ the final tests, the security audit and the write-up.
 | 6478f2f | 11 Nov 2026 | Feature pipeline, training, XAI, response engine, SOC |
 | f1f40d7 | 11 Nov 2026 | Attack maps and the SOC assistant |
 | 4539dab | 12 Nov 2026 | AWS infrastructure and cloud flow-log collector |
+| aca37cd | 12 Nov 2026 | Live loop heartbeat, lab sensor run with real blocking |

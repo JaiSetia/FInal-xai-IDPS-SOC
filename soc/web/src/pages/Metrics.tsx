@@ -4,6 +4,7 @@ import { api, query } from "../api/client";
 import { SEVERITIES, type MetricsSummary } from "../api/types";
 import { Card, ErrorText, useLoad } from "../components/common";
 import { percent } from "../format";
+import { useLiveRefresh } from "../useLiveRefresh";
 
 function Stat({ label, value }: { label: string; value: string | number }) {
   return (
@@ -45,7 +46,8 @@ export default function Metrics() {
   const axis = { fill: c.muted, fontSize: 12 };
   const tooltip = { background: c.surface, border: `1px solid ${c.border}` };
   const [hours, setHours] = useState(24);
-  const { data: m, error } = useLoad(() => api<MetricsSummary>(`/metrics/summary${query({ hours })}`), [hours]);
+  const { data: m, error, reload } = useLoad(() => api<MetricsSummary>(`/metrics/summary${query({ hours })}`), [hours]);
+  const live = useLiveRefresh(reload);
 
   const series = (m?.alerts_per_bucket ?? []).map((b) => ({
     t: new Date(b.start).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), count: b.count }));
@@ -61,6 +63,10 @@ export default function Metrics() {
             {[1, 6, 24, 72, 168].map((h) => <option key={h} value={h}>last {h} h</option>)}
           </select>
         </label>
+        <span className="muted">The sensor reports a connection when it ends, so alerts arrive up to about 2 minutes after the traffic.</span>
+        <span className="muted" style={{ marginLeft: "auto" }}>
+          <span className={`live-dot ${live ? "on" : "off"}`} />{live ? "Live" : "Live feed offline"}
+        </span>
       </div>
       <ErrorText error={error} />
       {m && (

@@ -4,11 +4,14 @@ import { api, query } from "../api/client";
 import type { Action, Block, Page } from "../api/types";
 import { Card, ErrorText, useAction, useLoad } from "../components/common";
 import { dateTime } from "../format";
+import { useLiveRefresh } from "../useLiveRefresh";
 
 export default function Blocks() {
   const [active, setActive] = useState(true);
   const { data, error, reload } = useLoad(
     () => api<Page<Block>>(`/blocks${query({ active: active ? true : undefined, limit: 200 })}`), [active]);
+  // A block follows its alerts, and expiries arrive on no feed, so also poll every 10 s.
+  const live = useLiveRefresh(reload, undefined, 10_000);
   const act = useAction();
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -35,6 +38,9 @@ export default function Blocks() {
               <option value="all">all</option>
             </select>
           </label>
+          <span className="muted" style={{ marginLeft: "auto" }}>
+            <span className={`live-dot ${live ? "on" : "off"}`} />{live ? "Live" : "Live feed offline"}
+          </span>
         </div>
         <ErrorText error={error ?? act.error} />
         {notice && <div className="notice">{notice}</div>}

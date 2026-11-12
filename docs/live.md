@@ -128,6 +128,27 @@ models (XGBoost, random forest) need none, so for them it is unused. A kernel ex
 not meant for live use) is built once from that sample. A fixed first-N sample is simple and
 reproducible, but it reflects the start of the run, not later traffic.
 
+## Blocks are reported to the SOC
+
+When the response engine really blocks an address (not dry-run, and the nftables call succeeded),
+the detector queues a block event `{"event": "blocked", "ip", "reason" (max 500 characters),
+"expires_at", "source": "auto"}`. `expires_at` is the absolute end of the block (UTC, ISO), fixed
+when the block is applied, so a report delayed by an outage still shows the right end; the SOC's
+Blocks page shows the block as inactive after it, so no unblock event is sent. `would_block`
+decisions in dry-run and failed blocks are never reported.
+
+Block events travel through the same sender thread as the alerts (detection never waits), in
+batches of at most 100 (`POST /ingest/blocks`), and are retried while the SOC is unavailable, with
+their own backoff: a failing block endpoint never holds back alerts. They wait in a small in-memory
+queue of 1000: beyond that the oldest are dropped and counted in `dropped.blocks`, as are events
+whose block ended before they could be sent (the SOC refuses a past `expires_at`). A permanent 4xx
+answer (for example 422) drops the batch (`dropped.blocks_rejected_by_soc`). Retryable answers
+(5xx, 408/425/429) and configuration errors (401/403/404, e.g. an older SOC without the endpoint)
+keep the events queued; the failure is logged once per streak. The queue is **not** saved in the
+outbox file, so a crash, or a stop while the SOC is down, loses the unsent block reports (the block
+itself stays in nftables and in the audit log). Without a SOC, block events are appended to the
+alerts file as lines with `"type": "block"`.
+
 ## Metrics
 
 Every `IDPS_LIVE_METRICS_SECONDS` and once at the end, one JSON line on logger `idps.live`:
@@ -135,7 +156,8 @@ Every `IDPS_LIVE_METRICS_SECONDS` and once at the end, one JSON line on logger `
 ```json
 {"event": "metrics", "uptime_s": 12.0, "flows": 62, "flows_per_s": 422.1, "alerts": 60,
  "dry_run": true, "blocks": 1, "would_block": 1, "blocked": 0,
- "dropped": {"explanations": 0, "alerts": 0, "alerts_rejected_by_soc": 0},
+ "dropped": {"explanations": 0, "alerts": 0, "alerts_rejected_by_soc": 0, "blocks": 0,
+             "blocks_rejected_by_soc": 0}, "blocks_sent": 0,
  "shap_ms_per_alert": {"p50": 0.3, "p95": 0.4, "n": 60},
  "latency_flow_end_to_alert_s": {"p50": 1.1, "p95": 2.3, "n": 60}, "outbox_pending": 0}
 ```
@@ -187,6 +209,7 @@ deterministic.
 * **The SHAP background is the first N benign flows**, not a rolling sample.
 * **A batch that fails unexpectedly is skipped**, not retried, so its alerts are lost (counted in
   `errors.batch`).
+* **A crash loses the unsent block reports** (they are not in the outbox file).
 * **A crash loses the unsent alerts** since the last checkpoint (every metrics period) and the
   batch that was in flight; a clean stop saves them.
 * **The outbox file is rewritten whole** at each checkpoint, which costs a little I/O when the
@@ -247,3 +270,14 @@ of ports 1–1024 on the victim):
   DVWA (HTTP timeout) or the victim (ping 100% loss), and the drop rule counted 6 packets. At
   exactly 60 s nftables removed the element by itself, and DVWA (HTTP 302) and ping worked again.
 - **Without the heartbeat** the same scan produced no flows at all, which is why it exists.
+
+### With the lab SOC and dashboard (12 Nov 2026)
+
+`lab/sensor/live.sh` with the lab SOC (`lab/README.md`):
+
+- **Dry-run:** a port scan's 1,024 PortScan alerts reached the SOC about 2 minutes after the scan
+  (all sent, none left in the outbox) and appeared on the dashboard's Alerts page through its live
+  feed, each with its SHAP explanation.
+- **Real blocking** (60 s): the block of 10.10.1.10 appeared on the Blocks page without a reload,
+  with the same 60 s end time as nftables, and left the "active only" list when nftables removed
+  it. The Metrics page showed the alerts by class, top source and a detection latency of 2.0 min.

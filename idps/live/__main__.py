@@ -124,7 +124,7 @@ def run(args: argparse.Namespace) -> int:
             client = SocClient(live.soc_url, live.soc_token.get_secret_value(),
                                timeout=SOC_SEND_TIMEOUT, ca_file=live.soc_ca_file)
             outbox = Outbox(live.outbox_file, max_alerts=live.outbox_max_alerts, merge=True)
-            sink = SocSink(client.post_alerts, outbox, metrics)
+            sink = SocSink(client.post_alerts, outbox, metrics, post_blocks=client.post_blocks)
             log.info("alerts go to the SOC at %s (unsent ones wait in %s)", live.soc_url,
                      live.outbox_file)
         else:

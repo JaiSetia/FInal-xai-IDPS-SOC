@@ -27,4 +27,23 @@ if in_c attacker 'ping -c1 -W2 10.10.2.10'; then pass "attacker reaches victim";
 if docker exec idps-attacker ip route get 10.10.2.10 | grep -q 'via 10.10.1.2'; then
   pass "attacker -> victim goes via the sensor"; else fail "attacker -> victim does not go via the sensor"; fi
 
+# The lab SOC (mgmt_net): reachable from the sensor only, and it reaches nothing.
+if in_c soc-net 'ip route | grep -q "^default"'; then fail "soc has a default route"; else pass "soc has no default route"; fi
+for c in attacker victim; do
+  if in_c "$c" 'curl -sk --max-time 3 https://10.10.3.10:8443/health || wget -q -T 3 -O- --no-check-certificate https://10.10.3.10:8443/health || ping -c1 -W2 10.10.3.10'; then
+    fail "$c reaches the SOC"; else pass "$c can't reach the SOC"; fi
+done
+# Exit 0 when the SOC gets any answer (even "connection refused"), 1 when its packets go nowhere.
+soc_reaches() {
+  in_c soc "python -c \"import socket,sys
+try: socket.create_connection(('$1', $2), 3)
+except ConnectionRefusedError: sys.exit(0)
+except OSError: sys.exit(1)\""
+}
+if soc_reaches 10.10.3.2 22; then fail "soc can open connections to the sensor"; else pass "soc can't open connections to the sensor"; fi
+if soc_reaches 10.10.3.1 80; then fail "soc reaches the Docker gateway"; else pass "soc can't reach the Docker gateway"; fi
+if soc_reaches 1.1.1.1 443; then fail "soc reaches the internet"; else pass "soc can't reach the internet"; fi
+if in_c sensor "python -c \"import ssl,urllib.request; urllib.request.urlopen('https://10.10.3.10:8443/health', context=ssl.create_default_context(cafile='/run/idps-soc/ca.pem'), timeout=3)\""; then
+  pass "sensor reaches the SOC over verified TLS"; else fail "sensor can't reach the SOC"; fi
+
 [ "$FAIL" = 0 ] && echo "All isolation checks passed." || { echo "Some checks FAILED: don't run attacks."; exit 1; }

@@ -21,6 +21,9 @@ COUNTERS = (
     "alerts_dropped",     # alerts lost: outbox full or the alert file not writable
     "alerts_sent",        # accepted by the SOC
     "alerts_rejected",    # refused by the SOC (4xx), dropped
+    "blocks_sent",        # block reports accepted by the SOC
+    "blocks_dropped",     # block reports lost: queue full (oldest dropped)
+    "blocks_rejected",    # block reports refused by the SOC (4xx), dropped
     "response_errors",    # the response engine raised on a detection
     "batch_errors",       # a whole batch failed unexpectedly (logged at error level, loop continues)
     "reply_direction",    # detections handed to the response engine with dst_ip (flow was a reply)
@@ -90,7 +93,9 @@ class Metrics:
             "blocked": counts["blocked"],
             "dropped": {"explanations": counts["explanations_shed"],
                         "alerts": counts["alerts_dropped"],
-                        "alerts_rejected_by_soc": counts["alerts_rejected"]},
+                        "alerts_rejected_by_soc": counts["alerts_rejected"],
+                        "blocks": counts["blocks_dropped"],
+                        "blocks_rejected_by_soc": counts["blocks_rejected"]},
             "errors": {"explain": counts["explain_errors"], "response": counts["response_errors"],
                        "batch": counts["batch_errors"], "soc_config": counts["soc_config_errors"]},
             "reply_direction": counts["reply_direction"],
@@ -98,6 +103,7 @@ class Metrics:
             "flows_discarded": counts["flows_discarded"],
             "explained": counts["explained"],
             "alerts_sent": counts["alerts_sent"],
+            "blocks_sent": counts["blocks_sent"],
             "outbox_pending": pending,
             "shap_ms_per_alert": shap,
             "latency_flow_end_to_alert_s": latency,

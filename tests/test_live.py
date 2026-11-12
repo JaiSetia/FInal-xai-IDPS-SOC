@@ -4,9 +4,11 @@ import errno
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import fields
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -96,6 +98,10 @@ def make_flow(dst_port=80, i=0, end_ms=None) -> Flow:
 class ListSink:
     def __init__(self):
         self.alerts = []
+        self.blocks = []
+
+    def submit_blocks(self, events):
+        self.blocks.extend(events)
 
     def submit(self, alerts):
         self.alerts.extend(alerts)
@@ -935,3 +941,281 @@ def test_heartbeat_interval_must_be_positive():
 
     with pytest.raises(ValueError):
         Heartbeat("lab_attack", interval=0)
+
+
+# --- block reports to the SOC -----------------------------------------------------------------
+
+def _run_attack(bundle, sink, tmp_path, dry_run, n=5, blocker=None):
+    blocker = blocker or FakeBlocker()
+    engine = ResponseEngine(Settings(dry_run=dry_run, allowlist=["10.10.1.1"]), blocker=blocker)
+    detector(bundle, sink, engine=engine).run(
+        flows_from_pcap(write_pcap(tmp_path / "a.pcap", attack_packets(n=n))))
+    return blocker
+
+
+def test_a_real_block_is_reported_once_with_the_right_fields(bundle, tmp_path):
+    sink = ListSink()
+    blocker = _run_attack(bundle, sink, tmp_path, dry_run=False)
+    assert blocker.blocked == [CLIENT]
+    assert len(sink.blocks) == 1
+    ev = sink.blocks[0]
+    assert set(ev) == {"event", "ip", "reason", "expires_at", "source"}
+    assert (ev["event"], ev["ip"], ev["source"]) == ("blocked", CLIENT, "auto")
+    assert re.fullmatch(r"\d+ flows >= [\d.]+ confidence \(.+\) in \d+s", ev["reason"])
+    expires = datetime.fromisoformat(ev["expires_at"])
+    assert expires.tzinfo is not None
+    assert abs((expires - datetime.now(UTC)).total_seconds() - 900) < 30
+
+
+def test_dry_run_reports_no_block(bundle, tmp_path):
+    sink = ListSink()
+    _run_attack(bundle, sink, tmp_path, dry_run=True)
+    assert sink.blocks == []
+
+
+def test_a_failed_block_is_not_reported(bundle, tmp_path):
+    from idps.respond.nft import BlockerError
+
+    class Failing(FakeBlocker):
+        def block(self, ip, ttl_seconds):
+            raise BlockerError("nft failed")
+
+    sink = ListSink()
+    _run_attack(bundle, sink, tmp_path, dry_run=False, n=3, blocker=Failing())
+    assert sink.blocks == []
+
+
+_NOW = datetime.now(UTC)  # fixed, so that equal events compare equal
+
+
+def _event(ip="203.0.113.7", seconds=600):
+    return {"event": "blocked", "ip": ip, "reason": "r", "source": "auto",
+            "expires_at": (_NOW + timedelta(seconds=seconds)).isoformat()}
+
+
+def test_blocks_are_retried_while_the_soc_is_down_then_delivered():
+    metrics, up, sent = Metrics(), [False], []
+
+    def post_blocks(batch):
+        if not up[0]:
+            raise SocError("down")
+        sent.extend(batch)
+        return {}
+
+    sink = SocSink(lambda b: {}, Outbox(None), metrics, start=False, post_blocks=post_blocks)
+    sink.submit_blocks([_event()])
+    assert sink.drain() is False and sent == [] and metrics.counts["blocks_sent"] == 0
+    up[0] = True
+    assert sink.drain() is True
+    assert sent == [_event()] and metrics.counts["blocks_sent"] == 1
+    assert sink._pending_blocks() == 0
+
+
+def test_a_refused_block_batch_is_dropped_and_counted():
+    metrics, calls = Metrics(), []
+
+    def refuse(batch):
+        calls.append(batch)
+        raise SocRejectedError("HTTP 422", 422)
+
+    sink = SocSink(lambda b: {}, Outbox(None), metrics, start=False, post_blocks=refuse)
+    sink.submit_blocks([_event(), _event("203.0.113.8")])
+    assert sink.drain() is True
+    assert len(calls) == 1 and metrics.counts["blocks_rejected"] == 2
+    assert sink._pending_blocks() == 0
+
+
+def test_the_block_queue_is_bounded_and_drops_the_oldest(monkeypatch):
+    from idps.live import sinks
+
+    monkeypatch.setattr(sinks, "MAX_QUEUED_BLOCKS", 3)
+    metrics, sent = Metrics(), []
+    sink = SocSink(lambda b: {}, Outbox(None), metrics, start=False,
+                   post_blocks=lambda b: sent.extend(b) or {})
+    sink.submit_blocks([_event(f"203.0.113.{i}") for i in range(5)])
+    assert metrics.counts["blocks_dropped"] == 2
+    sink.drain()
+    assert [e["ip"] for e in sent] == ["203.0.113.2", "203.0.113.3", "203.0.113.4"]
+    assert Metrics().snapshot()["dropped"]["blocks"] == 0
+    assert metrics.snapshot()["dropped"]["blocks"] == 2
+
+
+def test_block_batches_respect_the_soc_limit():
+    from idps.soc_client import MAX_BLOCK_EVENTS
+
+    sizes = []
+    sink = SocSink(lambda b: {}, Outbox(None), Metrics(), start=False,
+                   post_blocks=lambda b: sizes.append(len(b)) or {})
+    sink.submit_blocks([_event() for _ in range(MAX_BLOCK_EVENTS + 5)])
+    sink.drain()
+    assert sizes == [MAX_BLOCK_EVENTS, 5]
+
+
+def test_the_jsonl_sink_writes_blocks_with_a_type(tmp_path):
+    sink = JsonlSink(tmp_path / "alerts.jsonl", Metrics())
+    sink.submit_blocks([_event()])
+    sink.close()
+    assert lines(tmp_path / "alerts.jsonl") == [{"type": "block", **_event()}]
+
+
+def test_the_client_posts_blocks_to_ingest_blocks_with_the_bearer_token(monkeypatch):
+    from idps.soc_client import SocClient
+
+    client = SocClient("http://127.0.0.1:9", "idps_sensor_TOK")
+    seen = {}
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"blocked": 1, "unblocked": 0}'
+
+    def fake_open(request, timeout):
+        seen.update(url=request.full_url, auth=request.get_header("Authorization"),
+                    body=json.loads(request.data))
+        return Resp()
+
+    monkeypatch.setattr(client._opener, "open", fake_open)
+    assert client.post_blocks([_event()]) == {"blocked": 1, "unblocked": 0}
+    assert seen == {"url": "http://127.0.0.1:9/ingest/blocks",
+                    "auth": "Bearer idps_sensor_TOK", "body": {"events": [_event()]}}
+    with pytest.raises(SocRejectedError):
+        client.post_blocks([_event()] * 101)
+
+
+def test_a_block_reported_by_the_sensor_client_shows_in_the_socs_blocks_list(
+        client, sensor_token, analyst_headers, monkeypatch):
+    from idps.soc_client import SocClient
+
+    sensor = SocClient("http://127.0.0.1:9", sensor_token)
+
+    def via_testclient(request, timeout):
+        r = client.post(request.full_url.removeprefix("http://127.0.0.1:9"),
+                        content=request.data, headers=dict(request.header_items()))
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return r.content
+        assert r.status_code == 201, r.text
+        return Resp()
+
+    monkeypatch.setattr(sensor._opener, "open", via_testclient)
+    sink = SocSink(sensor.post_alerts, Outbox(None), Metrics(), start=False,
+                   post_blocks=sensor.post_blocks)
+    sink.submit_blocks([_event()])
+    assert sink.drain() is True
+    items = client.get("/blocks", headers=analyst_headers).json()["items"]
+    assert [(b["ip"], b["source"]) for b in items] == [("203.0.113.7", "auto")]
+
+
+@pytest.mark.parametrize("error", [
+    SocRejectedError("HTTP 404", 404), SocRejectedError("HTTP 401", 401), SocError("HTTP 500"),
+])
+def test_alerts_are_delivered_while_the_block_endpoint_fails(error, caplog):
+    metrics, got = Metrics(), []
+
+    def failing(batch):
+        raise error
+
+    sink = SocSink(lambda b: got.extend(b) or {}, Outbox(None), metrics, start=False,
+                   post_blocks=failing)
+    sink.submit([{"a": 1}])
+    sink.submit_blocks([_event()])
+    with caplog.at_level(logging.ERROR, logger="idps.live"):
+        assert sink.drain() is False  # blocks are still queued
+        assert sink.drain() is False
+    assert got == [{"a": 1}] and metrics.counts["alerts_sent"] == 1
+    assert sink._pending_blocks() == 1 and metrics.counts["blocks_sent"] == 0
+    assert len([r for r in caplog.records if "block reports cannot be delivered" in r.message]) == 1
+
+
+def test_a_block_failure_streak_is_logged_again_after_a_success(caplog):
+    state = {"fail": True}
+
+    def post_blocks(batch):
+        if state["fail"]:
+            raise SocError("down")
+        return {}
+
+    sink = SocSink(lambda b: {}, Outbox(None), Metrics(), start=False, post_blocks=post_blocks)
+    sink.submit_blocks([_event()])
+    with caplog.at_level(logging.ERROR, logger="idps.live"):
+        sink.drain()
+        state["fail"] = False
+        sink.drain()
+        state["fail"] = True
+        sink.submit_blocks([_event()])
+        sink.drain()
+    assert len([r for r in caplog.records if "cannot be delivered" in r.message]) == 2
+
+
+def test_close_with_pending_blocks_logs_the_loss(caplog):
+    def down(batch):
+        raise SocError("down")
+
+    sink = SocSink(lambda b: {}, Outbox(None), Metrics(), start=False, post_blocks=down)
+    sink.submit_blocks([_event(), _event("203.0.113.8")])
+    with caplog.at_level(logging.WARNING, logger="idps.live"):
+        sink.close()
+    assert "2 block report(s) were not delivered and are lost" in caplog.text
+
+
+def test_requeue_overflow_drops_the_oldest_and_counts(monkeypatch, caplog):
+    from idps.live import sinks
+
+    monkeypatch.setattr(sinks, "MAX_QUEUED_BLOCKS", 3)
+    metrics = Metrics()
+    sink = SocSink(lambda b: {}, Outbox(None), metrics, start=False,
+                   post_blocks=lambda b: (_ for _ in ()).throw(SocError("down")))
+    sink.submit_blocks([_event("203.0.113.1"), _event("203.0.113.2")])
+
+    # While a batch is in flight, new events queue up; the failed batch then goes back in front.
+    def failing(batch):
+        sink.submit_blocks([_event("203.0.113.3"), _event("203.0.113.4")])
+        raise SocError("down")
+
+    sink.post_blocks = failing
+    with caplog.at_level(logging.ERROR, logger="idps.live"):
+        sink.drain()
+    assert metrics.counts["blocks_dropped"] == 1
+    assert [e["ip"] for e in sink._blocks] == ["203.0.113.2", "203.0.113.3", "203.0.113.4"]
+    assert "dropped the 1 oldest" in caplog.text
+
+
+def test_expired_block_events_are_dropped_before_posting_and_counted(caplog):
+    metrics, sent = Metrics(), []
+    sink = SocSink(lambda b: {}, Outbox(None), metrics, start=False,
+                   post_blocks=lambda b: sent.extend(b) or {})
+    gone, alive = _event("203.0.113.1", seconds=-10), _event("203.0.113.2")
+    sink.submit_blocks([gone, alive])
+    with caplog.at_level(logging.WARNING, logger="idps.live"):
+        assert sink.drain() is True
+    assert sent == [alive] and metrics.counts["blocks_dropped"] == 1
+    assert "already ended" in caplog.text
+
+
+def test_a_failing_block_file_counts_blocks_not_alerts(tmp_path):
+    sink = JsonlSink(tmp_path / "alerts.jsonl", Metrics())
+    sink._file.close()
+    sink.submit_blocks([_event()])
+    assert sink.metrics.counts["blocks_dropped"] == 1 and sink.metrics.counts["alerts_dropped"] == 0
+
+
+def test_blocks_without_a_block_sender_are_counted_and_logged_once(caplog):
+    metrics = Metrics()
+    sink = SocSink(lambda b: {}, Outbox(None), metrics, start=False)
+    with caplog.at_level(logging.WARNING, logger="idps.live"):
+        sink.submit_blocks([_event()])
+        sink.submit_blocks([_event()])
+    assert metrics.counts["blocks_dropped"] == 2
+    assert caplog.text.count("no post_blocks") == 1

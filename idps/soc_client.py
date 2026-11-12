@@ -25,6 +25,7 @@ import pandas as pd
 log = logging.getLogger("idps.soc_client")
 
 MAX_BATCH = 500  # soc/api/routes/alerts.py MAX_BATCH: the SOC refuses a bigger POST
+MAX_BLOCK_EVENTS = 100  # soc/api/routes/blocks.py MAX_EVENTS (idps does not import soc: mirrored)
 MAX_MS = 4_102_444_800_000  # soc/api/routes/alerts.py MAX_MS (year 2100)
 MAX_OUTBOX_ALERTS = 20_000  # default: oldest unsent alerts are dropped beyond this
 RETRYABLE_4XX = frozenset({408, 425, 429})
@@ -133,7 +134,8 @@ class SocClient:
         if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
             raise ValueError("IDPS_SOC_URL must be https:// (plain http only for localhost): "
                              "the sensor token would travel in clear text")
-        self.endpoint = url.rstrip("/") + "/ingest/alerts"
+        self.base = url.rstrip("/")
+        self.endpoint = self.base + "/ingest/alerts"
         self._token = validate_token(token)
         self.timeout = timeout
         handlers: list = [_NoRedirect]  # never send the token elsewhere
@@ -149,16 +151,26 @@ class SocClient:
         """POST one batch (at most MAX_BATCH alerts; the Outbox hands out batches of that size)."""
         if len(alerts) > MAX_BATCH:  # the SOC would answer 422; never send it
             raise SocRejectedError(f"at most {MAX_BATCH} alerts per POST, got {len(alerts)}", 422)
-        body = json.dumps({"alerts": alerts}).encode()
+        return self._post("/ingest/alerts", {"alerts": alerts}, "alerts")
+
+    def post_blocks(self, events: list[dict]) -> dict:
+        """POST one batch of block events (at most MAX_BLOCK_EVENTS) to /ingest/blocks."""
+        if len(events) > MAX_BLOCK_EVENTS:
+            raise SocRejectedError(
+                f"at most {MAX_BLOCK_EVENTS} block events per POST, got {len(events)}", 422)
+        return self._post("/ingest/blocks", {"events": events}, "block events")
+
+    def _post(self, path: str, payload: dict, what: str) -> dict:
+        body = json.dumps(payload).encode()
         request = urllib.request.Request(
-            self.endpoint, data=body, method="POST",
+            self.base + path, data=body, method="POST",
             headers={"Authorization": f"Bearer {self._token}",
                      "Content-Type": "application/json"})
         try:
             with self._opener.open(request, timeout=self.timeout) as resp:
                 body = resp.read()
         except urllib.error.HTTPError as exc:
-            message = f"SOC rejected the alerts: HTTP {exc.code}"
+            message = f"SOC rejected the {what}: HTTP {exc.code}"
             if 400 <= exc.code < 500 and exc.code not in RETRYABLE_4XX:
                 raise SocRejectedError(message, exc.code) from exc
             error = SocError(message)

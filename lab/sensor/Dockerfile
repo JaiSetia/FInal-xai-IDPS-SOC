@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip python3-venv tcpdump tcpreplay nftables iproute2 iputils-ping \
+        python3 python3-pip python3-venv tcpdump tcpreplay nftables iproute2 iputils-ping openssl \
     && rm -rf /var/lib/apt/lists/*
 
 # Build context is the repo root (see lab/docker-compose.yml); .dockerignore keeps
@@ -23,6 +23,9 @@ ENV IDPS_INTERFACE=lab_attack
 
 COPY lab/sensor/nftables.conf /etc/idps-lab/nftables.conf
 COPY lab/sensor/start.sh /start.sh
-RUN chmod +x /start.sh
+# The same image runs the lab SOC (lab/soc/start.sh) with a different command.
+COPY lab/sensor/live.sh /usr/local/bin/live.sh
+COPY lab/soc ./lab/soc
+RUN chmod +x /start.sh /usr/local/bin/live.sh ./lab/soc/start.sh
 HEALTHCHECK --interval=2s --timeout=2s --retries=15 CMD test -f /tmp/ready
 CMD ["/start.sh"]

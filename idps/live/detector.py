@@ -23,6 +23,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 
@@ -278,6 +279,23 @@ class LiveDetector:
             return
         if decision.action is Action.BLOCK:
             self.metrics.add("would_block" if self.engine.dry_run else "blocked")
+            if not self.engine.dry_run:  # the engine returns BLOCK only after the blocker succeeded
+                self._report_block(decision)
+
+    def _report_block(self, decision) -> None:
+        # An absolute expiry, taken now: the SOC would count a ttl from the moment it receives the
+        # report, which is wrong for a report delayed by an outage.
+        event = {"event": "blocked", "ip": decision.ip, "reason": (decision.reason or "")[:500],
+                 "source": "auto"}
+        if decision.ttl_seconds:
+            event["expires_at"] = (datetime.now(UTC)
+                                   + timedelta(seconds=decision.ttl_seconds)).isoformat()
+        try:
+            self.sink.submit_blocks([event])
+        except Exception as exc:  # noqa: BLE001  reporting must never stop detection
+            log.error("cannot queue the block report for %s: %s: %s", decision.ip,
+                      type(exc).__name__, exc)
+            self.metrics.add("blocks_dropped")
 
     def _submit(self, alerts: list[dict]) -> None:
         try:
