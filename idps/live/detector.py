@@ -277,6 +277,8 @@ class LiveDetector:
                       type(exc).__name__, exc)
             self.metrics.add("response_errors")
             return
+        if decision.action is Action.SUPPRESSED:
+            self.metrics.add("blocks_suppressed")
         if decision.action is Action.BLOCK:
             self.metrics.add("would_block" if self.engine.dry_run else "blocked")
             if not self.engine.dry_run:  # the engine returns BLOCK only after the blocker succeeded

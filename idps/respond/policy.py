@@ -14,6 +14,7 @@ from ipaddress import IPv4Address, IPv6Address, ip_address
 
 from idps.config import Settings
 
+MAX_IP_TEXT = 45  # the longest textual IPv6 address (with an embedded IPv4 tail)
 BENIGN_LABELS = frozenset({"benign", "normal"})
 
 
@@ -25,6 +26,7 @@ class Action(str, Enum):
     BENIGN = "benign"
     ALLOWLISTED = "allowlisted"  # never blocked, whatever the model says
     INVALID = "invalid"  # not a blockable address
+    SUPPRESSED = "suppressed_by_analyst"  # would block, but an analyst unblocked it recently
 
 
 @dataclass(frozen=True)
@@ -49,14 +51,27 @@ class Decision:
 
 
 def normalise_ip(value: str) -> IPv4Address | IPv6Address | None:
-    """Parse an address; unwrap IPv4-mapped IPv6 so ::ffff:10.0.0.1 can't dodge the allowlist."""
-    try:
-        addr = ip_address(value.strip())
-    except (ValueError, AttributeError):
+    """Parse an address; unwrap IPv4-mapped IPv6 so ::ffff:10.0.0.1 can't dodge the allowlist.
+
+    Scoped addresses (`fe80::1%eth0`) are refused, and so is anything over MAX_IP_TEXT characters:
+    the result is printed into nft commands, and the scope text is arbitrary. The address is
+    rebuilt from its integer value, so what comes back never carries a scope."""
+    if not isinstance(value, str):
         return None
-    if isinstance(addr, IPv6Address) and addr.ipv4_mapped is not None:
-        return addr.ipv4_mapped
-    return addr
+    value = value.strip()
+    if len(value) > MAX_IP_TEXT or "%" in value:
+        return None
+    try:
+        addr = ip_address(value)
+    except ValueError:
+        return None
+    if isinstance(addr, IPv6Address):
+        if addr.scope_id is not None:
+            return None
+        if addr.ipv4_mapped is not None:
+            return addr.ipv4_mapped
+        return IPv6Address(int(addr))
+    return IPv4Address(int(addr))
 
 
 class ResponsePolicy:

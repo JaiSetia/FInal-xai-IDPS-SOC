@@ -19,6 +19,9 @@ log = logging.getLogger("idps.live")
 SOC_SEND_TIMEOUT = 5.0  # seconds; the sender thread waits this long per POST, detection never does
 
 
+ACTION_STOP_TIMEOUT = 15.0  # a round in progress finishes its current request, then stops
+
+
 def _fail(message: str, code: int = 2) -> int:
     print(f"error: {message}", file=sys.stderr)
     return code
@@ -65,6 +68,7 @@ def run(args: argparse.Namespace) -> int:
     from idps.config import get_settings
     from idps.detect.bundle import load_bundle
     from idps.features import FEATURE_COLUMNS, extraction_meta
+    from idps.live.actions import ActionPoller
     from idps.live.config import LiveSettings
     from idps.live.detector import LiveDetector
     from idps.live.heartbeat import Heartbeat
@@ -119,6 +123,7 @@ def run(args: argparse.Namespace) -> int:
 
     metrics = Metrics()
     outbox = None
+    client = None
     try:
         if live.soc_configured:
             client = SocClient(live.soc_url, live.soc_token.get_secret_value(),
@@ -153,6 +158,7 @@ def run(args: argparse.Namespace) -> int:
     previous = {s: signal.signal(s, on_signal) for s in (signal.SIGINT, signal.SIGTERM)}
     code = 0
     heartbeat = None
+    poller = None
     try:
         try:  # startup errors of the capture (bad interface name, ...) are "cannot start"
             if args.interface:
@@ -174,6 +180,12 @@ def run(args: argparse.Namespace) -> int:
                 flows = flows_from_pcap(args.pcap, backend=backend)
         except (OSError, ValueError, RuntimeError) as exc:
             return _fail(f"cannot start the capture: {exc}")
+        # Analyst actions only make sense on a live sensor: a replay with IDPS_DRY_RUN=false
+        # applies real blocks, and a capture file has no analyst waiting on it.
+        if client is not None and args.interface:
+            poller = ActionPoller(client, engine, sink, metrics, interval=live.action_poll_seconds)
+            poller.start()
+            log.info("polling the SOC for analyst actions every %g s", live.action_poll_seconds)
         try:
             detector.run(flows, stop, max_flows=args.max_flows,
                          duration=args.duration if args.interface else None)
@@ -182,6 +194,8 @@ def run(args: argparse.Namespace) -> int:
     finally:
         if heartbeat is not None:
             heartbeat.stop()
+        if poller is not None:
+            poller.stop(timeout=ACTION_STOP_TIMEOUT)  # before the sink closes: it queues block events
         sink.close()
         for s, handler in previous.items():
             signal.signal(s, handler)

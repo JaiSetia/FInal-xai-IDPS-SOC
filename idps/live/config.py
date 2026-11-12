@@ -31,6 +31,10 @@ class LiveSettings(BaseSettings):
     # Without a SOC, alerts are appended here as JSON lines.
     alerts_file: str = "data/processed/live_alerts.jsonl"
 
+    # How often the sensor asks the SOC for analyst actions (block_ip / unblock_ip); backs off
+    # while the SOC is unreachable. Only used when a SOC is configured.
+    action_poll_seconds: float = Field(default=5.0, ge=1.0, le=300.0)
+
     metrics_seconds: float = Field(default=10.0, gt=0.0)
 
     soc_url: str | None = Field(default=None, validation_alias=AliasChoices("IDPS_SOC_URL"))

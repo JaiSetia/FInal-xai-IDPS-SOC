@@ -26,6 +26,7 @@ log = logging.getLogger("idps.soc_client")
 
 MAX_BATCH = 500  # soc/api/routes/alerts.py MAX_BATCH: the SOC refuses a bigger POST
 MAX_BLOCK_EVENTS = 100  # soc/api/routes/blocks.py MAX_EVENTS (idps does not import soc: mirrored)
+MAX_RESPONSE_BYTES = 1024 * 1024  # an answer bigger than this is refused (SocError)
 MAX_MS = 4_102_444_800_000  # soc/api/routes/alerts.py MAX_MS (year 2100)
 MAX_OUTBOX_ALERTS = 20_000  # default: oldest unsent alerts are dropped beyond this
 RETRYABLE_4XX = frozenset({408, 425, 429})
@@ -160,15 +161,34 @@ class SocClient:
                 f"at most {MAX_BLOCK_EVENTS} block events per POST, got {len(events)}", 422)
         return self._post("/ingest/blocks", {"events": events}, "block events")
 
+    def get_actions(self) -> list[dict]:
+        """GET /sensor/actions: the confirmed analyst actions for this sensor (oldest first)."""
+        answer = self._request("GET", "/sensor/actions", None, "action poll")
+        if not isinstance(answer, list):
+            raise SocError("the SOC's action list was not a JSON list")
+        return [a for a in answer if isinstance(a, dict)]
+
+    def post_action_result(self, action_id: int, success: bool, result: dict) -> dict:
+        """POST /sensor/actions/{id}/result. A 409 (already reported) is a SocRejectedError."""
+        return self._post(f"/sensor/actions/{int(action_id)}/result",
+                          {"success": bool(success), "result": result}, "action result")
+
     def _post(self, path: str, payload: dict, what: str) -> dict:
-        body = json.dumps(payload).encode()
-        request = urllib.request.Request(
-            self.base + path, data=body, method="POST",
-            headers={"Authorization": f"Bearer {self._token}",
-                     "Content-Type": "application/json"})
+        return self._request("POST", path, payload, what)
+
+    def _request(self, method: str, path: str, payload: dict | None, what: str):
+        headers = {"Authorization": f"Bearer {self._token}"}
+        body = None
+        if payload is not None:
+            body = json.dumps(payload).encode()
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(self.base + path, data=body, method=method,
+                                         headers=headers)
         try:
             with self._opener.open(request, timeout=self.timeout) as resp:
-                body = resp.read()
+                body = resp.read(MAX_RESPONSE_BYTES + 1)
+            if len(body) > MAX_RESPONSE_BYTES:
+                raise SocError(f"the SOC's answer to the {what} is over {MAX_RESPONSE_BYTES} bytes")
         except urllib.error.HTTPError as exc:
             message = f"SOC rejected the {what}: HTTP {exc.code}"
             if 400 <= exc.code < 500 and exc.code not in RETRYABLE_4XX:

@@ -1071,7 +1071,7 @@ def test_the_client_posts_blocks_to_ingest_blocks_with_the_bearer_token(monkeypa
         def __exit__(self, *a):
             return False
 
-        def read(self):
+        def read(self, n=-1):
             return b'{"blocked": 1, "unblocked": 0}'
 
     def fake_open(request, timeout):
@@ -1104,7 +1104,7 @@ def test_a_block_reported_by_the_sensor_client_shows_in_the_socs_blocks_list(
             def __exit__(self, *a):
                 return False
 
-            def read(self):
+            def read(self, n=-1):
                 return r.content
         assert r.status_code == 201, r.text
         return Resp()
@@ -1219,3 +1219,586 @@ def test_blocks_without_a_block_sender_are_counted_and_logged_once(caplog):
         sink.submit_blocks([_event()])
     assert metrics.counts["blocks_dropped"] == 2
     assert caplog.text.count("no post_blocks") == 1
+
+
+# --- Analyst actions: the sensor polls the SOC and applies block_ip / unblock_ip ---------------------
+
+def _http_error(status):
+    import urllib.error
+
+    return urllib.error.HTTPError("http://soc/x", status, "err", {}, None)
+
+
+class FakeSoc:
+    """Stands in for SocClient: serves a list of actions and records the reported results."""
+
+    def __init__(self, actions=()):
+        self.actions = list(actions)
+        self.results = []  # (id, success, result) accepted
+        self.down = False
+        self.fail_results = 0  # the next N result POSTs raise SocError
+        self.result_status = None  # raise SocRejectedError(status) on result POSTs
+        self.polls = 0
+
+    def get_actions(self):
+        self.polls += 1
+        if self.down:
+            raise SocError("down")
+        return list(self.actions)
+
+    def post_action_result(self, action_id, success, result):
+        if self.down:
+            raise SocError("down")
+        if self.fail_results:
+            self.fail_results -= 1
+            raise SocError("HTTP 500")
+        if self.result_status:
+            raise SocRejectedError("rejected", self.result_status)
+        self.results.append((action_id, success, result))
+        self.actions = [a for a in self.actions if a["id"] != action_id]
+        return {}
+
+
+def act(id=1, kind="block_ip", ip="203.0.113.7", **params):
+    return {"id": id, "kind": kind, "params": {"ip": ip, **params}}
+
+
+def poller_for(soc, *, dry_run=False, allowlist=("10.10.1.1",), blocker=None, **kw):
+    from idps.live.actions import ActionPoller
+
+    blocker = blocker or FakeBlocker()
+    clock = kw.pop("clock", None)
+    engine_kw = {"clock": clock} if clock else {}
+    engine = ResponseEngine(Settings(dry_run=dry_run, allowlist=list(allowlist)), blocker=blocker,
+                            **engine_kw)
+    sink, metrics = ListSink(), Metrics()
+    return ActionPoller(soc, engine, sink, metrics, **kw), engine, blocker, sink, metrics
+
+
+def test_an_analyst_block_executes_reports_success_and_queues_an_analyst_event():
+    soc = FakeSoc([act(7, ttl_seconds=120)])
+    poller, _, blocker, sink, metrics = poller_for(soc)
+    assert poller.poll_once() is True
+    assert blocker.blocked == ["203.0.113.7"]
+    assert soc.results == [(7, True, {"ip": "203.0.113.7", "ttl_seconds": 120})]
+    (ev,) = sink.blocks
+    assert (ev["event"], ev["ip"], ev["source"]) == ("blocked", "203.0.113.7", "analyst")
+    assert abs((datetime.fromisoformat(ev["expires_at"]) - datetime.now(UTC)).total_seconds() - 120) < 30
+    assert metrics.counts["actions_executed"] == 1 and metrics.counts["actions_failed"] == 0
+
+
+def test_the_default_ttl_is_the_settings_ttl_and_a_huge_one_is_capped():
+    soc = FakeSoc([act(1), act(2, ip="203.0.113.8", ttl_seconds=10**9)])
+    poller, *_ = poller_for(soc)
+    poller.poll_once()
+    assert soc.results[0][2]["ttl_seconds"] == 900
+    assert soc.results[1][2]["ttl_seconds"] == 86_400
+
+
+def test_an_allowlisted_address_is_refused_and_reported_failed():
+    soc = FakeSoc([act(1, ip="10.10.1.1"), act(2, ip="::ffff:10.10.1.1"), act(3, ip="127.0.0.1")])
+    poller, _, blocker, sink, metrics = poller_for(soc)
+    poller.poll_once()
+    assert blocker.blocked == [] and sink.blocks == []
+    assert [(i, ok) for i, ok, _ in soc.results] == [(1, False), (2, False), (3, False)]
+    assert "allowlisted" in soc.results[0][2]["error"]
+    assert metrics.counts["actions_failed"] == 3
+
+
+def test_dry_run_applies_nothing_and_reports_failed():
+    soc = FakeSoc([act(1), act(2, kind="unblock_ip")])
+    poller, _, blocker, sink, metrics = poller_for(soc, dry_run=True)
+    poller.poll_once()
+    assert blocker.blocked == [] and sink.blocks == []
+    assert soc.results == [(1, False, {"error": "sensor is in dry-run: not applied"}),
+                           (2, False, {"error": "sensor is in dry-run: not applied"})]
+    assert metrics.counts["actions_failed"] == 2
+
+
+def test_a_blocker_error_is_reported_failed():
+    from idps.respond.nft import BlockerError
+
+    class Failing(FakeBlocker):
+        def block(self, ip, ttl_seconds):
+            raise BlockerError("nft failed")
+
+    soc = FakeSoc([act(1)])
+    poller, _, _, sink, _ = poller_for(soc, blocker=Failing())
+    poller.poll_once()
+    assert soc.results[0][1] is False and "nft failed" in soc.results[0][2]["error"]
+    assert sink.blocks == []
+
+
+def test_unblock_executes_and_queues_an_unblocked_event():
+    unblocked = []
+
+    class Recording(FakeBlocker):
+        def unblock(self, ip):
+            unblocked.append(ip)
+
+    soc = FakeSoc([act(4, kind="unblock_ip", ip="203.0.113.7")])
+    poller, _, _, sink, metrics = poller_for(soc, blocker=Recording())
+    poller.poll_once()
+    assert unblocked == ["203.0.113.7"]
+    assert soc.results[0][:2] == (4, True)
+    assert sink.blocks == [{"event": "unblocked", "ip": "203.0.113.7"}]
+    assert metrics.counts["actions_executed"] == 1
+
+
+@pytest.mark.parametrize("action", [
+    {"id": 1, "kind": "reboot", "params": {"ip": "203.0.113.7"}},
+    {"id": 1, "kind": "block_ip", "params": {"ip": "not-an-ip"}},
+    {"id": 1, "kind": "block_ip", "params": {"ip": 5}},
+    {"id": 1, "kind": "block_ip", "params": {}},
+    {"id": 1, "kind": "block_ip", "params": "x"},
+    {"id": 1, "kind": "block_ip", "params": {"ip": "203.0.113.7", "ttl_seconds": 0}},
+    {"id": 1, "kind": "block_ip", "params": {"ip": "203.0.113.7", "ttl_seconds": "60"}},
+    {"id": 1, "kind": "block_ip", "params": {"ip": "203.0.113.7", "ttl_seconds": True}},
+    {"id": 1, "kind": "unblock_ip", "params": {"ip": "999.1.1.1"}},
+])
+def test_untrusted_actions_are_reported_failed_and_never_applied(action):
+    soc = FakeSoc([action])
+    poller, _, blocker, sink, _ = poller_for(soc)
+    poller.poll_once()
+    assert blocker.blocked == [] and sink.blocks == []
+    assert len(soc.results) == 1 and soc.results[0][1] is False
+
+
+def test_an_unblock_stops_the_auto_policy_from_reblocking_until_the_grace_ends(bundle):
+    now = [1000.0]
+    blocker = FakeBlocker()
+    engine = ResponseEngine(Settings(dry_run=False, allowlist=["10.10.1.1"],
+                                     unblock_grace_seconds=600), blocker=blocker,
+                            clock=lambda: now[0])
+    sink = ListSink()
+    det = detector(bundle, sink, engine=engine)
+    engine.unblock(ATTACKER)  # what the poller calls for an analyst unblock
+    det.run(iter([make_flow(80, i) for i in range(8)]))
+    assert blocker.blocked == []
+    assert len(sink.alerts) == 8  # alerts still flow
+    assert det.metrics.counts["blocks_suppressed"] >= 1
+    now[0] += 601
+    det.run(iter([make_flow(80, i) for i in range(8)]))
+    assert blocker.blocked == [ATTACKER]
+
+
+def test_an_analyst_block_ends_the_grace_period():
+    now = [0.0]
+    soc = FakeSoc([act(1, kind="unblock_ip", ip=ATTACKER)])
+    poller, engine, blocker, _, _ = poller_for(soc, clock=lambda: now[0])
+    poller.poll_once()
+    assert engine._in_grace(ATTACKER)
+    soc.actions = [act(2, ip=ATTACKER)]
+    poller.poll_once()
+    assert blocker.blocked == [ATTACKER] and not engine._in_grace(ATTACKER)
+
+
+def test_a_failed_result_report_is_retried_without_applying_again():
+    soc = FakeSoc([act(1)])
+    soc.fail_results = 1
+    poller, _, blocker, sink, metrics = poller_for(soc)
+    assert poller.poll_once() is False  # applied, report failed
+    assert soc.results == [] and blocker.blocked == ["203.0.113.7"]
+    assert poller.poll_once() is True
+    assert [r[:2] for r in soc.results] == [(1, True)]
+    assert blocker.blocked == ["203.0.113.7"] and len(sink.blocks) == 1
+    assert metrics.counts["actions_executed"] == 1
+    poller.poll_once()
+    assert len(soc.results) == 1
+
+
+def test_a_409_on_the_result_is_forgotten_not_retried():
+    soc = FakeSoc([act(1)])
+    soc.result_status = 409
+    poller, _, blocker, _, _ = poller_for(soc)
+    assert poller.poll_once() is True
+    assert poller._unreported == {} and blocker.blocked == ["203.0.113.7"]
+
+
+def test_the_unreported_outcomes_are_bounded(monkeypatch):
+    from idps.live import actions
+
+    monkeypatch.setattr(actions, "MAX_UNREPORTED", 3)
+    soc = FakeSoc([act(i, ip=f"203.0.113.{i}") for i in range(1, 7)])
+    soc.fail_results = 10**6
+    poller, *_ = poller_for(soc)
+    poller.poll_once()
+    assert len(poller._unreported) <= 3
+
+
+def test_a_soc_outage_backs_off_logs_once_and_recovers(caplog):
+    soc = FakeSoc([act(1)])
+    soc.down = True
+    poller, _, blocker, _, _ = poller_for(soc, interval=1.0, max_backoff=4.0)
+    with caplog.at_level(logging.INFO, logger="idps.live"):
+        assert [poller.poll_once() for _ in range(3)] == [False, False, False]
+        assert sum("cannot fetch analyst actions" in r.message for r in caplog.records) == 1
+        soc.down = False
+        assert poller.poll_once() is True
+        assert any("reachable again" in r.message for r in caplog.records)
+    assert blocker.blocked == ["203.0.113.7"]
+
+
+def test_the_poller_thread_survives_errors_backs_off_and_stops(monkeypatch):
+    soc = FakeSoc()
+    poller, *_ = poller_for(soc, interval=0.01, max_backoff=0.05)
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(poller, "poll_once", boom)
+    poller.start()
+    wait_for(lambda: len(calls) >= 3)
+    assert poller.running
+    poller.stop()
+    assert not poller.running
+
+
+def test_the_poller_thread_applies_actions_and_stops_on_request():
+    soc = FakeSoc([act(1)])
+    poller, _, blocker, _, _ = poller_for(soc, interval=0.01)
+    poller.start()
+    wait_for(lambda: soc.results)
+    poller.stop()
+    assert not poller.running and blocker.blocked == ["203.0.113.7"]
+
+
+def test_the_engine_is_thread_safe_under_concurrent_detections_and_actions():
+    from idps.respond.policy import Detection
+
+    class Counting(FakeBlocker):
+        def __init__(self):
+            super().__init__()
+            self.manual, self.unblocked = [], []
+            self.lock = threading.Lock()
+
+        def block(self, ip, ttl_seconds):
+            with self.lock:
+                (self.manual if ip.startswith("203.") else self.blocked).append(ip)
+
+        def unblock(self, ip):
+            with self.lock:
+                self.unblocked.append(ip)
+
+    blocker = Counting()
+    engine = ResponseEngine(Settings(dry_run=False, allowlist=["10.10.1.1"]), blocker=blocker,
+                            min_flows=1)
+
+    def detect():
+        for i in range(300):
+            engine.handle(Detection(f"198.51.100.{i % 50 + 1}", "DoS", 0.99, float(i)))
+
+    def act_():
+        for i in range(300):
+            engine.manual_block(f"203.0.113.{i % 50 + 1}")
+            engine.unblock(f"198.51.100.{i % 50 + 1}")
+
+    threads = [threading.Thread(target=detect), threading.Thread(target=act_)]
+    [t.start() for t in threads]
+    [t.join(10) for t in threads]
+    assert not any(t.is_alive() for t in threads)
+    assert len(blocker.manual) == 300 and len(blocker.unblocked) == 300
+    assert len(engine._manual_until) == 50 and len(engine._grace_until) == 50
+    assert len(blocker.blocked) <= 50  # each automatic block is applied at most once per address
+
+
+def test_a_slow_nft_call_does_not_stall_the_detector_on_other_addresses():
+    from idps.respond.policy import Detection
+
+    release, started = threading.Event(), threading.Event()
+
+    class Slow(FakeBlocker):
+        def block(self, ip, ttl_seconds):
+            if ip == "203.0.113.7":
+                started.set()
+                release.wait(10)
+            self.blocked.append(ip)
+
+    engine = ResponseEngine(Settings(dry_run=False, allowlist=["10.10.1.1"]), blocker=Slow(),
+                            min_flows=1)
+    t = threading.Thread(target=lambda: engine.manual_block("203.0.113.7"))
+    t.start()
+    assert started.wait(5)
+    done = []
+    d = threading.Thread(target=lambda: done.append(
+        engine.handle(Detection("198.51.100.9", "DoS", 0.99, 1.0))))
+    d.start()
+    d.join(2)
+    release.set()
+    t.join(5)
+    assert done and done[0].action.value == "block"  # decided while nft was still busy
+
+
+def test_an_auto_block_never_shortens_an_active_analyst_block():
+    from idps.respond.policy import Action, Detection
+
+    now = [0.0]
+    blocker = FakeBlocker()
+    engine = ResponseEngine(Settings(dry_run=False, allowlist=["10.10.1.1"]), blocker=blocker,
+                            min_flows=1, clock=lambda: now[0])
+    assert engine.manual_block("198.51.100.5", 86_400) == 86_400
+    decision = engine.handle(Detection("198.51.100.5", "DoS", 0.99, 1.0))
+    assert decision.action is Action.ALREADY_BLOCKED
+    assert blocker.blocked == ["198.51.100.5"]  # only the analyst's call, no auto re-add
+    now[0] += 86_401  # the analyst block ended: automatic blocking works again
+    assert engine.handle(Detection("198.51.100.5", "DoS", 0.99, 2000.0)).action is Action.BLOCK
+    assert blocker.blocked == ["198.51.100.5"] * 2
+    engine.manual_block("198.51.100.6", 600)
+    engine.unblock("198.51.100.6")
+    assert "198.51.100.6" not in engine._manual_until
+
+
+def test_analyst_blocks_are_capped():
+    from idps.respond.engine import ActionRefused
+
+    engine = ResponseEngine(Settings(dry_run=False, allowlist=["10.10.1.1"], max_analyst_blocks=2),
+                            blocker=FakeBlocker())
+    engine.manual_block("198.51.100.1")
+    engine.manual_block("198.51.100.2")
+    engine.manual_block("198.51.100.2")  # renewing one it already holds is fine
+    with pytest.raises(ActionRefused, match="analyst blocks"):
+        engine.manual_block("198.51.100.3")
+    engine.unblock("198.51.100.1")
+    engine.manual_block("198.51.100.3")
+
+
+ZONED = ["2600::1%x } ; flush ruleset ; add rule x", "fe80::1%eth0", "2600::1%1", "::1%",
+         "1.2.3.4%x", "2600::1" + "0" * 50]
+
+
+@pytest.mark.parametrize("text", ZONED)
+def test_scoped_and_overlong_addresses_are_refused_everywhere(text):
+    from idps.respond.engine import ActionRefused
+    from idps.respond.nft import BlockerError, NftBlocker
+    from idps.respond.policy import normalise_ip
+
+    assert normalise_ip(text) is None
+    blocker = FakeBlocker()
+    engine = ResponseEngine(Settings(dry_run=False, allowlist=["10.10.1.1"]), blocker=blocker)
+    with pytest.raises(ActionRefused):
+        engine.manual_block(text)
+    with pytest.raises(ActionRefused):
+        engine.manual_unblock(text)
+    with pytest.raises(BlockerError):
+        NftBlocker._target(text)
+    soc = FakeSoc([act(1, ip=text), act(2, kind="unblock_ip", ip=text)])
+    poller, _, blocker, sink, _ = poller_for(soc)
+    poller.poll_once()
+    assert blocker.blocked == [] and sink.blocks == []
+    assert [(i, ok) for i, ok, _ in soc.results] == [(1, False), (2, False)]
+
+
+def test_normalise_ip_returns_a_canonical_unscoped_address():
+    from idps.respond.policy import normalise_ip
+
+    assert str(normalise_ip(" 2600:0:0:0:0:0:0:1 ")) == "2600::1"
+    assert str(normalise_ip("::ffff:10.1.2.3")) == "10.1.2.3"
+
+
+def test_a_422_on_the_result_gets_one_minimal_failed_result_and_no_reapply():
+    class Strict(FakeSoc):
+        def post_action_result(self, action_id, success, result):
+            if success or len(json.dumps(result)) > 100:
+                raise SocRejectedError("HTTP 422", 422)
+            return super().post_action_result(action_id, success, result)
+
+    soc = Strict([act(1)])
+    poller, _, blocker, _, _ = poller_for(soc)
+    assert poller.poll_once() is True
+    assert len(soc.results) == 1 and soc.results[0][:2] == (1, False)
+    assert "422" in soc.results[0][2]["error"]
+    poller.poll_once()
+    assert blocker.blocked == ["203.0.113.7"] and len(soc.results) == 1
+
+
+def test_a_409_keeps_the_id_so_a_relisted_action_is_never_reapplied():
+    soc = FakeSoc([act(1)])
+    soc.result_status = 409
+    poller, _, blocker, _, _ = poller_for(soc)
+    poller.poll_once()
+    poller.poll_once()  # the SOC (this fake) lists it again
+    assert blocker.blocked == ["203.0.113.7"]
+
+
+def test_duplicate_ids_in_one_response_are_applied_once():
+    soc = FakeSoc([act(1), act(1), act(1)])
+    poller, _, blocker, sink, metrics = poller_for(soc)
+    poller.poll_once()
+    assert blocker.blocked == ["203.0.113.7"] and len(sink.blocks) == 1
+    assert metrics.counts["actions_executed"] == 1
+
+
+def test_at_most_fifty_actions_are_processed_per_poll():
+    soc = FakeSoc([act(i, ip=f"198.51.100.{i}") for i in range(1, 81)])
+    poller, _, blocker, _, _ = poller_for(soc)
+    poller.poll_once()
+    assert len(blocker.blocked) == 50
+    poller.poll_once()
+    assert len(blocker.blocked) == 80
+
+
+def test_the_poller_checks_stop_between_actions():
+    soc = FakeSoc([act(i, ip=f"198.51.100.{i}") for i in range(1, 11)])
+    poller, engine, blocker, _, _ = poller_for(soc)
+    original = engine.manual_block
+
+    def stopping(*a, **kw):
+        poller._stop.set()
+        return original(*a, **kw)
+
+    engine.manual_block = stopping
+    poller.poll_once()
+    assert len(blocker.blocked) == 1
+
+
+def test_stop_reports_unreported_results(caplog):
+    soc = FakeSoc([act(1)])
+    soc.fail_results = 10
+    poller, *_ = poller_for(soc)
+    poller.poll_once()
+    with caplog.at_level(logging.WARNING, logger="idps.live"):
+        poller.stop()
+    assert any("never reported" in r.message for r in caplog.records)
+
+
+def test_an_oversized_soc_answer_is_refused(monkeypatch):
+    from idps.soc_client import MAX_RESPONSE_BYTES, SocClient
+
+    client = SocClient("http://127.0.0.1:9", "idps_sensor_TOK")
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b"[" + b" " * (MAX_RESPONSE_BYTES + 10) + b"]"
+
+    monkeypatch.setattr(client._opener, "open", lambda r, timeout: Resp())
+    with pytest.raises(SocError, match="over"):
+        client.get_actions()
+
+
+def test_jsonl_sink_writes_are_locked(tmp_path):
+    sink = JsonlSink(tmp_path / "a.jsonl", Metrics())
+    threads = [threading.Thread(target=lambda: [sink.submit_blocks([{"event": "blocked", "ip": "1.2.3.4"}])
+                                               for _ in range(200)]) for _ in range(4)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    sink.close()
+    assert len(lines(tmp_path / "a.jsonl")) == 800
+
+
+def test_the_client_gets_actions_and_posts_results(monkeypatch):
+    from idps.soc_client import SocClient
+
+    client = SocClient("http://127.0.0.1:9", "idps_sensor_TOK")
+    seen = []
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return self.body
+
+    def fake_open(request, timeout):
+        seen.append((request.get_method(), request.full_url, request.data,
+                     request.get_header("Authorization")))
+        return Resp(b'[{"id": 3}, 5]' if request.get_method() == "GET" else b"{}")
+
+    monkeypatch.setattr(client._opener, "open", fake_open)
+    assert client.get_actions() == [{"id": 3}]
+    client.post_action_result(3, True, {"ip": "1.2.3.4"})
+    assert seen[0] == ("GET", "http://127.0.0.1:9/sensor/actions", None, "Bearer idps_sensor_TOK")
+    assert seen[1][:2] == ("POST", "http://127.0.0.1:9/sensor/actions/3/result")
+    assert json.loads(seen[1][2]) == {"success": True, "result": {"ip": "1.2.3.4"}}
+    monkeypatch.setattr(client._opener, "open", lambda r, timeout: Resp(b'{"x": 1}'))
+    with pytest.raises(SocError):
+        client.get_actions()
+
+
+def test_an_unblock_event_survives_the_sinks_expiry_filter():
+    sink = SocSink(lambda b: {}, Outbox(None), Metrics(), start=False, post_blocks=lambda b: {})
+    sink.submit_blocks([{"event": "unblocked", "ip": "203.0.113.7"}])
+    sink._drop_expired()
+    assert sink._pending_blocks() == 1
+
+
+def test_live_settings_validate_the_poll_interval(monkeypatch):
+    from pydantic import ValidationError
+
+    assert LiveSettings().action_poll_seconds == 5.0
+    monkeypatch.setenv("IDPS_LIVE_ACTION_POLL_SECONDS", "30")
+    assert LiveSettings().action_poll_seconds == 30.0
+    for bad in ("0.5", "301"):
+        monkeypatch.setenv("IDPS_LIVE_ACTION_POLL_SECONDS", bad)
+        with pytest.raises(ValidationError):
+            LiveSettings()
+    assert Settings().unblock_grace_seconds == 3600
+
+
+def test_end_to_end_an_analyst_unblock_reaches_the_sensor(
+        client, sensor_token, analyst_headers, admin_headers, sensor_headers, monkeypatch):
+    import urllib.error
+
+    from idps.live.actions import ActionPoller
+    from idps.soc_client import SocClient
+
+    sensor = SocClient("http://127.0.0.1:9", sensor_token)
+
+    def via_testclient(request, timeout):
+        r = client.request(request.get_method(),
+                           request.full_url.removeprefix("http://127.0.0.1:9"),
+                           content=request.data, headers=dict(request.header_items()))
+        if r.status_code >= 400:
+            raise urllib.error.HTTPError(request.full_url, r.status_code, "err", {}, None)
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n=-1):
+                return r.content
+        return Resp()
+
+    monkeypatch.setattr(sensor._opener, "open", via_testclient)
+    sensor_id = client.get("/admin/sensors", headers=admin_headers).json()[0]["id"]
+    # An active auto block, which the analyst then lifts.
+    client.post("/ingest/blocks", headers=sensor_headers, json={"events": [
+        {"event": "blocked", "ip": "203.0.113.7", "ttl_seconds": 600, "source": "auto"}]})
+    created = client.post("/actions", headers=analyst_headers, json={
+        "kind": "unblock_ip", "ip": "203.0.113.7", "sensor_id": sensor_id, "reason": "false positive"})
+    assert created.status_code == 201, created.text
+    action_id = created.json()["id"]
+
+    unblocked = []
+
+    class Recording(FakeBlocker):
+        def unblock(self, ip):
+            unblocked.append(ip)
+
+    engine = ResponseEngine(Settings(dry_run=False, allowlist=["10.10.1.1"]), blocker=Recording())
+    sink = SocSink(sensor.post_alerts, Outbox(None), Metrics(), start=False,
+                   post_blocks=sensor.post_blocks)
+    poller = ActionPoller(sensor, engine, sink, Metrics())
+    assert poller.poll_once() is True
+    assert unblocked == ["203.0.113.7"]
+    done = client.get(f"/actions/{action_id}", headers=analyst_headers).json()
+    assert done["status"] == "executed" and done["result"]["ip"] == "203.0.113.7"
+    assert sink.drain() is True  # the unblocked event reaches the Blocks page
+    assert client.get("/blocks?active=true", headers=analyst_headers).json()["items"] == []
+    assert poller.poll_once() is True and unblocked == ["203.0.113.7"]  # nothing left to do

@@ -7,6 +7,7 @@ Expiry is done by nftables itself: when a TTL runs out the element disappears.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from ipaddress import IPv4Address
 
@@ -52,10 +53,11 @@ class NftBlocker:
 
     @staticmethod
     def _target(ip: str) -> tuple[str, str]:
-        # Re-parse here so only a valid address ever reaches the nft command line.
+        # nft parses its joined arguments as a script, so only a canonical address may reach it:
+        # re-parse here (no scope ids, no stray text) and check the characters once more.
         addr = normalise_ip(ip)
-        if addr is None:
-            raise BlockerError(f"refusing to use invalid address {ip!r}")
+        if addr is None or not re.fullmatch(r"[0-9a-fA-F:.]+", str(addr)):
+            raise BlockerError(f"refusing to use invalid address {ip!r}"[:120])
         return (SET_V4 if isinstance(addr, IPv4Address) else SET_V6), str(addr)
 
     def ensure_ruleset(self) -> None:

@@ -12,7 +12,7 @@ capture, then run live on the lab sensor and blocked a real port scan with nftab
 its own SOC, so live alerts, SHAP explanations and blocks show up on the dashboard as they happen.
 What's left is the final tests, the security audit and the write-up.
 
-- **Automated tests:** 565 pass, 3 skipped (Python), 7 pass (dashboard). Lint and type checks are clean.
+- **Automated tests:** 611 pass, 3 skipped (Python), 7 pass (dashboard). Lint and type checks are clean.
 - **Reviews:** every part was reviewed by a separate reviewer model, and all high and medium findings were fixed.
 
 ## Progress against the milestones
@@ -24,7 +24,7 @@ What's left is the final tests, the security audit and the write-up.
 | 4–5 | Models trained and evaluated | ✅ Done on Friday. Test macro-F1 0.729: PortScan 1.00, DDoS 0.93, Bot 0 (dataset label error, see [results.md](results.md)) |
 | 6 | XAI: SHAP, LIME, global plots, faithfulness | ✅ Done. SHAP removes 38.6× more confidence than random features, LIME 16.9× |
 | 7 | Live detection loop on the sensor | ✅ Done. Capture → model → SHAP → alert → response engine. Replayed the full Friday capture, then ran live on the lab sensor: a port scan was alerted and the attacker marked for blocking (see [live.md](live.md)) |
-| 8 | Response engine + nftables | ✅ Done. Real nftables blocking tested in the lab: the attacker was cut off, and the block expired by itself after its 60 s time limit |
+| 8 | Response engine + nftables | ✅ Done. Real nftables blocking tested in the lab: the attacker was cut off, and the block expired by itself after its 60 s time limit. Analyst override: blocks and unblocks confirmed in the SOC reach the firewall within seconds, and an analyst unblock stops auto-block from re-blocking that address for an hour |
 | 9 | SOC API with JWT auth and WebSocket | ✅ Done |
 | 10–11 | SOC dashboard pages | ✅ Done. Live in the lab: alerts, blocks and metrics update as a real attack happens |
 | 12 | World attack map and topology map | ✅ Done (demo locations until a GeoLite2 key is added) |
@@ -139,3 +139,4 @@ What's left is the final tests, the security audit and the write-up.
 | f1f40d7 | 11 Nov 2026 | Attack maps and the SOC assistant |
 | 4539dab | 12 Nov 2026 | AWS infrastructure and cloud flow-log collector |
 | aca37cd | 12 Nov 2026 | Live loop heartbeat, lab sensor run with real blocking |
+| 712c9f2 | 12 Nov 2026 | Lab SOC and live dashboard |

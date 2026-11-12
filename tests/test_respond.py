@@ -137,7 +137,13 @@ def test_real_mode_blocks_and_unblocks():
     assert e.handle(det(t=1)).action is Action.ALREADY_BLOCKED
     e.unblock(ATTACKER)
     assert ("unblock", ATTACKER) in b.calls
-    assert e.handle(det(t=2)).action is Action.BLOCK
+    # The analyst override sticks: no automatic re-block during the grace period.
+    assert e.handle(det(t=2)).action is Action.SUPPRESSED
+    b2 = FakeBlocker()
+    e2 = ResponseEngine(settings(dry_run=False, unblock_grace_seconds=0), b2, min_flows=1)
+    e2.handle(det())
+    e2.unblock(ATTACKER)
+    assert e2.handle(det(t=2)).action is Action.BLOCK  # grace disabled
 
 
 def test_allowlisted_never_reaches_blocker():

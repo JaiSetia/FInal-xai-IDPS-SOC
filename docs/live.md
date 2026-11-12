@@ -149,6 +149,52 @@ outbox file, so a crash, or a stop while the SOC is down, loses the unsent block
 itself stays in nftables and in the audit log). Without a SOC, block events are appended to the
 alerts file as lines with `"type": "block"`.
 
+## Analyst actions
+
+When a SOC is configured and the sensor captures live (`--interface`; there is no poller in
+`--pcap` replay: it can apply real blocks and no analyst waits on a capture file), a daemon thread polls `GET /sensor/actions` every
+`IDPS_LIVE_ACTION_POLL_SECONDS` (default 5, range 1 to 300), with a doubling backoff (up to 300 s)
+while the SOC is unreachable; a failure streak is logged once. It never blocks detection and is
+stopped on shutdown before the sink closes (it checks for the stop request between actions and
+reports, and is given up to 15 s to finish the request in progress; results applied but not yet
+reported are logged and lost). At most 50 actions are handled per poll. It carries out the `block_ip` / `unblock_ip` requests
+an analyst makes (Blocks page "Unblock", Alert page "Block source IP", confirmed assistant
+proposals) and reports each outcome with `POST /sensor/actions/{id}/result`.
+
+* **Untrusted input.** Kind, address and `ttl_seconds` are validated; an unknown kind, an invalid
+  address or a bad TTL is reported as failed. The TTL defaults to `IDPS_BLOCK_TTL_SECONDS` and is
+  capped at 86400. Scoped IPv6 addresses (`fe80::1%eth0`) and text over 45 characters are
+  refused everywhere (`normalise_ip`, and again in the nft backend).
+* **Same safety rules as automatic blocks**, because everything goes through the response engine:
+  the sensor's own `IDPS_ALLOWLIST` (and non-blockable addresses) is checked first and a refused
+  block is reported as failed with the reason.
+* **Dry-run.** Nothing is applied and the action is reported as failed with
+  `sensor is in dry-run: not applied`, so the analyst is not told a block exists when it does not.
+* **The override sticks.** After an analyst unblock, the automatic policy does not block that
+  address for `IDPS_UNBLOCK_GRACE_SECONDS` (default 3600; 0 disables). Alerts for it are still
+  produced and sent; the suppressed block is logged as `block_suppressed_by_analyst` and counted in
+  `blocks_suppressed`. An analyst `block_ip` for the address ends the grace period. The window
+  restarts counting flows afterwards. The grace period runs on the sensor's own monotonic clock
+  while the auto policy's windows use flow time, so in a fast `--pcap` replay the grace covers the
+  whole capture.
+* **Analyst blocks win over automatic ones.** While an analyst block is active, the auto policy
+  does not touch that address (no nft call, no block event), so it can never shorten a 24 h
+  block to the default TTL. An unblock clears it. At most `IDPS_MAX_ANALYST_BLOCKS` (default
+  1000) analyst blocks are active at once; further ones are reported failed.
+* **Blocks page.** A real analyst block is queued like an automatic one (`"source": "analyst"`,
+  absolute `expires_at`); a real unblock queues `{"event": "unblocked", "ip"}`.
+* **Delivery.** If reporting a result fails (SOC unreachable, 5xx), the outcome is kept (at most
+  1000) and re-reported on the next poll without applying the action again. A 409 or 404 means
+  the SOC no longer lists the action: forgotten. Any other 4xx (for example 422) gets one minimal
+  failed result `{"error": "result refused by the SOC (HTTP n)"}`, because the action would
+  otherwise stay confirmed. Ids already executed (at most 5000 remembered) are never executed
+  again, including duplicates within one response.
+  Counters: `actions.executed`, `actions.failed`.
+* **Limitations.** The grace period and the unreported outcomes are in memory: a sensor restart
+  forgets them (an action the SOC still lists would then be applied again), and the analyst
+  block map with them: after a restart the auto policy may refresh such a block. An analyst unblock only removes the nftables entry; it does not
+  stop alerts. Block and unblock events for the Blocks page are not persisted across a restart (see above).
+
 ## Metrics
 
 Every `IDPS_LIVE_METRICS_SECONDS` and once at the end, one JSON line on logger `idps.live`:
@@ -281,3 +327,20 @@ of ports 1–1024 on the victim):
 - **Real blocking** (60 s): the block of 10.10.1.10 appeared on the Blocks page without a reload,
   with the same 60 s end time as nftables, and left the "active only" list when nftables removed
   it. The Metrics page showed the alerts by class, top source and a detection latency of 2.0 min.
+
+### Analyst actions in the lab (12 Nov 2026)
+
+Live loop with real blocking (`IDPS_DRY_RUN=false`), actions sent through the SOC API as the
+dashboard buttons send them:
+
+- **Analyst block** of 10.10.1.10 (5 min): applied by the sensor 5 s after the request (one
+  poll), reported `executed`, added to `inet idps blocked4` with a 5 min timeout, listed on the
+  Blocks page with source `analyst`. The attacker got no answer from DVWA.
+- **Analyst unblock**: applied within a second, reported `executed`; the element left nftables,
+  the Blocks page showed the block as ended, and DVWA answered the attacker again (HTTP 302).
+- **Grace period**: a new port scan right after produced 1,024 alerts, all delivered to the SOC,
+  but no new block: the automatic block decisions (204) were suppressed because an analyst had
+  unblocked that address.
+
+This run used the new code copied into the running sensor container, because Docker's network
+kept timing out while rebuilding the image; the image picks the code up on its next build.

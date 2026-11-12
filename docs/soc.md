@@ -76,6 +76,8 @@ Rules worth knowing:
   counts an attempt before the password check, so parallel guesses can't exceed the limit.
 - **Actions.** pending, then confirmed or rejected by an analyst; then the sensor reports
   executed or failed. A sensor only sees and answers its own actions.
+  The live sensor polls and executes them (see "Analyst actions" in `live.md`); in dry-run it
+  reports them failed with `sensor is in dry-run: not applied`.
 - **Last admin.** Demoting or disabling the last enabled admin, including yourself, returns 409.
 - **Audit.** Every mutating request writes one audit row in the same transaction as the change
   (an alert or block batch is one row). `POST /auth/login` is not audited.

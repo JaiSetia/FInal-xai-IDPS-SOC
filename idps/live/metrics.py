@@ -29,6 +29,9 @@ COUNTERS = (
     "reply_direction",    # detections handed to the response engine with dst_ip (flow was a reply)
     "heartbeat_flows",    # our own heartbeat flows, dropped before scoring (see idps.live.heartbeat)
     "flows_discarded",    # flows read from the capture but not scored (stop with --max-flows)
+    "blocks_suppressed",  # automatic blocks withheld: an analyst unblocked the address recently
+    "actions_executed",   # analyst actions (block_ip / unblock_ip) applied and reported as success
+    "actions_failed",     # analyst actions refused or failed (reported to the SOC as failed)
     "soc_config_errors",  # SOC answered 401/403/404: alerts kept, configuration needs fixing
 )
 
@@ -91,6 +94,8 @@ class Metrics:
             "blocks": counts["would_block"] if dry_run else counts["blocked"],
             "would_block": counts["would_block"],
             "blocked": counts["blocked"],
+            "blocks_suppressed": counts["blocks_suppressed"],
+            "actions": {"executed": counts["actions_executed"], "failed": counts["actions_failed"]},
             "dropped": {"explanations": counts["explanations_shed"],
                         "alerts": counts["alerts_dropped"],
                         "alerts_rejected_by_soc": counts["alerts_rejected"],

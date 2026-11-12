@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     confidence_threshold: float = Field(default=0.9, ge=0.5, le=1.0)
     # Log what would be blocked instead of touching nftables.
     dry_run: bool = True
+    # After an analyst unblocks an address, the automatic policy leaves it alone for this long
+    # (alerts are still produced). An analyst block of the address ends the grace period.
+    unblock_grace_seconds: int = Field(default=3600, ge=0)
+    # At most this many analyst blocks active on the sensor at once (further ones are refused).
+    max_analyst_blocks: int = Field(default=1000, ge=1, le=100_000)
     # Addresses or networks that must never be blocked: gateway, DNS, SOC host, analyst AND the
     # servers being protected (a flow's source can be a server's reply, so the allowlist is the
     # real safeguard for them).

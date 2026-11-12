@@ -43,6 +43,7 @@ class JsonlSink:
         flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(self.path, flags, 0o600)
         self._file = os.fdopen(fd, "a", encoding="utf-8")
+        self._lock = threading.Lock()  # the detector and the action poller both write
 
     def submit(self, alerts: list[dict]) -> None:
         self._write(alerts, "alerts_dropped", "alert")
@@ -55,8 +56,10 @@ class JsonlSink:
         if not records:
             return
         try:
-            self._file.write("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in records))
-            self._file.flush()
+            with self._lock:
+                self._file.write("".join(json.dumps(r, separators=(",", ":")) + "\n"
+                                         for r in records))
+                self._file.flush()
         except (OSError, ValueError) as exc:
             self.metrics.add(counter, len(records))
             log.error("cannot write %d %s(s) to %s: %s", len(records), what, self.path, exc)
@@ -69,7 +72,8 @@ class JsonlSink:
 
     def close(self) -> None:
         try:
-            self._file.close()
+            with self._lock:
+                self._file.close()
         except OSError as exc:
             log.error("closing %s failed: %s", self.path, exc)
 
