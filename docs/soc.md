@@ -27,6 +27,7 @@ Settings (environment variables, prefix `IDPS_SOC_`):
 | `LOW_CONFIDENCE_BELOW` | 0.6 | Below this confidence, severity drops one level (never below low) |
 | `WS_MAX_CONNECTIONS` / `WS_QUEUE_SIZE` | 50 / 200 | Live feed limits |
 | `ENABLE_DOCS` | false | Serves `/docs` and `/openapi.json` (unauthenticated, so off by default) |
+| `WOULD_BLOCK_RETENTION_DAYS` | 7 | Dry-run would-block records older than this are deleted (1 to 365) |
 | `BLOCK_ALLOWLIST` | **empty: blocking refused** | Comma-separated addresses/networks the SOC must never ask to block: gateways, DNS, the SOC host, the sensors, the analysts. Required before any block request is accepted |
 
 The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep their own
@@ -87,7 +88,16 @@ Rules worth knowing:
   a sensor that blocks for real never sends them. `expires_at` is refused on them. `decided_at`
   (timezone required, optional) is the sensor's decision time and is stored as `at`, so an event
   delayed in the outbox keeps its real time; absent (older sensors) or more than 60 s in the future
-  it, or older than 24 h (a wrong sensor clock), is replaced by the receive time. Known gap: the `would_blocks` table is never pruned yet.
+  it, or older than 24 h (a wrong sensor clock), is replaced by the receive time. Retention: would-block rows older than
+  `IDPS_SOC_WOULD_BLOCK_RETENTION_DAYS` (default 7, 1 to 365) are deleted by a background task started
+  by the block ingest path (it runs after the response, with its own database session), at most once
+  per 10 minutes per process, one at a time, and at most 10,000 rows per run (1,000 per DELETE, the
+  ids chosen by a subquery so SQLite's old 999-variable limit does not apply), so a large backlog is
+  worked off over several runs. The 10 minutes count from when a prune starts: a prune that fails
+  is logged (with its traceback) and not retried until the interval has passed; batches already
+  deleted stay deleted. It only ever touches `would_blocks`, never `blocks`.
+  A failed prune is logged and does not fail the ingest. `at` is indexed (`ix_would_blocks_at`);
+  the table is new, so `create_all` creates it with the index and nothing needs adding by hand.
 - **Sensor status.** The live sensor posts a status report at start and every 30 s
   (`IDPS_LIVE_STATUS_SECONDS`, 5 to 3600). The SOC's bounds on the policy fields cover everything the
   sensor's settings allow (`unblock_grace_seconds` is capped at one year on both sides), so a valid

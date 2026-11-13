@@ -52,6 +52,9 @@ class SocSettings(BaseSettings):
     # empty, every block request is refused (503), so a forgotten setting fails closed.
     # From the environment: IDPS_SOC_BLOCK_ALLOWLIST=10.10.1.1,10.10.2.1,192.168.1.0/24
     block_allowlist: Annotated[list[IPvAnyNetwork], NoDecode] = Field(default_factory=list)
+    # Dry-run "would block" records older than this are deleted (see routes/blocks.py). Real
+    # blocks are never pruned.
+    would_block_retention_days: int = Field(default=7, ge=1, le=365)
     # Attack world map. GeoLite2 City database path (free MaxMind account needed); without it,
     # public addresses can't be placed. geo_demo gives lab (private) addresses made-up,
     # clearly labelled locations for demonstrations. home_* is where the protected site is.

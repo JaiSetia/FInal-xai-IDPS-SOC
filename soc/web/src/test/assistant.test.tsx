@@ -170,8 +170,30 @@ describe("conversation list", () => {
     await ready();
     ask("q");
     await screen.findByText("an answer");
-    fireEvent.click(screen.getByRole("button", { name: "New conversation" }));
+    // The text shows up while the reply is still "busy"; New conversation is disabled until the
+    // stream's finally block has run, so wait for it (clicking earlier is ignored, which made
+    // this test fail now and then).
+    const btn = screen.getByRole("button", { name: "New conversation" });
+    await waitFor(() => expect(btn).toBeEnabled());
+    fireEvent.click(btn);
     expect(screen.queryByText("an answer")).toBeNull();
+  });
+  it("New conversation is disabled while a reply streams and clears the log once it ends", async () => {
+    controlled();
+    show();
+    await ready();
+    ask("q");
+    await waitFor(() => expect(h.stream).toHaveBeenCalledTimes(1));
+    ctl.emit({ type: "text", text: "partial" });
+    expect(await screen.findByText("partial")).toBeInTheDocument();
+    const btn = screen.getByRole("button", { name: "New conversation" });
+    expect(btn).toBeDisabled();
+    fireEvent.click(btn); // ignored while busy
+    expect(screen.getByText("partial")).toBeInTheDocument();
+    ctl.end();
+    await waitFor(() => expect(btn).toBeEnabled());
+    fireEvent.click(btn);
+    expect(screen.queryByText("partial")).toBeNull();
   });
 });
 

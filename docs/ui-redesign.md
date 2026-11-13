@@ -23,7 +23,7 @@ review by the reviewer subagent, with their findings fixed before moving on.
 | Phase 3 backend (sensor status, class by day, would-block events) | ✅ Done, tested, reviewed; frontend wired (mode badge, heatmap, sensor health, policy + both allowlists, Admin last seen, "would block · dry-run") |
 | "Can I trust it?" faithfulness card | ✅ Done, tested, reviewed twice |
 
-Phase 1 and 2 are committed together on the `ui-redesign` branch (13 Nov 2026), not merged into `main` yet. Phase 3 is uncommitted on the same branch.
+Phase 1 and 2 are committed together on the `ui-redesign` branch (13 Nov 2026), not merged into `main` yet. Phase 3 and the trust card followed as 00685f6 (14 Nov 2026).
 
 Things decided along the way:
 - "Block…" links from Alert detail and Maps open the Response form filled in; the analyst
@@ -47,7 +47,7 @@ Things decided along the way:
   Would-block events carry the sensor's `decided_at`; the dashboard counts one for its block time
   and only for the same sensor. "Anomaly" in the heatmap = alerts the Isolation Forest also flags
   (benign-classified outliers never reach the SOC). Class-by-day is one query, cached 60 s; an
-  existing DB needs the manual `CREATE INDEX` in docs/soc.md. Known gap: `would_blocks` isn't pruned.
+  existing DB needs the manual `CREATE INDEX` in docs/soc.md. `would_blocks` rows are deleted after IDPS_SOC_WOULD_BLOCK_RETENTION_DAYS (default 7).
 - "Can I trust it?" (Alert detail): model-level SHAP/LIME deletion-test numbers, sent in the sensor
   status from `IDPS_FAITHFULNESS_REPORT`, with a verdict per method (≥2× better than random = ok).
   Bad results (null or negative ratios) are shown, not dropped. The model match is by file checksum

@@ -1,11 +1,15 @@
 """Blocks reported by sensors, and the list of blocks for the dashboard."""
 
+import contextlib
+import logging
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal, Self
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
 from soc.api.auth import AnyUser, Sensor
@@ -13,10 +17,73 @@ from soc.api.common import Cursor, IPAddress, Limit, Page, audit, paginate
 from soc.api.db import get_db
 from soc.api.models import Alert, Block, BlockSource, WouldBlock
 
+log = logging.getLogger("soc.api")
 router = APIRouter(tags=["blocks"])
 
 MAX_EVENTS = 100
 MAX_TTL_SECONDS = 30 * 24 * 3600
+
+
+PRUNE_EVERY_SECONDS = 600.0  # at most one prune per app per this long
+PRUNE_BATCH = 1000  # rows per DELETE
+PRUNE_MAX_BATCHES = 10  # so one prune removes at most 10,000 rows; the next one continues
+_prune_lock = threading.Lock()  # one prune at a time; a request that finds it taken skips
+
+
+def _monotonic() -> float:
+    return time.monotonic()  # tests replace this to move the rate limit's clock
+
+
+def prune_would_blocks(db: Session, retention_days: int, now: datetime) -> int:
+    """Delete would-block rows older than `retention_days`, in bounded batches. Only touches
+    `would_blocks` (never `blocks`: those are the firewall's record). Returns rows deleted.
+
+    One statement per batch with the ids chosen by a subquery, so no id is a bound parameter: a
+    list of 1000 ids would exceed SQLite's 999-variable limit before version 3.32."""
+    cutoff = now - timedelta(days=retention_days)
+    deleted = 0
+    for _ in range(PRUNE_MAX_BATCHES):
+        oldest = (select(WouldBlock.id).where(WouldBlock.at < cutoff)
+                  .order_by(WouldBlock.id).limit(PRUNE_BATCH))
+        n = db.execute(delete(WouldBlock).where(WouldBlock.id.in_(oldest))).rowcount
+        db.commit()  # each batch stands on its own: a later failure keeps the earlier ones
+        deleted += n
+        if n < PRUNE_BATCH:
+            break
+    return deleted
+
+
+def prune_in_background(app, now: datetime) -> None:
+    """Runs after the ingest response (FastAPI BackgroundTasks), with its OWN session: the
+    request's is closed by then and must not be shared. At most once per PRUNE_EVERY_SECONDS per
+    app, one at a time. The time is taken when a prune STARTS, so a failing prune is not retried
+    for the whole interval (a broken database would otherwise be hit by every ingest). Never
+    raises."""
+    if not _prune_lock.acquire(blocking=False):
+        return  # another thread is pruning
+    try:
+        state = app.state
+        last = getattr(state, "would_block_pruned_at", None)
+        if last is not None and _monotonic() - last < PRUNE_EVERY_SECONDS:
+            return
+        state.would_block_pruned_at = _monotonic()
+        days = state.settings.would_block_retention_days
+        try:
+            with state.session_factory() as db:
+                try:
+                    n = prune_would_blocks(db, days, now)
+                except Exception:
+                    with contextlib.suppress(Exception):  # a failing rollback must not raise
+                        db.rollback()
+                    raise
+        except Exception:
+            log.exception("pruning would_blocks failed; not retried for %d s",
+                          int(PRUNE_EVERY_SECONDS))
+            return
+        if n:
+            log.info("pruned %d would-block record(s) older than %d day(s)", n, days)
+    finally:
+        _prune_lock.release()
 
 
 def active_clause(now: datetime):
@@ -106,7 +173,8 @@ def decision_time(decided_at: datetime | None, now: datetime) -> datetime:
 
 
 @router.post("/ingest/blocks", response_model=BlockIngestResult, status_code=201)
-def ingest_blocks(batch: BlockBatch, sensor: Sensor, db: Annotated[Session, Depends(get_db)]):
+def ingest_blocks(batch: BlockBatch, sensor: Sensor, request: Request,
+                  background: BackgroundTasks, db: Annotated[Session, Depends(get_db)]):
     now = datetime.now(UTC)
     alert_ids = {e.alert_id for e in batch.events if e.alert_id is not None}
     if alert_ids:
@@ -142,6 +210,7 @@ def ingest_blocks(batch: BlockBatch, sensor: Sensor, db: Annotated[Session, Depe
           {"events": len(batch.events), "blocked": blocked, "unblocked": unblocked,
            "would_block": would})
     db.commit()
+    background.add_task(prune_in_background, request.app, now)  # after the response
     return BlockIngestResult(blocked=blocked, unblocked=unblocked, would_block=would)
 
 
