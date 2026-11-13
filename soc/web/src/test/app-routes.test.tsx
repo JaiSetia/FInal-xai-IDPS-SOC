@@ -1,10 +1,17 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import App from "../App";
+import { sensorState, sensorsStatus } from "./sensor-fixtures";
+import { report } from "./sensor-fixtures";
 
 const auth = vi.hoisted(() => ({ role: "analyst" }));
 vi.mock("../auth", () => ({
   useAuth: () => ({ me: { username: "ann", role: auth.role }, loading: false, logout: vi.fn() }),
+}));
+const sens = vi.hoisted(() => ({ data: null as unknown }));
+vi.mock("../sensors", async (orig) => ({
+  ...(await orig<typeof import("../sensors")>()),
+  useSensors: () => ({ data: sens.data, error: null }),
 }));
 vi.mock("../live", () => ({ useLiveStatus: () => false, useLiveAlerts: () => false }));
 vi.mock("../pages/ThreatCenter", () => ({ default: () => <div>threat-center-stub</div> }));
@@ -23,7 +30,7 @@ vi.mock("../pages/Login", () => ({ default: () => <div>login-stub</div> }));
 
 function Loc() { const l = useLocation(); return <div data-testid="loc">{l.pathname + l.search}</div>; }
 function Nav() { const n = useNavigate(); return <button onClick={() => n("/maps")}>nav-maps</button>; }
-beforeEach(() => { auth.role = "analyst"; });
+beforeEach(() => { auth.role = "analyst"; sens.data = null; });
 const go = (url: string) => render(<MemoryRouter initialEntries={[url]}><App /><Loc /><Nav /></MemoryRouter>);
 
 describe("legacy route redirects", () => {
@@ -84,5 +91,49 @@ describe("legacy route redirects", () => {
       delete (globalThis as { __boom?: boolean }).__boom;
       err.mockRestore();
     }
+  });
+});
+
+describe("top bar mode badge", () => {
+  const live = (o: Record<string, unknown>, id = 1) => sensorState({ sensor_id: id, status: report(o) });
+  const MODES = /Blocking ON|Dry-run|Blocking on some/;
+  it("is hidden until a sensor has reported", async () => {
+    go("/");
+    await screen.findByText("threat-center-stub");
+    expect(screen.queryByText(MODES)).toBeNull();
+  });
+  it("is hidden when every sensor is offline, revoked or has no status", async () => {
+    sens.data = sensorsStatus([
+      sensorState({ sensor_id: 1, online: false }), sensorState({ sensor_id: 2, revoked: true }),
+      sensorState({ sensor_id: 3, status: null }),
+    ]);
+    go("/");
+    await screen.findByText("threat-center-stub");
+    expect(screen.queryByText(MODES)).toBeNull();
+  });
+  it("says Blocking ON when blocking is enabled and dry-run is off", async () => {
+    sens.data = sensorsStatus([live({})]);
+    go("/");
+    expect(await screen.findByText("Blocking ON · dry-run off")).toBeInTheDocument();
+  });
+  it("says Dry-run when sensors only log", async () => {
+    sens.data = sensorsStatus([live({ dry_run: true })]);
+    go("/");
+    expect(await screen.findByText("Dry-run · blocks are only logged")).toBeInTheDocument();
+  });
+  it("blocking_enabled=false also counts as not blocking", async () => {
+    sens.data = sensorsStatus([live({ blocking_enabled: false })]);
+    go("/");
+    expect(await screen.findByText("Dry-run · blocks are only logged")).toBeInTheDocument();
+  });
+  it("says some sensors only when they differ", async () => {
+    sens.data = sensorsStatus([live({}), live({ dry_run: true }, 2)]);
+    go("/");
+    expect(await screen.findByText("Blocking on some sensors only")).toBeInTheDocument();
+  });
+  it("ignores offline sensors when deciding", async () => {
+    sens.data = sensorsStatus([live({}), sensorState({ sensor_id: 2, online: false, status: report({ dry_run: true }) })]);
+    go("/");
+    expect(await screen.findByText("Blocking ON · dry-run off")).toBeInTheDocument();
   });
 });

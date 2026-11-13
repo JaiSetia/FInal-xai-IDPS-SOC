@@ -6,6 +6,7 @@ import {
   Card, Countdown, ErrorText, PageHead, Pill, Segmented, useAction, useLoad, useNow, type Tone,
 } from "../components/common";
 import { dateTime, label } from "../format";
+import { reporting, useSensors } from "../sensors";
 import { useLiveRefresh } from "../useLiveRefresh";
 
 /** Response: firewall blocks, the action queue and the block form (wireframe screen 3).
@@ -72,6 +73,79 @@ function UnblockButton({ block, busy, onUnblock }: { block: Block; busy: boolean
   return (
     <button className="danger-soft small" disabled={busy} onClick={() => onUnblock(block)}
       aria-label={`Unblock ${block.ip}`}>Unblock</button>
+  );
+}
+
+/** A 0..1 setting as a percentage without rounding it up or down ("92.5%", "90%"). */
+export function exactPercent(x: number): string {
+  return `${Number((x * 100).toFixed(4))}%`;
+}
+
+/** The sensors' own response settings, as they last reported them. */
+function PolicyCard() {
+  const { data, error } = useSensors();
+  const live = reporting(data);
+  return (
+    <Card title="Response policy">
+      <ErrorText error={error} />
+      {data && live.length === 0 && (
+        <p className="muted" style={{ margin: 0 }}>No sensor is online, so its policy isn't known right now.</p>
+      )}
+      {live.map(({ sensor_id, name, status: st }) => {
+        const p = st.policy;
+        return (
+          <div key={sensor_id} style={{ marginBottom: 12 }}>
+            {live.length > 1 && <h3>{name}</h3>}
+            <dl className="kv small-kv">
+              <dt>Mode</dt>
+              <dd>{st.dry_run ? <Pill tone="warn">dry-run: blocks are only logged</Pill>
+                : st.blocking_enabled ? <Pill tone="danger">blocking on</Pill> : <Pill>not blocking</Pill>}</dd>
+              <dt>Auto-block</dt>
+              <dd>{p.min_flows} flows ≥ {exactPercent(p.confidence_threshold)} confidence from one address within {ttlText(p.window_seconds) ?? `${p.window_seconds} s`}</dd>
+              <dt>Alert floor</dt><dd>alerts below {exactPercent(p.min_alert_confidence)} confidence aren't sent</dd>
+              <dt>Block time</dt><dd>{ttlText(p.block_ttl_seconds)}</dd>
+              <dt>After an unblock</dt>
+              <dd>{p.unblock_grace_seconds > 0
+                ? `no auto-block of that address for ${ttlText(p.unblock_grace_seconds)}`
+                : "the address can be auto-blocked again at once"}</dd>
+              <dt>Analyst blocks</dt><dd>at most {p.max_analyst_blocks.toLocaleString()} at once</dd>
+            </dl>
+          </div>
+        );
+      })}
+    </Card>
+  );
+}
+
+/** Both allowlists: the SOC refuses these before sending an action, the sensor again before blocking. */
+function AllowlistCard() {
+  const { data, error } = useSensors();
+  const live = reporting(data);
+  const list = (items: string[]) => items.length === 0
+    ? <p className="muted small-text" style={{ margin: 0 }}>empty</p>
+    : <ul className="detail-pairs mono">{items.map((n, i) => <li key={`${i}-${n}`}>{n}</li>)}</ul>;
+  return (
+    <Card title="Never blocked · allowlist">
+      <ErrorText error={error} />
+      {data && (
+        <>
+          <h3>SOC <span className="muted small-text">(IDPS_SOC_BLOCK_ALLOWLIST)</span></h3>
+          {list(data.soc_allowlist)}
+          {live.map(({ sensor_id, name, status: st }) => (
+            <div key={sensor_id} style={{ marginTop: 12 }}>
+              <h3>Sensor {name} <span className="muted small-text">(IDPS_ALLOWLIST)</span></h3>
+              {list(st.allowlist)}
+              {st.allowlist_total !== undefined && st.allowlist_total > st.allowlist.length && (
+                <p className="muted small-text" style={{ margin: "6px 0 0" }}>
+                  and {st.allowlist_total - st.allowlist.length} more not shown (the sensor reports the first {st.allowlist.length}).
+                </p>
+              )}
+            </div>
+          ))}
+          {live.length === 0 && <p className="muted small-text" style={{ marginTop: 12 }}>No sensor online to report its own list.</p>}
+        </>
+      )}
+    </Card>
   );
 }
 
@@ -336,18 +410,8 @@ export default function Response() {
         </div>
 
         <div className="stack">
-          <Card title="Response policy">
-            <p className="muted" style={{ margin: 0 }}>
-              The auto-block rule, block time and dry-run mode are set on the sensor. They appear here once
-              sensors report their status to the SOC.
-            </p>
-          </Card>
-          <Card title="Never blocked · allowlist">
-            <p className="muted" style={{ margin: 0 }}>
-              Checked by the SOC and again by the sensor before any block. The list appears here once sensors
-              report their status to the SOC.
-            </p>
-          </Card>
+          <PolicyCard />
+          <AllowlistCard />
           {/* Remounted when a link brings new prefill (?ip=…&sensor=…&reason=…), so values from two
               links never mix; clearing the prefill after a block keeps the form as it is. */}
           <BlockForm key={formKey}

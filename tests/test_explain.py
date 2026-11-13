@@ -201,3 +201,64 @@ def test_cli_flow_global_faithfulness(tmp_path, capsys):
     assert main(["faithfulness", str(model), str(feats), "-o", str(out), "-n", "20",
                  "--repeats", "3", "--lime-samples", "300"]) == 0
     assert set(json.loads(out.read_text())["methods"]) == {"shap", "lime"}
+
+
+def test_the_real_faithfulness_output_loads_for_the_sensor_status(bundles, tmp_path):
+    """What faithfulness() really writes (not a hand-made dict) passes the sensor's loader and the
+    SOC's schema, with a digest match when the report carries the bundle's digest."""
+    from idps.live.faithfulness import load_faithfulness
+    from soc.api.routes.sensors import Faithfulness
+
+    digest = "ab" * 32
+    res = faithfulness(bundles["xgboost"], DATA, n=40, k=3, repeats=5, lime_samples=300,
+                       model_sha256=digest)
+    path = tmp_path / "f.json"
+    from idps.explain.faithfulness import write_json
+    write_json(res, path)
+    got = load_faithfulness(str(path), "xgboost", digest)
+    assert got["model_check"] == "digest" and got["model_matches"] is True
+    assert set(got["methods"]) == {"shap", "lime"}
+    Faithfulness.model_validate(got)
+    other = load_faithfulness(str(path), "xgboost", "cd" * 32)
+    assert other["model_check"] == "digest" and other["model_matches"] is False
+    legacy = load_faithfulness(str(path), "xgboost")  # sensor without a digest: weak, by name
+    assert legacy["model_check"] == "name" and legacy["model_matches"] is True
+
+
+def test_the_worst_outcomes_are_reported_not_dropped(bundles, tmp_path):
+    """ratio_to_random is null when random removal changes nothing, negative when deleting the
+    explanation raised confidence. Both reach the status."""
+    import json as _json
+
+    from idps.explain.faithfulness import write_json
+    from idps.live.faithfulness import load_faithfulness
+    from soc.api.routes.sensors import Faithfulness
+
+    res = faithfulness(bundles["xgboost"], DATA, n=20, k=3, repeats=3, include_lime=False)
+    res["methods"]["shap"]["ratio_to_random"] = None
+    res["methods"]["shap"]["mean_drop"] = -0.2
+    path = tmp_path / "f.json"
+    write_json(res, path)
+    got = load_faithfulness(str(path), "xgboost")
+    assert got["methods"]["shap"]["ratio_to_random"] is None
+    assert got["methods"]["shap"]["mean_drop"] == -0.2
+    Faithfulness.model_validate(_json.loads(_json.dumps(got)))
+    res["methods"]["shap"]["ratio_to_random"] = -12.5
+    write_json(res, path)
+    got = load_faithfulness(str(path), "xgboost")
+    assert got["methods"]["shap"]["ratio_to_random"] == -12.5
+    Faithfulness.model_validate(got)
+
+
+def test_the_cli_writes_the_bundle_digest_into_the_report(tmp_path):
+    from idps.detect.bundle import read_digest
+
+    bundle, _ = train_bundle(DATA, META, model="xgboost")
+    model = save_bundle(bundle, tmp_path / "m.joblib")
+    feats = tmp_path / "f.parquet"
+    write_features(DATA, feats, LABELLED)
+    out = tmp_path / "faith.json"
+    assert main(["faithfulness", str(model), str(feats), "-o", str(out), "-n", "10",
+                 "--repeats", "2", "--no-lime"]) == 0
+    sha = json.loads(out.read_text())["config"]["model_sha256"]
+    assert sha == read_digest(model) and len(sha) == 64

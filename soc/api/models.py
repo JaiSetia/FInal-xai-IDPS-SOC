@@ -127,7 +127,11 @@ class Alert(Base):
     """One detection reported by a sensor. BENIGN flows are never stored."""
 
     __tablename__ = "alerts"
-    __table_args__ = (Index("ix_alerts_src_ip", "src_ip"), Index("ix_alerts_dst_ip", "dst_ip"))
+    __table_args__ = (
+        Index("ix_alerts_src_ip", "src_ip"), Index("ix_alerts_dst_ip", "dst_ip"),
+        # The class-by-day heatmap (metrics.class_per_day) scans a week of alerts by these.
+        Index("ix_alerts_received_class_anomaly", "received_at", "predicted_class",
+              "anomaly_score"))
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     sensor_id: Mapped[int] = mapped_column(ForeignKey("sensor_tokens.id"), index=True)
@@ -215,3 +219,30 @@ class AssistantConversation(Base):
     busy_since: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+
+class WouldBlock(Base):
+    """A block a dry-run sensor decided on but did not apply. Kept apart from `blocks` on purpose:
+    nothing here is in the firewall, so it never counts as an active block."""
+
+    __tablename__ = "would_blocks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sensor_id: Mapped[int] = mapped_column(ForeignKey("sensor_tokens.id"), index=True)
+    ip: Mapped[str] = mapped_column(String(45), index=True)
+    reason: Mapped[str] = mapped_column(String(500), default="")
+    source: Mapped[BlockSource] = mapped_column(_enum(BlockSource))
+    alert_id: Mapped[int | None] = mapped_column(ForeignKey("alerts.id"), nullable=True)
+    at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, index=True)
+    ttl_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class SensorStatus(Base):
+    """The latest status report of each sensor (one row per sensor, overwritten). `last_seen_at`
+    is set by the server; the sensor's own clock (`sent_at` inside the payload) is not trusted."""
+
+    __tablename__ = "sensor_status"
+
+    sensor_id: Mapped[int] = mapped_column(ForeignKey("sensor_tokens.id"), primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    last_seen_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)

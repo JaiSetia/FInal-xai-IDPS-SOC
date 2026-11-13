@@ -1,9 +1,10 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
-import AlertDetail, { activeBlock, relatedBlocks, timeline } from "../pages/AlertDetail";
+import AlertDetail, { activeBlock, ratioText, relatedBlocks, timeline, verdict } from "../pages/AlertDetail";
 import ExplanationChart from "../components/ExplanationChart";
 import { ALERT_STATUSES } from "../api/types";
-import { label } from "../format";
+import { label, percent } from "../format";
+import { report, sensorState, sensorsStatus } from "./sensor-fixtures";
 
 const h = vi.hoisted(() => ({ api: vi.fn(), live: null as null | { fn: () => void; ms: number | undefined } }));
 vi.mock("../useLiveRefresh", () => ({
@@ -140,6 +141,9 @@ let blocksError: Error | null;
 let cases: unknown[];
 let gates: Record<string, Promise<void>>;
 let patchGate: Promise<void> | null;
+let sensorsBody: unknown;
+let sensorsGate: Promise<void> | null;
+let sensorsError: Error | null;
 const future = () => iso(Date.now() + 3600_000);
 
 const calls = (method: string, prefix = "") =>
@@ -152,6 +156,9 @@ beforeEach(() => {
   cases = [{ id: 5, title: "Case A" }];
   gates = {};
   patchGate = null;
+  sensorsBody = sensorsStatus();
+  sensorsGate = null;
+  sensorsError = null;
   h.live = null;
   h.api.mockReset();
   h.api.mockImplementation(async (path: string, opts?: { method?: string; json?: Record<string, unknown> }) => {
@@ -159,6 +166,11 @@ beforeEach(() => {
     if (m === "PATCH") { if (patchGate) await patchGate; return { ...alert, ...opts!.json }; }
     if (m === "POST" && path === "/cases") return { id: 8 };
     if (m === "POST" && path.endsWith("/alerts")) return { id: Number(path.split("/")[2]) };
+    if (path === "/sensors/status") {
+      if (sensorsGate) await sensorsGate;
+      if (sensorsError) throw sensorsError;
+      return sensorsBody;
+    }
     if (path.startsWith("/blocks")) {
       if (blocksError) throw blocksError;
       return { items: blocks, total: blocks.length };
@@ -430,5 +442,317 @@ describe("ExplanationChart summary", () => {
     expect(norm(container)).toContain("SHAP: top 2 features behind the decision for PortScan.");
     expect(norm(container)).not.toContain("Base value");
     expect(norm(container)).not.toContain("confidence 99.99%");
+  });
+});
+
+describe("ratioText", () => {
+  it.each([[38.64, "38.6×"], [1.25, "1.25×"], [1.2, "1.2×"], [0.05, "<0.1×"], [10, "10×"], [9.999, "10×"], [9.9, "9.9×"], [2, "2×"], [0.1, "0.1×"], [0, "<0.1×"],
+    [NaN, "—"], [Infinity, "—"], [-Infinity, "—"]])("%s -> %s", (r, t) => { expect(ratioText(r)).toBe(t); });
+});
+
+describe("verdict", () => {
+  const v = (ratio_to_random: number | null) => verdict({ mean_drop: 0.1, ratio_to_random, label_flip_rate: 0, share_flows_beating_random: 0 });
+  it.each([
+    [null, "neutral", "no result"], [NaN, "neutral", "no result"], [Infinity, "neutral", "no result"],
+    [38.6, "ok", "better than random"], [2, "ok", "better than random"],
+    [1.99, "warn", "barely better than random"], [1.01, "warn", "barely better than random"],
+    [1, "danger", "no better than random"], [0.5, "danger", "no better than random"], [0, "danger", "no better than random"],
+    [-3, "danger", "no better than random"],
+  ])("%s -> %s / %s", (r, tone, text) => { expect(v(r)).toEqual({ tone, text }); });
+});
+
+describe("Can I trust it? card", () => {
+  const meth = (o: Record<string, unknown> = {}) => ({ mean_drop: 0.4, ratio_to_random: 38.64, label_flip_rate: 0.25, share_flows_beating_random: 0.9, ...o });
+  const faith = (o: Record<string, unknown> = {}) => ({
+    model: "rf-v3", model_matches: true, flows: 12345, top_k: 5, random_mean_drop: 0.01,
+    methods: { shap: meth(), lime: meth({ mean_drop: 0.2, ratio_to_random: 1.25, label_flip_rate: 0.1, share_flows_beating_random: 0.5 }) }, ...o,
+  });
+  const sensorWith = (f: unknown, o: Record<string, unknown> = {}) =>
+    sensorState({ sensor_id: 3, name: "gw", status: report({ faithfulness: f }), ...o });
+  const card = async () => within((await screen.findByText("Can I trust it?")).closest(".card") as HTMLElement);
+
+  it("shows Loading… before the status arrives", async () => {
+    let release!: () => void;
+    sensorsGate = new Promise<void>((r) => { release = r; });
+    show();
+    await loaded();
+    const c = await card();
+    expect(c.getByText("Loading…")).toBeInTheDocument();
+    release();
+    await waitFor(() => expect(c.queryByText("Loading…")).toBeNull());
+  });
+
+  it("shows a status error and not the Loading text", async () => {
+    sensorsError = new Error("status broke");
+    show();
+    await loaded();
+    const c = await card();
+    expect(await c.findByText("status broke")).toBeInTheDocument();
+    expect(c.queryByText("Loading…")).toBeNull();
+  });
+
+  it("asks for the right endpoint", async () => {
+    show();
+    await loaded();
+    await card();
+    await waitFor(() => expect(h.api.mock.calls.some(([p]) => p === "/sensors/status")).toBe(true));
+  });
+
+  it("sensor not in the list: names it by number", async () => {
+    sensorsBody = sensorsStatus([sensorState({ sensor_id: 99, name: "other" })]);
+    show();
+    await loaded();
+    const c = await card();
+    expect(await c.findByText(/Sensor #3 hasn't reported an explanation test/)).toBeInTheDocument();
+    expect(c.getByText("IDPS_FAITHFULNESS_REPORT")).toBeInTheDocument();
+  });
+
+  it.each([["absent", undefined], ["null", null]])("sensor with faithfulness %s: names it by name", async (_n, f) => {
+    sensorsBody = sensorsStatus([sensorWith(f)]);
+    show();
+    await loaded();
+    const c = await card();
+    expect(await c.findByText(/Sensor gw hasn't reported an explanation test/)).toBeInTheDocument();
+    expect(c.queryByText(/test flows/)).toBeNull();
+  });
+
+  it("an offline sensor with a stored status still shows its faithfulness", async () => {
+    sensorsBody = sensorsStatus([sensorWith(faith(), { online: false })]);
+    show();
+    await loaded();
+    const c = await card();
+    expect(await c.findByText("SHAP")).toBeInTheDocument();
+  });
+
+  it("an offline sensor without any status says it hasn't reported", async () => {
+    sensorsBody = sensorsStatus([sensorState({ sensor_id: 3, name: "gw", online: false, status: null })]);
+    show();
+    await loaded();
+    expect(await (await card()).findByText(/Sensor gw hasn't reported/)).toBeInTheDocument();
+  });
+
+  it("uses the alert's sensor, not another one", async () => {
+    sensorsBody = sensorsStatus([
+      sensorState({ sensor_id: 1, name: "first", status: report({ faithfulness: faith({ flows: 1, top_k: 9 }) }) }),
+      sensorWith(faith({ flows: 2000, top_k: 4 })),
+    ]);
+    show();
+    await loaded();
+    const c = await card();
+    expect(await c.findByText(/removing the 4 features it ranks highest/)).toBeInTheDocument();
+    expect(c.queryByText(/removing the 9 features/)).toBeNull();
+  });
+
+  it("intro sentence uses top_k and the flow count", async () => {
+    sensorsBody = sensorsStatus([sensorWith(faith())]);
+    show();
+    await loaded();
+    const c = await card();
+    const p = await c.findByText(/removing the 5 features it ranks highest/);
+    expect(p.textContent).toMatch(/^If an explanation is faithful, removing the 5 features it ranks highest hurts the model far more than removing 5 random ones\./);
+    expect(p.textContent).toContain(`Measured on a sample of ${(12345).toLocaleString()} flows:`);
+    expect(c.getByText("Whether the explanation reflects what the model really used, not whether the prediction is right.")).toBeInTheDocument();
+  });
+
+  it("one row per method, SHAP then LIME, with ratio and the detail line", async () => {
+    sensorsBody = sensorsStatus([sensorWith(faith())]);
+    show();
+    await loaded();
+    const c = await card();
+    await c.findByText("SHAP");
+    const items = Array.from(c.getAllByRole("listitem")) as HTMLElement[];
+    expect(items.map((li) => li.querySelector("b")!.textContent)).toEqual(["SHAP", "LIME"]);
+    expect(items[0].querySelector(".trust-ratio")).toHaveTextContent("38.6×");
+    expect(items[1].querySelector(".trust-ratio")).toHaveTextContent("1.25×");
+    expect(items[0].textContent).toContain(`(${percent(0.4, 1)} vs ${percent(0.01, 1)})`);
+    expect(items[0].textContent).toContain(`changed in ${percent(0.25)} of flows`);
+    expect(items[0].textContent).toContain(`beat random on ${percent(0.9)} of flows`);
+    expect(items[1].textContent).toContain(`(${percent(0.2, 1)} vs ${percent(0.01, 1)})`);
+    expect(items[1].textContent).toContain(`changed in ${percent(0.1)} of flows`);
+    expect(items[1].textContent).toContain(`beat random on ${percent(0.5)} of flows`);
+  });
+
+  it("only SHAP present: one row; only LIME present: one row", async () => {
+    sensorsBody = sensorsStatus([sensorWith(faith({ methods: { shap: meth() } }))]);
+    const { unmount } = show();
+    await loaded();
+    let c = await card();
+    await c.findByText("SHAP");
+    expect(c.queryByText("LIME")).toBeNull();
+    expect(c.getAllByRole("listitem")).toHaveLength(1);
+    unmount();
+    sensorsBody = sensorsStatus([sensorWith(faith({ methods: { lime: meth() } }))]);
+    show();
+    await loaded();
+    c = await card();
+    await c.findByText("LIME");
+    expect(c.queryByText("SHAP")).toBeNull();
+  });
+
+  it("no methods: intro but no rows", async () => {
+    sensorsBody = sensorsStatus([sensorWith(faith({ methods: {} }))]);
+    show();
+    await loaded();
+    const c = await card();
+    await c.findByText(/removing the 5 features it ranks highest/);
+    expect(c.queryAllByRole("listitem")).toHaveLength(0);
+  });
+
+  describe("used for this alert", () => {
+    const usedRows = (_c: ReturnType<typeof within>) =>
+      Array.from(document.querySelectorAll(".trust-list li.used")).map((li) => li.querySelector("b")!.textContent);
+
+    it("marks the method the explanation used", async () => {
+      sensorsBody = sensorsStatus([sensorWith(faith())]);
+      show();
+      await loaded();
+      const c = await card();
+      expect(await c.findByText("used for this alert")).toHaveClass("pill");
+      expect(usedRows(c)).toEqual(["SHAP"]);
+      expect(c.getAllByText("used for this alert")).toHaveLength(1);
+    });
+
+    it("matches case-insensitively and can be LIME", async () => {
+      alert = mkAlert({ explanation: { method: "LIME", predicted_class: "PortScan", top_features: [] } });
+      sensorsBody = sensorsStatus([sensorWith(faith())]);
+      show();
+      await loaded();
+      const c = await card();
+      await c.findByText("used for this alert");
+      expect(usedRows(c)).toEqual(["LIME"]);
+    });
+
+    it.each([["missing", { predicted_class: "PortScan", top_features: [] }], ["unknown", { method: "anchors", top_features: [] }],
+      ["not a string", { method: 5, top_features: [] }]])("none when the method is %s", async (_n, ex) => {
+      alert = mkAlert({ explanation: ex });
+      sensorsBody = sensorsStatus([sensorWith(faith())]);
+      show();
+      await loaded();
+      const c = await card();
+      await c.findByText("SHAP");
+      expect(c.queryByText("used for this alert")).toBeNull();
+      expect(usedRows(c)).toEqual([]);
+    });
+
+    it("none when the alert has no explanation", async () => {
+      alert = mkAlert({ explanation: null });
+      sensorsBody = sensorsStatus([sensorWith(faith())]);
+      show();
+      await loaded();
+      const c = await card();
+      await c.findByText("SHAP");
+      expect(c.queryByText("used for this alert")).toBeNull();
+    });
+
+    it("a method the sensor did not test is not shown as used", async () => {
+      sensorsBody = sensorsStatus([sensorWith(faith({ methods: { lime: meth() } }))]);
+      show();
+      await loaded();
+      const c = await card();
+      await c.findByText("LIME");
+      expect(c.queryByText("used for this alert")).toBeNull();
+    });
+  });
+
+  it("the first line is shown even before data and without faithfulness", async () => {
+    show();
+    await loaded();
+    const c = await card();
+    expect(c.getByText(/Whether the explanation reflects what the model really used/)).toBeInTheDocument();
+    await c.findByText(/hasn't reported/);
+    expect(c.getByText(/Whether the explanation reflects/)).toBeInTheDocument();
+  });
+
+  describe("verdict pill and ratio text in rows", () => {
+    const rows = async () => {
+      const c = await card();
+      await c.findByText("SHAP");
+      return Array.from(document.querySelectorAll(".trust-list li")) as HTMLElement[];
+    };
+    it("each row has a verdict pill", async () => {
+      sensorsBody = sensorsStatus([sensorWith(faith({ methods: { shap: meth({ ratio_to_random: 38.64 }), lime: meth({ ratio_to_random: 1.25 }) } }))]);
+      show();
+      await loaded();
+      const [shap, lime] = await rows();
+      expect(within(shap).getByText("better than random")).toHaveClass("pill", "ok");
+      expect(within(lime).getByText("barely better than random")).toHaveClass("pill", "warn");
+    });
+    it("danger and neutral verdicts, with their ratio text", async () => {
+      sensorsBody = sensorsStatus([sensorWith(faith({ methods: { shap: meth({ ratio_to_random: -2 }), lime: meth({ ratio_to_random: null }) } }))]);
+      show();
+      await loaded();
+      const [shap, lime] = await rows();
+      expect(within(shap).getByText("no better than random")).toHaveClass("pill", "danger");
+      expect(shap.querySelector(".trust-ratio")).toHaveTextContent("worse than random");
+      expect(within(lime).getByText("no result")).toHaveClass("pill", "neutral");
+      expect(lime.querySelector(".trust-ratio")).toHaveTextContent("—");
+    });
+    it("sr-only text follows the ratio when it is non-null and not negative", async () => {
+      sensorsBody = sensorsStatus([sensorWith(faith({ methods: { shap: meth({ ratio_to_random: 0 }), lime: meth({ ratio_to_random: 3 }) } }))]);
+      show();
+      await loaded();
+      const [shap, lime] = await rows();
+      expect(shap.querySelector(".trust-ratio .sr-only")).toHaveTextContent("the confidence drop of random features");
+      expect(lime.querySelector(".trust-ratio .sr-only")).toHaveTextContent("the confidence drop of random features");
+      expect(lime.querySelector(".trust-ratio")).toHaveTextContent("3× the confidence drop of random features");
+    });
+    it("no sr-only text for a null or negative ratio", async () => {
+      sensorsBody = sensorsStatus([sensorWith(faith({ methods: { shap: meth({ ratio_to_random: null }), lime: meth({ ratio_to_random: -1 }) } }))]);
+      show();
+      await loaded();
+      const [shap, lime] = await rows();
+      expect(shap.querySelector(".trust-ratio .sr-only")).toBeNull();
+      expect(lime.querySelector(".trust-ratio .sr-only")).toBeNull();
+    });
+  });
+
+  describe("model_check", () => {
+    const note = async (o: Record<string, unknown>) => {
+      sensorsBody = sensorsStatus([sensorWith(faith(o))]);
+      show();
+      await loaded();
+      return (await (await card()).findByText(/Measured offline for model/)).textContent!;
+    };
+    const SENT = "The report only names the algorithm, so a retrained model of the same kind would also match.";
+    it("name + matching: adds the sentence", async () => { expect(await note({ model_check: "name" })).toContain(SENT); });
+    it("digest: no sentence", async () => { expect(await note({ model_check: "digest" })).not.toContain(SENT); });
+    it("absent (older SOC): no sentence", async () => { expect(await note({})).not.toContain(SENT); });
+    it("name but not matching: only the different-model sentence", async () => {
+      const t = await note({ model_check: "name", model_matches: false });
+      expect(t).not.toContain(SENT);
+      expect(t).toContain("different model than the one tested");
+    });
+  });
+
+  describe("model_matches", () => {
+    it("true: no warning pill and no extra sentence", async () => {
+      sensorsBody = sensorsStatus([sensorWith(faith())]);
+      show();
+      await loaded();
+      const c = await card();
+      const note = await c.findByText(/Measured offline for model/);
+      expect(note.textContent).toContain("rf-v3");
+      expect(note.textContent).not.toContain("different model");
+      expect(c.queryByText("test was for another model")).toBeNull();
+    });
+
+    it("false: pill and the extra sentence", async () => {
+      sensorsBody = sensorsStatus([sensorWith(faith({ model_matches: false }))]);
+      show();
+      await loaded();
+      const c = await card();
+      expect(await c.findByText("test was for another model")).toHaveClass("pill");
+      expect(c.getByText(/Measured offline for model/).textContent)
+        .toContain("The sensor runs a different model than the one tested, so these numbers may not apply.");
+    });
+
+    it("no pill when there is no faithfulness data", async () => {
+      sensorsBody = sensorsStatus([sensorWith(null)]);
+      show();
+      await loaded();
+      const c = await card();
+      await c.findByText(/hasn't reported/);
+      expect(c.queryByText("test was for another model")).toBeNull();
+    });
   });
 });

@@ -20,9 +20,10 @@ review by the reviewer subagent, with their findings fixed before moving on.
 | Assistant (conversations + playbooks aside, proposal cards, switched-off state) | ✅ Done, tested, reviewed |
 | Admin (users, sensors, audit log with event groups) | ✅ Done, tested, reviewed twice. Backend: `/admin/audit` takes `action` repeated (up to 20) |
 | Threat Center (home page; replaces Metrics) | ✅ Done, tested, reviewed. Heatmap by day, sensor health and mode badge wait for Phase 3; traffic chart left for Phase 4 |
-| Phase 3 backend (sensor status, class by day, would-block events) | ⬜ Not started |
+| Phase 3 backend (sensor status, class by day, would-block events) | ✅ Done, tested, reviewed; frontend wired (mode badge, heatmap, sensor health, policy + both allowlists, Admin last seen, "would block · dry-run") |
+| "Can I trust it?" faithfulness card | ✅ Done, tested, reviewed twice |
 
-Phase 1 and 2 are committed together on the `ui-redesign` branch (13 Nov 2026), not merged into `main` yet.
+Phase 1 and 2 are committed together on the `ui-redesign` branch (13 Nov 2026), not merged into `main` yet. Phase 3 is uncommitted on the same branch.
 
 Things decided along the way:
 - "Block…" links from Alert detail and Maps open the Response form filled in; the analyst
@@ -40,6 +41,19 @@ Things decided along the way:
   the busiest links, not the graph. The search box matches class names ignoring case (the API filter
   is exact), using the window's known classes. Live refreshes wait at most 5 s during a steady
   stream of alerts (`useLiveRefresh` max wait), and pending actions poll every 15 s instead.
+- Phase 3: sensor data lives in new tables only (`sensor_status`, `would_blocks`), since the SOC has
+  no migrations. A sensor shows online if it reported in the last 2 min; a revoked one is always
+  offline. `checksum_ok` is always true (a sensor with a bad model file refuses to start).
+  Would-block events carry the sensor's `decided_at`; the dashboard counts one for its block time
+  and only for the same sensor. "Anomaly" in the heatmap = alerts the Isolation Forest also flags
+  (benign-classified outliers never reach the SOC). Class-by-day is one query, cached 60 s; an
+  existing DB needs the manual `CREATE INDEX` in docs/soc.md. Known gap: `would_blocks` isn't pruned.
+- "Can I trust it?" (Alert detail): model-level SHAP/LIME deletion-test numbers, sent in the sensor
+  status from `IDPS_FAITHFULNESS_REPORT`, with a verdict per method (≥2× better than random = ok).
+  Bad results (null or negative ratios) are shown, not dropped. The model match is by file checksum
+  (`model_check: "digest"`) for reports written after 14 Nov 2026; the existing
+  `reports/friday_xgboost_faithfulness.json` predates that and only matches by algorithm name, so
+  re-run `python -m idps.explain faithfulness` to get the checksum.
 - The old Metrics page's "by severity" table and alerts-over-time chart are gone with it;
   `recharts` is now unused but kept for the Phase 4 traffic chart.
 

@@ -3,6 +3,7 @@ import { api } from "../api/client";
 import type { AdminUser, AuditEntry, Page, Role, Sensor } from "../api/types";
 import { useAuth } from "../auth";
 import { Card, ErrorText, PageHead, Pill, useAction, useLoad } from "../components/common";
+import { useSensors } from "../sensors";
 import { dateTime, label } from "../format";
 
 /** Admin: users, sensors and the audit log (wireframe screen 7). Only admins get this route. */
@@ -173,6 +174,8 @@ function Users({ onChanged }: { onChanged: () => void }) {
 
 function Sensors({ onChanged }: { onChanged: () => void }) {
   const { data, error, reload } = useLoad(() => api<Sensor[]>("/admin/sensors"), []);
+  const { data: seen, error: seenError } = useSensors();
+  const stateOf = (id: number) => seen?.sensors.find((x) => x.sensor_id === id);
   const act = useAction();
   const [name, setName] = useState("");
   const [token, setToken] = useState<{ name: string; token: string } | null>(null);
@@ -240,10 +243,18 @@ function Sensors({ onChanged }: { onChanged: () => void }) {
           <li key={s.id}>
             <span>
               <b>#{s.id} {s.name}</b>
-              <span className="muted small-text" style={{ display: "block" }}>created {dateTime(s.created_at)}</span>
+              <span className="muted small-text" style={{ display: "block" }}>
+                created {dateTime(s.created_at)}
+                {seen && !s.revoked && ` · ${stateOf(s.id)?.last_seen_at ? `last seen ${dateTime(stateOf(s.id)!.last_seen_at)}` : "never reported"}`}
+              </span>
             </span>
             <span className="row-actions" style={{ alignItems: "center" }}>
-              <Pill tone={s.revoked ? "neutral" : "ok"}>{s.revoked ? "revoked" : "active"}</Pill>
+              {/* Until the status loads (or if it fails) the pill can't say online or offline. */}
+              {s.revoked ? <Pill>revoked</Pill>
+                : !seen ? <Pill>{seenError ? "status unavailable" : "checking…"}</Pill>
+                : stateOf(s.id)?.online ? <Pill tone="ok">online</Pill>
+                : stateOf(s.id)?.last_seen_at ? <Pill tone="warn">offline</Pill>
+                : <Pill>never reported</Pill>}
               {!s.revoked && (
                 <button className="small danger-soft" disabled={act.busy} onClick={() => void revoke(s)}
                   aria-label={`Revoke sensor ${s.name}`}>Revoke</button>
@@ -262,7 +273,6 @@ function Sensors({ onChanged }: { onChanged: () => void }) {
       <p className="muted small-text" style={{ margin: "10px 0 0" }}>
         Adding a sensor issues its token. The token is shown <b>once</b>, then only its hash is kept: put it in the
         sensor's <code>IDPS_SOC_SENSOR_TOKEN</code>. A lost token can't be shown again: revoke the sensor and add a new one.
-        When each sensor was last seen appears here once sensors report their status.
       </p>
     </Card>
   );

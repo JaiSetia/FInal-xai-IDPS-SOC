@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
-import Response, { ttlText } from "../pages/Response";
+import Response, { exactPercent, ttlText } from "../pages/Response";
+import { policy, report, sensorState, sensorsStatus } from "./sensor-fixtures";
 
 const h = vi.hoisted(() => ({ api: vi.fn(), reload: null as null | (() => void) }));
 vi.mock("../api/client", async (orig) => ({ ...(await orig<typeof import("../api/client")>()), api: h.api }));
@@ -12,6 +13,7 @@ interface Data {
   done: Record<string, P>; older: Record<string, P>;
 }
 let data: Data;
+let sensorsBody: unknown;
 let postError: Error | null;
 let postGate: Promise<void> | null;
 let alertGate: Promise<void> | null;
@@ -50,6 +52,7 @@ async function expectAllReloaded(n: number) {
 
 beforeEach(() => {
   data = { blocks: [], pending: { items: [] }, confirmed: { items: [] }, alerts: [], done: {}, older: {} };
+  sensorsBody = sensorsStatus();
   postError = null;
   postGate = null;
   alertGate = null;
@@ -63,6 +66,7 @@ beforeEach(() => {
       if (path === "/actions") return { id: 9, status: "pending", ...opts.json };
       return { id: 3, status: "confirmed" };
     }
+    if (path === "/sensors/status") return sensorsBody;
     const page = (items: unknown[], next_cursor: string | null = null) => ({ items, total: items.length, next_cursor });
     if (path.startsWith("/blocks")) return page(data.blocks);
     if (path.startsWith("/alerts?limit=1")) {
@@ -98,6 +102,12 @@ describe("ttlText", () => {
   it.each([["900"], [null], [undefined], [NaN], [Infinity]])("%s -> null", (v) => {
     expect(ttlText(v)).toBeNull();
   });
+});
+
+describe("exactPercent", () => {
+  it.each([[0.925, "92.5%"], [0.9, "90%"], [0.6, "60%"], [1, "100%"], [0, "0%"], [0.1 + 0.2, "30%"], [0.07, "7%"], [0.12345, "12.345%"]])(
+    "%s -> %s", (x, t) => { expect(exactPercent(x)).toBe(t); });
+  it("has no float noise", () => { expect(exactPercent(0.57)).toBe("57%"); expect(exactPercent(0.29)).toBe("29%"); });
 });
 
 describe("blocks table", () => {
@@ -690,5 +700,137 @@ describe("sensor guess", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(form().getByLabelText("Sensor #")).toHaveValue("");
     expect(screen.queryByText(/sent the newest alert/)).toBeNull();
+  });
+});
+
+describe("policy and allowlist cards", () => {
+  const card = (t: string) => within(screen.getByText(t, { selector: "h2" }).closest(".card") as HTMLElement);
+  const live = (id: number, name: string, o: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) =>
+    sensorState({ sensor_id: id, name, status: report(o), ...extra });
+
+  it("policy: no sensor online", async () => {
+    show();
+    expect(await screen.findByText(/No sensor is online/)).toBeInTheDocument();
+  });
+
+  it("policy: offline, revoked and status-less sensors do not count", async () => {
+    sensorsBody = sensorsStatus([
+      live(1, "a", {}, { online: false }), live(2, "b", {}, { revoked: true }), sensorState({ sensor_id: 3, status: null }),
+    ]);
+    show();
+    expect(await screen.findByText(/No sensor is online/)).toBeInTheDocument();
+  });
+
+  it("policy: one sensor, mode pill and sentences, no sensor heading", async () => {
+    sensorsBody = sensorsStatus([live(1, "gw", { policy: policy({ window_seconds: 60, block_ttl_seconds: 900, unblock_grace_seconds: 3600, max_analyst_blocks: 1000 }) })]);
+    show();
+    const c = card("Response policy");
+    expect(await c.findByText("blocking on")).toHaveClass("pill");
+    const t = c.getByText(/flows/).textContent!;
+    expect(t).toMatch(/^5 flows ≥ .*90.* confidence from one address within 1 min$/);
+    expect(c.getByText(/aren't sent/).textContent).toMatch(/alerts below .*60.* confidence aren't sent/);
+    expect(c.getByText("15 min")).toBeInTheDocument();
+    expect(c.getByText("no auto-block of that address for 1 h")).toBeInTheDocument();
+    expect(c.getByText("at most 1,000 at once")).toBeInTheDocument();
+    expect(c.queryByRole("heading", { name: "gw" })).toBeNull();
+  });
+
+  it("policy: thresholds are shown exactly, not rounded", async () => {
+    sensorsBody = sensorsStatus([live(1, "gw", { policy: policy({ confidence_threshold: 0.925, min_alert_confidence: 0.6 }) })]);
+    show();
+    const c = card("Response policy");
+    expect(await c.findByText(/5 flows ≥ 92\.5% confidence from one address/)).toBeInTheDocument();
+    expect(c.getByText("alerts below 60% confidence aren't sent")).toBeInTheDocument();
+  });
+
+  it("policy: unblock grace 0 says the address can be auto-blocked again at once", async () => {
+    sensorsBody = sensorsStatus([live(1, "gw", { policy: policy({ unblock_grace_seconds: 0 }) })]);
+    show();
+    const c = card("Response policy");
+    expect(await c.findByText("the address can be auto-blocked again at once")).toBeInTheDocument();
+    expect(c.queryByText(/no auto-block of that address/)).toBeNull();
+  });
+
+  it("policy: dry-run and not-blocking pills; a window that is not a whole minute uses seconds", async () => {
+    sensorsBody = sensorsStatus([
+      live(1, "gw", { dry_run: true, policy: policy({ window_seconds: 45 }) }),
+      live(2, "lab", { blocking_enabled: false }),
+    ]);
+    show();
+    const c = card("Response policy");
+    expect(await c.findByText("dry-run: blocks are only logged")).toHaveClass("pill");
+    expect(c.getByText("not blocking")).toHaveClass("pill");
+    expect(c.getByText(/within 45 s$/)).toBeInTheDocument();
+  });
+
+  it("policy: names each sensor only when there are several", async () => {
+    sensorsBody = sensorsStatus([live(1, "gw"), live(2, "lab", { policy: policy({ block_ttl_seconds: 3600 }) })]);
+    show();
+    const c = card("Response policy");
+    expect(await c.findByRole("heading", { name: "gw" })).toBeInTheDocument();
+    expect(c.getByRole("heading", { name: "lab" })).toBeInTheDocument();
+    expect(c.getByText("1 h")).toBeInTheDocument();
+  });
+
+  it("allowlist: SOC list and each reporting sensor's list", async () => {
+    sensorsBody = sensorsStatus([
+      live(1, "gw", { allowlist: ["10.0.0.254", "192.168.1.1"] }),
+      live(2, "off", { allowlist: ["9.9.9.9"] }, { online: false }),
+    ], ["10.9.9.9"]);
+    show();
+    const c = card("Never blocked · allowlist");
+    expect(await c.findByText("10.9.9.9")).toBeInTheDocument();
+    expect(c.getByText("10.0.0.254")).toBeInTheDocument();
+    expect(c.getByText("192.168.1.1")).toBeInTheDocument();
+    expect(c.getByRole("heading", { name: /^Sensor gw/ })).toBeInTheDocument();
+    expect(c.queryByText("9.9.9.9")).toBeNull();
+    expect(c.queryByText(/No sensor online/)).toBeNull();
+  });
+
+  it("allowlist: says how many entries the sensor did not send", async () => {
+    sensorsBody = sensorsStatus([live(1, "gw", { allowlist: ["1.1.1.1", "2.2.2.2"], allowlist_total: 7 })], []);
+    show();
+    const c = card("Never blocked · allowlist");
+    expect(await c.findByText("and 5 more not shown (the sensor reports the first 2).")).toBeInTheDocument();
+  });
+
+  it.each([[undefined], [2], [1]])("allowlist: no 'more not shown' line when allowlist_total is %s", async (total) => {
+    sensorsBody = sensorsStatus([live(1, "gw", { allowlist: ["1.1.1.1", "2.2.2.2"], allowlist_total: total })], []);
+    show();
+    const c = card("Never blocked · allowlist");
+    expect(await c.findByText("1.1.1.1")).toBeInTheDocument();
+    expect(c.queryByText(/more not shown/)).toBeNull();
+  });
+
+  it("allowlist: duplicate entries render without React key warnings", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    sensorsBody = sensorsStatus([live(1, "gw", { allowlist: ["1.1.1.1", "1.1.1.1"] })], ["9.9.9.9", "9.9.9.9"]);
+    show();
+    const c = card("Never blocked · allowlist");
+    await waitFor(() => expect(c.getAllByText("1.1.1.1")).toHaveLength(2));
+    expect(c.getAllByText("9.9.9.9")).toHaveLength(2);
+    expect(err.mock.calls.filter(([m]) => /same key|unique "key"/.test(String(m)))).toEqual([]);
+  });
+
+  it("allowlist: empty lists say empty; no sensor says so", async () => {
+    sensorsBody = sensorsStatus([], []);
+    show();
+    const c = card("Never blocked · allowlist");
+    expect(await c.findByText("empty")).toBeInTheDocument();
+    expect(c.getByText("No sensor online to report its own list.")).toBeInTheDocument();
+  });
+
+  it("allowlist: a reporting sensor with an empty list shows empty twice", async () => {
+    sensorsBody = sensorsStatus([live(1, "gw", { allowlist: [] })], []);
+    show();
+    const c = card("Never blocked · allowlist");
+    await waitFor(() => expect(c.getAllByText("empty")).toHaveLength(2));
+  });
+
+  it("shows a status error in both cards", async () => {
+    const base = h.api.getMockImplementation()!;
+    h.api.mockImplementation(async (p: string, o?: unknown) => { if (p === "/sensors/status") throw new Error("sensors down"); return base(p, o); });
+    show();
+    await waitFor(() => expect(screen.getAllByText("sensors down")).toHaveLength(2));
   });
 });

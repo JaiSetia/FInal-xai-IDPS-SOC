@@ -72,6 +72,16 @@ class Metrics:
         with self._lock:
             self._latency_s.append(seconds)
 
+    def status(self) -> dict:
+        """The numbers of the sensor status report. Unlike snapshot() it does not move the
+        flow-rate baseline, so the periodic metrics line is not affected."""
+        with self._lock:
+            counts = dict(self.counts)
+            shap = _percentiles(self._shap_ms)
+        return {"flows": counts["flows"], "alerts": counts["alerts"],
+                "blocked": counts["blocked"], "would_block": counts["would_block"],
+                "shap_p95_ms": shap["p95"]}
+
     def snapshot(self, *, pending: int = 0, dry_run: bool = True, since_start: bool = False) -> dict:
         now = self._clock()
         with self._lock:

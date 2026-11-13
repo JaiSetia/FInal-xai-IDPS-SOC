@@ -161,6 +161,10 @@ class SocClient:
                 f"at most {MAX_BLOCK_EVENTS} block events per POST, got {len(events)}", 422)
         return self._post("/ingest/blocks", {"events": events}, "block events")
 
+    def post_status(self, payload: dict) -> dict:
+        """POST the sensor's status snapshot to /sensor/status (one small JSON object)."""
+        return self._post("/sensor/status", payload, "status report")
+
     def get_actions(self) -> list[dict]:
         """GET /sensor/actions: the confirmed analyst actions for this sensor (oldest first)."""
         answer = self._request("GET", "/sensor/actions", None, "action poll")

@@ -143,15 +143,25 @@ export default function TopologyMap({ hours, onShowWorld }: { hours: number; onS
   useEffect(() => {
     const id = refocus.current;
     if (!id) return;
-    refocus.current = null;
     const el = [...(canvas.current?.querySelectorAll<HTMLElement>(".react-flow__node") ?? [])]
       .find((n) => n.dataset.id === id);
     // React Flow blurs a host on the next animation frame when its selection toggles, so focus
-    // goes back after that.
-    if (!el) return;
+    // goes back after that. The id is cleared only once focus has moved: if the graph refreshes
+    // in between, this effect re-runs (its cleanup cancels the frames) and tries again.
+    if (!el) {
+      refocus.current = null;
+      return;
+    }
     let second = 0;
     const first = requestAnimationFrame(() => {
-      second = requestAnimationFrame(() => el.focus({ preventScroll: true }));
+      second = requestAnimationFrame(() => {
+        if (refocus.current === id) refocus.current = null;
+        // Only if focus is still where the key press left it (on the canvas, or dropped to the
+        // page by the re-render): never pull it back from somewhere the user has moved to.
+        const active = document.activeElement;
+        if (active && active !== document.body && !canvas.current?.contains(active)) return;
+        el.focus({ preventScroll: true });
+      });
     });
     return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); };
   }, [selected, nodes]);
@@ -168,15 +178,18 @@ export default function TopologyMap({ hours, onShowWorld }: { hours: number; onS
         <div className="topo-canvas" ref={canvas} onKeyDown={(e) => {
           const el = (e.target as HTMLElement).closest<HTMLElement>(".react-flow__node");
           const id = el?.dataset.id;
+          // A refocus is only asked for when the selection really changes: otherwise nothing
+          // re-renders, and a leftover request would move focus at the next data refresh.
+          refocus.current = null;
           if (e.key === "Escape") {
-            if (id) refocus.current = id;
+            if (id && selected !== null) refocus.current = id;
             setSelected(null);
             return;
           }
           if (e.key !== "Enter" && e.key !== " ") return;
           if (id && data?.nodes.some((n) => n.ip === id)) {
             e.preventDefault();
-            refocus.current = id;
+            if (selected !== id) refocus.current = id;
             setSelected(id);
           }
         }}>

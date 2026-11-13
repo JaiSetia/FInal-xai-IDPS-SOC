@@ -4,6 +4,7 @@ import { useAuth } from "./auth";
 import { Pill } from "./components/common";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { useLiveStatus } from "./live";
+import { blockingMode, useSensors } from "./sensors";
 import Assistant from "./pages/Assistant";
 import Admin from "./pages/Admin";
 import AlertDetail from "./pages/AlertDetail";
@@ -31,6 +32,16 @@ function LiveBadge() {
   return live
     ? <Pill tone="ok" round dot>Live feed</Pill>
     : <Pill tone="neutral" round dot>Live feed offline</Pill>;
+}
+
+/** What the online sensors do with a block decision. Hidden until a sensor reports its status. */
+function ModeBadge() {
+  const { data } = useSensors();
+  const mode = blockingMode(data);
+  if (mode === "unknown") return null;
+  if (mode === "on") return <Pill tone="danger" round>Blocking ON · dry-run off</Pill>;
+  if (mode === "dry-run") return <Pill tone="warn" round>Dry-run · blocks are only logged</Pill>;
+  return <Pill tone="warn" round>Blocking on some sensors only</Pill>;
 }
 
 const loading = <p className="muted">Loading…</p>;
@@ -67,6 +78,7 @@ export default function App() {
           </nav>
           <div className="topbar-status">
             <LiveBadge />
+            <ModeBadge />
             <div className="userbox">
               <span><b>{me.username}</b> ({me.role})</span>
               <button type="button" onClick={logout}>Sign out</button>

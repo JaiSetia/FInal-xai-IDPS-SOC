@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 
-from idps.detect.bundle import load_bundle
+from idps.detect.bundle import load_bundle, read_digest
 from idps.detect.data import load_labelled
 from idps.explain._common import DEFAULT_SEED, sample_rows
 from idps.explain.faithfulness import faithfulness, write_json
@@ -61,7 +61,8 @@ def _faithfulness(args) -> int:
     bundle.select(df, meta)
     result = faithfulness(bundle, df, _background(df, args), n=args.n, k=args.top_k,
                           repeats=args.repeats, seed=args.seed,
-                          include_lime=not args.no_lime, lime_samples=args.lime_samples)
+                          include_lime=not args.no_lime, lime_samples=args.lime_samples,
+                          model_sha256=read_digest(args.bundle))  # verified by load_bundle
     write_json(result, args.output)
     for name, m in result["methods"].items():
         print(f"{name}: mean drop {m['mean_drop']:.3f} vs random "

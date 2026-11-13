@@ -1,19 +1,20 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api, query } from "../api/client";
-import { SEVERITIES, type Action, type Alert, type Block, type MetricsSummary, type Page, type Severity } from "../api/types";
+import {
+  SEVERITIES, type Action, type Alert, type Block, type MetricsSummary, type Page, type Severity, type WouldBlock,
+} from "../api/types";
 import {
   Card, ConfidenceBar, Countdown, ErrorText, PageHead, Pill, SeverityBadge, StatusText, useLoad, useNow,
 } from "../components/common";
 import { endpoint, percent } from "../format";
+import { reporting, useSensors } from "../sensors";
 import { useLiveRefresh } from "../useLiveRefresh";
 import { actionSummary, who } from "./Response";
 import type { Topology } from "./TopologyMap";
 
-/** Threat Center, the home page (wireframe screen 1): map, KPIs, classes, live alerts,
- *  firewall, pending decisions, sensor health and a topology summary.
- *  Cards whose data the sensors don't report yet (class by day, sensor health) say so
- *  instead of showing made-up numbers. */
+/** Threat Center, the home page (wireframe screen 1): map, KPIs, classes by day, live alerts,
+ *  firewall, pending decisions, sensor health and a topology summary. */
 
 const WorldMap = lazy(() => import("./WorldMap"));
 
@@ -101,7 +102,7 @@ function Kpi({ title, value, sub, children }: { title: string; value: string; su
 
 type SortKey = "newest" | "severity" | "confidence";
 
-function LiveAlerts({ blocks }: { blocks: Block[] }) {
+function LiveAlerts({ blocks, wouldBlocks }: { blocks: Block[]; wouldBlocks: WouldBlock[] }) {
   const navigate = useNavigate();
   const now = useNow(10_000);
   const [sort, setSort] = useState<SortKey>("newest");
@@ -133,6 +134,16 @@ function LiveAlerts({ blocks }: { blocks: Block[] }) {
     }
     return m;
   }, [blocks, now]);
+  // A dry-run decision counts like a block would: for its block time (1 h if the sensor didn't
+  // say), and only for alerts from the same sensor.
+  const wouldBlock = useMemo(() => {
+    const live = new Set<string>();
+    for (const w of wouldBlocks) {
+      const at = Date.parse(w.at);
+      if (!Number.isNaN(at) && at + (w.ttl_seconds ?? 3600) * 1000 > now) live.add(`${w.sensor_id}|${w.ip}`);
+    }
+    return live;
+  }, [wouldBlocks, now]);
 
   const rows = useMemo(() => {
     const list = [...(data ?? [])];
@@ -182,7 +193,9 @@ function LiveAlerts({ blocks }: { blocks: Block[] }) {
                   <td><ConfidenceBar value={a.confidence} digits={1} /></td>
                   <td><SeverityBadge severity={a.severity} /></td>
                   <td><StatusText value={a.status} /></td>
-                  <td>{src ? <Pill tone="danger">blocked · {src}</Pill> : <Pill>observe</Pill>}</td>
+                  <td>{src ? <Pill tone="danger">blocked · {src}</Pill>
+                    : wouldBlock.has(`${a.sensor_id}|${a.src_ip}`) ? <Pill tone="warn">would block · dry-run</Pill>
+                    : <Pill>observe</Pill>}</td>
                 </tr>
               );
             })}
@@ -254,12 +267,37 @@ function Decisions() {
 }
 
 function SensorHealth() {
+  const { data, error } = useSensors();
+  const now = useNow(30_000);
+  const live = reporting(data);
+  const sensors = data?.sensors.filter((x) => !x.revoked) ?? [];
+  const liveIds = new Set(live.map((x) => x.sensor_id));
+  const pill = !data ? null
+    : live.length === 0 ? <Pill tone="danger">offline</Pill>
+    : live.length < sensors.length ? <Pill tone="warn">{live.length} of {sensors.length} online</Pill>
+    : <Pill tone="ok">online</Pill>;
   return (
-    <Card title="Sensor health" actions={<Pill>waiting for data</Pill>}>
-      <p className="muted" style={{ margin: 0 }}>
-        Sensors don't report their status to the SOC yet (model, heartbeat, outbox, allowlist).
-        This card fills in once they do.
-      </p>
+    <Card title="Sensor health" actions={pill}>
+      <ErrorText error={error} />
+      {data && sensors.length === 0 && <p className="muted" style={{ margin: 0 }}>No sensors registered. An admin adds them in Admin.</p>}
+      {live.slice(0, 2).map(({ sensor_id, name, status: st, last_seen_at }) => (
+        <dl key={sensor_id} className="kv small-kv">
+          <dt>Sensor</dt><dd><b>{name}</b> · {st.mode === "live" ? `live on ${st.interface ?? "?"}` : "replaying a capture"}</dd>
+          <dt>Mode</dt><dd>{st.dry_run ? "dry-run (blocks only logged)" : st.blocking_enabled ? "blocking" : "not blocking"}</dd>
+          <dt>Model</dt><dd>{st.model.name} {st.model.checksum_ok ? "· checksum ok" : "· checksum FAILED"}</dd>
+          <dt>Heartbeat</dt><dd>{!st.heartbeat.enabled ? "off" : st.heartbeat.ok ? "1 / s · ok" : "failing"}</dd>
+          <dt>Outbox</dt><dd>{st.outbox_pending.toLocaleString()} pending</dd>
+          <dt>SHAP p95</dt><dd>{st.shap_p95_ms == null ? "—" : `${st.shap_p95_ms.toFixed(2)} ms`}</dd>
+          <dt>Allowlist</dt><dd>{st.allowlist_total ?? st.allowlist.length} {(st.allowlist_total ?? st.allowlist.length) === 1 ? "entry" : "entries"}</dd>
+          <dt>Last seen</dt><dd>{last_seen_at ? ago(last_seen_at, now) : "—"}</dd>
+        </dl>
+      ))}
+      {live.length > 2 && <p className="muted small-text">and {live.length - 2} more online.</p>}
+      {sensors.filter((x) => !liveIds.has(x.sensor_id)).slice(0, 3).map((x) => (
+        <p key={x.sensor_id} className="muted small-text" style={{ margin: "8px 0 0" }}>
+          <b>{x.name}</b>: {x.last_seen_at ? `offline, last seen ${ago(x.last_seen_at, now)}` : "has never reported"}
+        </p>
+      ))}
     </Card>
   );
 }
@@ -293,6 +331,64 @@ function TopologySummary({ hours }: { hours: number }) {
   );
 }
 
+const ANOMALY = "Anomaly";
+const HEAT_CLASSES = 5;
+
+/** The last 7 UTC days, oldest first, as YYYY-MM-DD. */
+export function lastSevenDays(now: number): string[] {
+  const today = new Date(now);
+  const base = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate());
+  return Array.from({ length: 7 }, (_, i) => new Date(base - (6 - i) * 86_400_000).toISOString().slice(0, 10));
+}
+
+/** Attack classes by day (wireframe heatmap). "Anomaly" (Isolation Forest outliers) is its own
+ *  row: those alerts also have a class, so it isn't part of the class totals. */
+function Heatmap({ rows }: { rows: NonNullable<MetricsSummary["by_class_per_day"]> }) {
+  const days = lastSevenDays(Date.now());
+  const counts = new Map<string, number>();
+  const totals = new Map<string, number>();
+  for (const r of rows) {
+    counts.set(`${r.class}|${r.day}`, r.count);
+    if (r.class !== ANOMALY) totals.set(r.class, (totals.get(r.class) ?? 0) + r.count);
+  }
+  const ranked = [...totals.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([c]) => c);
+  const classes = ranked.filter((c) => c !== OTHER).slice(0, HEAT_CLASSES);
+  // Everything past the top rows (and the API's own "(other)") is summed into one row.
+  const rest = ranked.filter((c) => !classes.includes(c));
+  if (rest.length > 0) {
+    for (const d of days) {
+      const n = rest.reduce((sum, c) => sum + (counts.get(`${c}|${d}`) ?? 0), 0);
+      counts.set(`${OTHER}|${d}`, n);
+    }
+  }
+  const names = [...classes, ...(rest.length > 0 ? [OTHER] : []), ANOMALY];
+  const max = Math.max(1, ...names.flatMap((c) => days.map((d) => counts.get(`${c}|${d}`) ?? 0)));
+  const level = (n: number) => (n === 0 ? 0 : Math.min(4, 1 + Math.floor((n / max) * 3.999)));
+  const weekday = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString([], { weekday: "short", timeZone: "UTC" });
+  return (
+    <div className="table-wrap">
+      <table className="heatmap">
+        <caption className="sr-only">Alerts per class per day, last 7 days (UTC)</caption>
+        <thead>
+          <tr><th scope="col"><span className="sr-only">Class</span></th>
+            {days.map((d) => <th key={d} scope="col" title={d}>{weekday(d)}<span className="sr-only"> {d}</span></th>)}</tr>
+        </thead>
+        <tbody>
+          {names.map((c) => (
+            <tr key={c} className={c === ANOMALY ? "anomaly" : undefined}>
+              <th scope="row">{c === OTHER ? "other classes" : c}</th>
+              {days.map((d) => {
+                const n = counts.get(`${c}|${d}`) ?? 0;
+                return <td key={d} className={`heat-${level(n)}`} title={`${c}, ${d}: ${n}`}>{n || ""}<span className="sr-only">{n ? "" : "0"}</span></td>;
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function Classes({ m }: { m: MetricsSummary }) {
   const byClass = Object.entries(m.by_class).sort((a, b) => b[1] - a[1]);
   const max = Math.max(1, ...byClass.map(([, c]) => c));
@@ -313,9 +409,17 @@ function Classes({ m }: { m: MetricsSummary }) {
             ))}
           </ul>
         )}
-      <p className="muted small-text">
-        Totals for the window. A day-by-day view needs per-day counts from the API (planned).
-      </p>
+      <p className="muted small-text">Totals for the window.</p>
+      {m.by_class_per_day && (
+        <>
+          <h3 style={{ marginTop: 14 }}>By day, last 7 days (UTC)</h3>
+          <Heatmap rows={m.by_class_per_day} />
+          <p className="muted small-text">
+            “Anomaly”: alerts the Isolation Forest also flags as unusual; they count under their class too.
+            Flows the classifier calls benign aren't sent to the SOC, so unusual benign-looking traffic isn't in this row.
+          </p>
+        </>
+      )}
       <h3 style={{ marginTop: 14 }}>Top source IPs</h3>
       <ul className="queue-list">
         {m.top_sources.slice(0, 4).map((s) => (
@@ -339,7 +443,10 @@ export default function ThreatCenter() {
 
   const metrics = useLoad(() => api<MetricsSummary>(`/metrics/summary${query({ hours })}`), [hours]);
   const blocks = useLoad(() => api<Page<Block>>(`/blocks${query({ active: true, limit: 200 })}`), []);
-  const reloadAll = useCallback(() => { void metrics.reload(); void blocks.reload(); }, [metrics.reload, blocks.reload]);
+  const would = useLoad(() => api<Page<WouldBlock>>(`/blocks/would${query({ since_hours: 24, limit: 200 })}`).then((p) => p.items), []);
+  const reloadAll = useCallback(() => {
+    void metrics.reload(); void blocks.reload(); void would.reload();
+  }, [metrics.reload, blocks.reload, would.reload]);
   useLiveRefresh(reloadAll);
 
   function onSearch(e: FormEvent) {
@@ -386,7 +493,8 @@ export default function ThreatCenter() {
             </Kpi>
             <Kpi title="Detection latency (p50)" value={seconds(latency?.p50_ms)}
               sub={latency ? `p95 ${seconds(latency.p95_ms)}` : undefined} />
-            <Kpi title="Active blocks" value={m ? String(m.active_blocks) : "…"} />
+            <Kpi title="Active blocks" value={m ? String(m.active_blocks) : "…"}
+              sub={m?.would_blocks ? `+ ${m.would_blocks.toLocaleString()} dry-run decisions` : undefined} />
             <Kpi title="False positives" value={m ? percent(m.false_positive_rate, 1) : "…"}
               sub={m ? `${m.false_positives} of ${m.triaged} triaged` : undefined} />
           </div>
@@ -397,7 +505,7 @@ export default function ThreatCenter() {
         </div>
       </div>
 
-      <LiveAlerts blocks={blocks.data?.items ?? []} />
+      <LiveAlerts blocks={blocks.data?.items ?? []} wouldBlocks={would.data ?? []} />
 
       <div className="tc-row3">
         <Firewall blocks={blocks.data?.items ?? null} more={!!blocks.data?.next_cursor} error={blocks.error} />

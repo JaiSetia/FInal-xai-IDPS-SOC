@@ -35,6 +35,10 @@ class LiveSettings(BaseSettings):
     # while the SOC is unreachable. Only used when a SOC is configured.
     action_poll_seconds: float = Field(default=5.0, ge=1.0, le=300.0)
 
+    # How often the sensor reports its status (mode, policy, health) to the SOC; also once at
+    # start. Only used when a SOC is configured.
+    status_seconds: float = Field(default=30.0, ge=5.0, le=3600.0)
+
     metrics_seconds: float = Field(default=10.0, gt=0.0)
 
     soc_url: str | None = Field(default=None, validation_alias=AliasChoices("IDPS_SOC_URL"))

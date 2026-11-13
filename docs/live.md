@@ -134,8 +134,34 @@ When the response engine really blocks an address (not dry-run, and the nftables
 the detector queues a block event `{"event": "blocked", "ip", "reason" (max 500 characters),
 "expires_at", "source": "auto"}`. `expires_at` is the absolute end of the block (UTC, ISO), fixed
 when the block is applied, so a report delayed by an outage still shows the right end; the SOC's
-Blocks page shows the block as inactive after it, so no unblock event is sent. `would_block`
-decisions in dry-run and failed blocks are never reported.
+Blocks page shows the block as inactive after it, so no unblock event is sent. Failed blocks are
+never reported.
+
+In dry-run the detector instead queues `{"event": "would_block", "ip", "reason", "source": "auto",
+"ttl_seconds"}` (no `expires_at`). The SOC stores these in their own table and lists them at
+`GET /blocks/would`; they are never blocks. A sensor that blocks for real never sends them. They
+share the queue, retries and drop rules below.
+
+## Status report
+
+With a SOC configured, a daemon thread (`idps/live/status.py`) posts the sensor's status to
+`POST /sensor/status` once at start and then every `IDPS_LIVE_STATUS_SECONDS` (default 30): dry-run
+and blocking flags, interface and mode, model name and checksum result, the response policy, the
+allowlist (at most 100 entries), outbox size, SHAP p95, heartbeat state and the flows / alerts /
+blocked / would_block counters. No token or URL is in it. A failure is logged once per streak and
+retried at the next interval; detection is never affected. The thread stops before the sink closes.
+
+`IDPS_FAITHFULNESS_REPORT` (optional path) points at the JSON written by
+`python -m idps.explain faithfulness` (for example `reports/friday_xgboost_faithfulness.json`).
+It is read and validated once at start-up (`idps/live/faithfulness.py`: at most 1 MB, finite
+bounded numbers, unknown keys ignored) and its model-level numbers go into the status as
+`faithfulness` (the dashboard's "Can I trust it?" card). A missing or invalid file logs one warning
+and the sensor runs without it; a report whose `config.model` differs from the loaded model is still
+reported, with `model_matches: false` and a warning. `python -m idps.explain faithfulness` writes
+the bundle's sha256 as `config.model_sha256`; when present it is compared with the loaded model's
+digest (`model_check: "digest"`, so a retrained model of the same algorithm does not match). Older
+reports without it fall back to the algorithm name (`model_check: "name"`, a weak match).
+`ratio_to_random` may be `null` or negative and is passed on as is.
 
 Block events travel through the same sender thread as the alerts (detection never waits), in
 batches of at most 100 (`POST /ingest/blocks`), and are retried while the SOC is unavailable, with

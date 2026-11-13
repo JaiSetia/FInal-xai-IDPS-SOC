@@ -283,6 +283,8 @@ class LiveDetector:
             self.metrics.add("would_block" if self.engine.dry_run else "blocked")
             if not self.engine.dry_run:  # the engine returns BLOCK only after the blocker succeeded
                 self._report_block(decision)
+            else:  # nothing was blocked: tell the SOC what would have been, as its own event
+                self._report_would_block(decision)
 
     def _report_block(self, decision) -> None:
         # An absolute expiry, taken now: the SOC would count a ttl from the moment it receives the
@@ -296,6 +298,22 @@ class LiveDetector:
             self.sink.submit_blocks([event])
         except Exception as exc:  # noqa: BLE001  reporting must never stop detection
             log.error("cannot queue the block report for %s: %s: %s", decision.ip,
+                      type(exc).__name__, exc)
+            self.metrics.add("blocks_dropped")
+
+    def _report_would_block(self, decision) -> None:
+        """Dry-run only (never called when blocking for real). The SOC keeps these apart from
+        blocks, so they never count as active blocks or reach the firewall."""
+        event = {"event": "would_block", "ip": decision.ip,
+                 "reason": (decision.reason or "")[:500], "source": "auto",
+                 # the decision time, so an event delayed in the queue keeps its real time
+                 "decided_at": datetime.now(UTC).isoformat()}
+        if decision.ttl_seconds:
+            event["ttl_seconds"] = int(decision.ttl_seconds)
+        try:
+            self.sink.submit_blocks([event])
+        except Exception as exc:  # noqa: BLE001  reporting must never stop detection
+            log.error("cannot queue the would-block report for %s: %s: %s", decision.ip,
                       type(exc).__name__, exc)
             self.metrics.add("blocks_dropped")
 

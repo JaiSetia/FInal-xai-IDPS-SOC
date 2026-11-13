@@ -7,10 +7,12 @@ import {
   type CaseSummary, type Page,
 } from "../api/types";
 import {
-  Card, ErrorText, Pill, Segmented, SeverityBadge, Timeline, useAction, useLoad, useNow, type TimelineItem,
+  Card, ErrorText, Pill, Segmented, SeverityBadge, Timeline, useAction, useLoad, useNow, type TimelineItem, type Tone,
 } from "../components/common";
 import ExplanationChart from "../components/ExplanationChart";
+import type { FaithfulnessMethod } from "../api/types";
 import { dateTime, endpoint, label, num, percent, protocolName } from "../format";
+import { useSensors } from "../sensors";
 
 /** Alert detail with its explanation (wireframe screen 2). */
 
@@ -247,14 +249,91 @@ function AlertPage({ id }: { id: string }) {
               Explain this alert with the assistant
             </Link>
           </Card>
-          <Card title="Can I trust it?">
-            <p className="muted" style={{ margin: 0 }}>
-              How faithful this model's explanations are (how much more confidence drops when its top features
-              are removed than when random ones are) appears here once sensors report their model to the SOC.
-            </p>
-          </Card>
+          <TrustCard sensorId={alert.sensor_id}
+            method={typeof alert.explanation?.method === "string" ? alert.explanation.method.toLowerCase() : null} />
         </div>
       </div>
     </>
+  );
+}
+
+/** "38.6×", "1.2×", "<0.1×"; "—" when the test couldn't compute one (null). */
+export function ratioText(r: number | null): string {
+  if (r === null || !Number.isFinite(r)) return "—";
+  if (r < 0) return "worse than random";
+  if (r < 0.1) return "<0.1×";
+  return `${Number(r >= 10 ? r.toFixed(1) : r.toFixed(2))}×`;
+}
+
+/** How a method did against random features. Passing = clearly better than random (≥ 2×). */
+export function verdict(r: FaithfulnessMethod): { tone: Tone; text: string } {
+  const x = r.ratio_to_random;
+  if (x === null || !Number.isFinite(x)) return { tone: "neutral", text: "no result" };
+  if (x >= 2) return { tone: "ok", text: "better than random" };
+  if (x > 1) return { tone: "warn", text: "barely better than random" };
+  return { tone: "danger", text: "no better than random" };
+}
+
+/** Can I trust it? The deletion test the sensor's model passed offline: remove the top features an
+ *  explanation names and see how much more the confidence drops than when removing random ones.
+ *  Model-level numbers (decided: no live LIME), not a score for this one alert. */
+function TrustCard({ sensorId, method }: { sensorId: number; method: string | null }) {
+  const { data, error } = useSensors();
+  const sensor = data?.sensors.find((s) => s.sensor_id === sensorId);
+  const f = sensor?.status?.faithfulness ?? null;
+  const methods = f ? (["shap", "lime"] as const).filter((m) => f.methods[m]) : [];
+  const weakMatch = f?.model_check === "name";
+  return (
+    <Card title="Can I trust it?" actions={f && !f.model_matches ? <Pill tone="warn">test was for another model</Pill> : undefined}>
+      <p className="muted small-text" style={{ marginTop: 0 }}>
+        Whether the explanation reflects what the model really used, not whether the prediction is right.
+      </p>
+      <ErrorText error={error} />
+      {!data && !error && <p className="muted" style={{ margin: 0 }}>Loading…</p>}
+      {data && !f && (
+        <p className="muted" style={{ margin: 0 }}>
+          {sensor ? `Sensor ${sensor.name}` : `Sensor #${sensorId}`} hasn't reported an explanation test. It reports one when
+          its <code>IDPS_FAITHFULNESS_REPORT</code> points at the output of <code>python -m idps.explain faithfulness</code>.
+        </p>
+      )}
+      {f && (
+        <>
+          <p style={{ marginTop: 0 }}>
+            If an explanation is faithful, removing the {f.top_k} features it ranks highest hurts the model far
+            more than removing {f.top_k} random ones. Measured on a sample of {f.flows.toLocaleString()} flows:
+          </p>
+          <ul className="trust-list">
+            {methods.map((m) => {
+              const r = f.methods[m]!;
+              const used = method === m;
+              const v = verdict(r);
+              return (
+                <li key={m} className={used ? "used" : undefined}>
+                  <div className="trust-head">
+                    <b>{m.toUpperCase()}</b>
+                    {used && <Pill tone="accent">used for this alert</Pill>}
+                    <Pill tone={v.tone}>{v.text}</Pill>
+                    <span className="trust-ratio">
+                      {ratioText(r.ratio_to_random)}
+                      {r.ratio_to_random !== null && r.ratio_to_random >= 0 &&
+                        <span className="sr-only"> the confidence drop of random features</span>}
+                    </span>
+                  </div>
+                  <span className="muted small-text">
+                    confidence drop vs random features ({percent(r.mean_drop, 1)} vs {percent(f.random_mean_drop, 1)});
+                    the predicted class changed in {percent(r.label_flip_rate)} of flows; beat random on {percent(r.share_flows_beating_random)} of flows.
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          <p className="muted small-text" style={{ marginBottom: 0 }}>
+            Measured offline for model <b>{f.model}</b>. It describes this model's explanations in general, not this one alert.
+            {!f.model_matches && " The sensor runs a different model than the one tested, so these numbers may not apply."}
+            {f.model_matches && weakMatch && " The report only names the algorithm, so a retrained model of the same kind would also match."}
+          </p>
+        </>
+      )}
+    </Card>
   );
 }

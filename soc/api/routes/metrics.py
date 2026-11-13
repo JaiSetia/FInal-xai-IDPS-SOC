@@ -1,17 +1,19 @@
 """Dashboard metrics and the topology data for the map."""
 
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import numpy as np
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from soc.api.auth import AnyUser
 from soc.api.db import get_db
-from soc.api.models import SEVERITY_RANK, Alert, AlertStatus, Block, Severity
+from soc.api.models import SEVERITY_RANK, Alert, AlertStatus, Block, Severity, WouldBlock
 from soc.api.routes.blocks import active_clause
 
 router = APIRouter(tags=["metrics"])
@@ -20,6 +22,8 @@ MAX_HOURS = 24 * 30
 MAX_TOPOLOGY_EDGES = 1000
 # Bounded work per request, however many alerts arrive (e.g. during a flood):
 MAX_CLASSES = 25  # classes listed in by_class; the rest are summed as "(other)"
+CLASS_DAYS = 7  # by_class_per_day covers this many UTC days, today included
+ANOMALY_CLASS = "Anomaly"  # row of by_class_per_day: alerts the Isolation Forest also flagged
 LATENCY_SAMPLE = 20_000  # latency percentiles use the newest alerts only
 Hours = Annotated[int, Query(ge=1, le=MAX_HOURS)]
 
@@ -40,6 +44,15 @@ class LatencyStats(BaseModel):
     samples: int
 
 
+class ClassDay(BaseModel):
+    day: str  # YYYY-MM-DD, UTC
+    # "class" is a Python keyword, so the field is aliased
+    class_: str = Field(alias="class")
+    count: int
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class MetricsSummary(BaseModel):
     hours: int
     since: datetime
@@ -54,11 +67,88 @@ class MetricsSummary(BaseModel):
     false_positive_rate: float | None
     detection_latency: LatencyStats
     active_blocks: int
+    would_blocks: int  # dry-run block decisions in the window (not blocks)
+    # Last CLASS_DAYS UTC days whatever `hours` is; only non-zero (day, class) pairs.
+    by_class_per_day: list[ClassDay]
+
+
+_cache_lock = threading.Lock()
+_class_day_cache: dict[tuple, tuple[float, tuple[ClassDay, ...]]] = {}
+CLASS_DAY_CACHE_SECONDS = 60.0
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)  # tests replace this to pin "today"
+
+
+def _monotonic() -> float:
+    return time.monotonic()  # tests replace this to age the cache
+
+
+def clear_class_per_day_cache() -> None:
+    with _cache_lock:
+        _class_day_cache.clear()
+
+
+def class_per_day(db: Session, now: datetime) -> list[ClassDay]:
+    """Alerts per UTC day and class for the last CLASS_DAYS days (oldest day first).
+
+    One grouped query over the last 7 days of alerts (day, class, and the number of outliers);
+    the work grows with the alerts of those 7 days (it is served by the index on
+    (received_at, predicted_class, anomaly_score), but still reads every matching entry). So the
+    result is cached in-process for CLASS_DAY_CACHE_SECONDS, per database and per UTC day: the
+    dashboard can refresh every few seconds during a flood, and a new day never serves yesterday's
+    buckets. New alerts show up in this view up to that long late.
+
+    The busiest MAX_CLASSES classes over the whole period keep their name, the rest are
+    "(other)". "Anomaly" counts alerts whose anomaly_score is above 0, which is exactly what the
+    Isolation Forest calls an outlier (-decision_function > 0 <=> predict == -1); it overlaps with
+    the class rows (an alert has a class AND may be an outlier), so it is not additive."""
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    key = (id(db.get_bind()), today.date().isoformat(), MAX_CLASSES)
+    with _cache_lock:
+        hit = _class_day_cache.get(key)
+        if hit is not None and _monotonic() - hit[0] < CLASS_DAY_CACHE_SECONDS:
+            return list(hit[1])  # a copy: callers must not be able to change the cache
+    days = [today - timedelta(days=n) for n in range(CLASS_DAYS - 1, -1, -1)]
+    # Portable "which day" without date functions (they depend on the database's time zone):
+    # compare with the day starts, newest first.
+    day_index = case(*[(Alert.received_at >= lo, i) for i, lo in reversed(list(enumerate(days)))],
+                     else_=0)
+    outliers = func.sum(case((Alert.anomaly_score > 0, 1), else_=0))
+    rows = db.execute(
+        select(day_index, Alert.predicted_class, func.count(), outliers)
+        .where(Alert.received_at >= days[0], Alert.received_at < today + timedelta(days=1))
+        .group_by(day_index, Alert.predicted_class))
+    per_day: list[dict[str, int]] = [{} for _ in days]
+    anomalies = [0] * len(days)
+    totals: dict[str, int] = {}
+    for i, name, n, out in rows:
+        per_day[int(i)][str(name)] = n
+        anomalies[int(i)] += int(out or 0)
+        totals[str(name)] = totals.get(str(name), 0) + n
+    keep = {name for name, _ in sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))[:MAX_CLASSES]}
+    result: list[ClassDay] = []
+    for lo, counts, n_anomaly in zip(days, per_day, anomalies, strict=True):
+        day = lo.strftime("%Y-%m-%d")
+        merged: dict[str, int] = {}
+        for name, n in counts.items():
+            k = name if name in keep else "(other)"
+            merged[k] = merged.get(k, 0) + n
+        result += [ClassDay(day=day, **{"class": name}, count=n)
+                   for name, n in sorted(merged.items(), key=lambda kv: (-kv[1], kv[0]))]
+        if n_anomaly:
+            result.append(ClassDay(day=day, **{"class": ANOMALY_CLASS}, count=n_anomaly))
+    with _cache_lock:
+        if len(_class_day_cache) > 32:  # a few databases at most; never grow without bound
+            _class_day_cache.clear()
+        _class_day_cache[key] = (_monotonic(), tuple(result))
+    return result
 
 
 @router.get("/metrics/summary", response_model=MetricsSummary)
 def metrics_summary(user: AnyUser, db: Annotated[Session, Depends(get_db)], hours: Hours = 24):
-    now = datetime.now(UTC)
+    now = _utcnow()
     since = now - timedelta(hours=hours)
     in_window = Alert.received_at >= since
 
@@ -102,7 +192,10 @@ def metrics_summary(user: AnyUser, db: Annotated[Session, Depends(get_db)], hour
         false_positive_rate=fp / triaged if triaged else None,
         detection_latency=LatencyStats(p50_ms=p50, p95_ms=p95, samples=len(latencies)),
         active_blocks=db.scalar(select(func.count()).select_from(Block)
-                                .where(active_clause(now))) or 0)
+                                .where(active_clause(now))) or 0,
+        would_blocks=db.scalar(select(func.count()).select_from(WouldBlock)
+                               .where(WouldBlock.at >= since)) or 0,
+        by_class_per_day=class_per_day(db, now))
 
 
 # --- topology ---------------------------------------------------------------------------

@@ -1005,10 +1005,238 @@ def test_a_real_block_is_reported_once_with_the_right_fields(bundle, tmp_path):
     assert abs((expires - datetime.now(UTC)).total_seconds() - 900) < 30
 
 
-def test_dry_run_reports_no_block(bundle, tmp_path):
+def test_dry_run_reports_a_would_block_and_never_a_block(bundle, tmp_path):
     sink = ListSink()
     _run_attack(bundle, sink, tmp_path, dry_run=True)
-    assert sink.blocks == []
+    assert [e["event"] for e in sink.blocks] == ["would_block"]
+    ev = sink.blocks[0]
+    assert set(ev) == {"event", "ip", "reason", "ttl_seconds", "source", "decided_at"}  # no expires_at
+    assert abs((datetime.fromisoformat(ev["decided_at"]) - datetime.now(UTC)).total_seconds()) < 30
+    assert (ev["ip"], ev["source"], ev["ttl_seconds"]) == (CLIENT, "auto", 900)
+    assert re.fullmatch(r"\d+ flows >= [\d.]+ confidence \(.+\) in \d+s", ev["reason"])
+
+
+def test_real_blocking_never_reports_would_block(bundle, tmp_path):
+    sink = ListSink()
+    _run_attack(bundle, sink, tmp_path, dry_run=False)
+    assert {e["event"] for e in sink.blocks} == {"blocked"}
+
+
+def test_would_block_events_are_queued_retried_and_sent_like_other_reports():
+    metrics, up, sent = Metrics(), [False], []
+
+    def post_blocks(batch):
+        if not up[0]:
+            raise SocError("down")
+        sent.extend(batch)
+        return {}
+
+    ev = {"event": "would_block", "ip": "203.0.113.7", "reason": "r", "source": "auto",
+          "ttl_seconds": 900}
+    sink = SocSink(lambda b: {}, Outbox(None), metrics, start=False, post_blocks=post_blocks)
+    sink.submit_blocks([ev, _event()])
+    assert sink.drain() is False and sink._pending_blocks() == 2  # requeued, order kept
+    up[0] = True
+    assert sink.drain() is True and sent == [ev, _event()]
+    assert metrics.counts["blocks_sent"] == 2
+
+
+def test_a_would_block_has_no_expiry_so_it_is_not_dropped_as_ended():
+    metrics, sent = Metrics(), []
+    sink = SocSink(lambda b: {}, Outbox(None), metrics, start=False,
+                   post_blocks=lambda b: sent.extend(b) or {})
+    past = {"event": "blocked", "ip": "203.0.113.8", "reason": "r", "source": "auto",
+            "expires_at": (datetime.now(UTC) - timedelta(seconds=60)).isoformat()}
+    ev = {"event": "would_block", "ip": "203.0.113.7", "reason": "r", "source": "auto",
+          "ttl_seconds": 900}
+    sink.submit_blocks([past, ev])
+    assert sink.drain() is True
+    assert sent == [ev] and metrics.counts["blocks_dropped"] == 1  # only the ended block
+
+
+def test_a_would_block_reaches_the_soc_and_not_its_blocks(
+        bundle, tmp_path, client, sensor_token, analyst_headers, monkeypatch):
+    from idps.soc_client import SocClient
+
+    sensor = SocClient("http://127.0.0.1:9", sensor_token)
+
+    def via_testclient(request, timeout):
+        r = client.post(request.full_url.removeprefix("http://127.0.0.1:9"),
+                        content=request.data, headers=dict(request.header_items()))
+        assert r.status_code == 201, r.text
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n=-1):
+                return r.content
+        return Resp()
+
+    monkeypatch.setattr(sensor._opener, "open", via_testclient)
+    sink = SocSink(sensor.post_alerts, Outbox(None), Metrics(), start=False,
+                   post_blocks=sensor.post_blocks)
+    _run_attack(bundle, sink, tmp_path, dry_run=True)
+    assert sink.drain() is True
+    assert client.get("/blocks", headers=analyst_headers).json()["items"] == []
+    (w,) = client.get("/blocks/would", headers=analyst_headers).json()["items"]
+    assert (w["ip"], w["source"], w["ttl_seconds"]) == (CLIENT, "auto", 900)
+    assert client.get("/metrics/summary", headers=analyst_headers).json()["active_blocks"] == 0
+
+
+# --- Sensor status report ---------------------------------------------------------------------------
+
+def _status(bundle, *, dry_run=True, allowlist=(), heartbeat=None, interface="eth1", **live):
+    from idps.live.status import build_status
+
+    engine = ResponseEngine(Settings(dry_run=dry_run, allowlist=list(allowlist) or ["10.10.1.1"]),
+                            blocker=FakeBlocker())
+    metrics = Metrics()
+    metrics.add("flows", 10)
+    metrics.add("would_block", 2)
+    metrics.observe_shap_ms(20.0, 5)
+    return build_status(engine=engine, bundle=bundle, live_settings=LiveSettings(**live),
+                        metrics=metrics, sink=ListSink(), heartbeat=heartbeat,
+                        interface=interface), metrics
+
+
+def test_status_payload_in_dry_run(bundle):
+    p, _ = _status(bundle, allowlist=["10.10.1.1", "10.10.2.0/24"])
+    assert p["dry_run"] is True and p["blocking_enabled"] is False
+    assert p["mode"] == "live" and p["interface"] == "eth1"
+    assert p["model"] == {"name": bundle.model_name, "checksum_ok": True}
+    assert p["policy"] == {"confidence_threshold": 0.9, "min_flows": 5, "window_seconds": 60.0,
+                           "min_alert_confidence": 0.5, "block_ttl_seconds": 900,
+                           "unblock_grace_seconds": 3600, "max_analyst_blocks": 1000}
+    assert p["allowlist"] == ["10.10.1.1/32", "10.10.2.0/24"]
+    assert p["allowlist_total"] == 2
+    assert p["outbox_pending"] == 0 and p["shap_p95_ms"] == 20.0
+    assert p["heartbeat"] == {"enabled": False, "ok": False}
+    assert p["counters"] == {"flows": 10, "alerts": 0, "blocked": 0, "would_block": 2}
+    assert datetime.fromisoformat(p["sent_at"]).tzinfo is not None
+
+
+def test_status_payload_for_real_blocking_and_replay(bundle):
+    p, _ = _status(bundle, dry_run=False, interface=None)
+    assert p["dry_run"] is False and p["blocking_enabled"] is True
+    assert p["mode"] == "replay" and p["interface"] is None
+
+
+def test_status_payload_heartbeat_and_allowlist_cap(bundle):
+    class HB:
+        failing = True
+
+    p, _ = _status(bundle, heartbeat=HB())
+    assert p["heartbeat"] == {"enabled": True, "ok": False}
+    p, _ = _status(bundle, allowlist=[f"10.{i // 250}.{i % 250}.0/24" for i in range(150)])
+    assert len(p["allowlist"]) == 100 and p["allowlist_total"] == 150
+
+
+def test_status_does_not_disturb_the_metrics_flow_rate(bundle):
+    _, metrics = _status(bundle)
+    first = metrics.snapshot()
+    metrics.status()
+    assert metrics._last[1] == first["flows"]
+
+
+def test_the_status_payload_is_accepted_by_the_soc(bundle, client, sensor_headers, analyst_headers):
+    p, _ = _status(bundle, allowlist=["10.10.1.1", "10.10.2.0/24"])
+    assert client.post("/sensor/status", json=p, headers=sensor_headers).status_code == 200
+    (s,) = client.get("/sensors/status", headers=analyst_headers).json()["sensors"]
+    assert s["status"]["policy"]["min_flows"] == 5 and s["online"] is True
+
+
+def test_the_client_posts_status_with_the_sensor_token(monkeypatch):
+    from idps.soc_client import SocClient
+
+    client = SocClient("http://127.0.0.1:9", "idps_sensor_TOK")
+    seen = {}
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return b'{"last_seen_at": "x"}'
+
+    def fake_open(request, timeout):
+        seen.update(url=request.full_url, auth=request.get_header("Authorization"),
+                    method=request.get_method(), body=json.loads(request.data))
+        return Resp()
+
+    monkeypatch.setattr(client._opener, "open", fake_open)
+    client.post_status({"dry_run": True})
+    assert seen == {"url": "http://127.0.0.1:9/sensor/status", "auth": "Bearer idps_sensor_TOK",
+                    "method": "POST", "body": {"dry_run": True}}
+
+
+def test_the_reporter_logs_a_failure_streak_once_and_recovers(caplog):
+    from idps.live.status import StatusReporter
+
+    class Client:
+        def __init__(self):
+            self.up, self.sent = False, []
+
+        def post_status(self, payload):
+            if not self.up:
+                raise SocError("down")
+            self.sent.append(payload)
+
+    c = Client()
+    reporter = StatusReporter(c, lambda: {"x": 1}, interval=0.01)
+    with caplog.at_level(logging.INFO, logger="idps.live"):
+        assert [reporter.report_once() for _ in range(3)] == [False] * 3
+        assert len([r for r in caplog.records if "status report not delivered" in r.message]) == 1
+        c.up = True
+        assert reporter.report_once() is True
+    assert any("status reports resume" in r.message for r in caplog.records)
+    assert c.sent == [{"x": 1}]
+
+
+def test_the_reporter_survives_a_failing_builder_and_config_errors(caplog):
+    from idps.live.status import StatusReporter
+
+    class Client:
+        def post_status(self, payload):
+            raise SocRejectedError("HTTP 404", 404)
+
+    def broken():
+        raise RuntimeError("boom")
+
+    assert StatusReporter(Client(), dict).report_once() is False
+    assert StatusReporter(Client(), broken).report_once() is False
+
+
+def test_the_reporter_thread_reports_at_start_then_periodically_and_stops():
+    from idps.live.status import StatusReporter
+
+    calls = []
+
+    class Client:
+        def post_status(self, payload):
+            calls.append(payload)
+
+    reporter = StatusReporter(Client(), lambda: {"n": len(calls)}, interval=0.02)
+    reporter.start()
+    wait_for(lambda: len(calls) >= 3)
+    reporter.stop()
+    assert not reporter._thread.is_alive()
+    done = len(calls)
+    time.sleep(0.1)
+    assert len(calls) == done
+
+
+def test_status_interval_is_configurable_and_bounded():
+    assert LiveSettings().status_seconds == 30.0
+    assert LiveSettings(status_seconds=60).status_seconds == 60
+    with pytest.raises(ValueError):
+        LiveSettings(status_seconds=1)
 
 
 def test_a_failed_block_is_not_reported(bundle, tmp_path):
@@ -1840,3 +2068,216 @@ def test_end_to_end_an_analyst_unblock_reaches_the_sensor(
     assert sink.drain() is True  # the unblocked event reaches the Blocks page
     assert client.get("/blocks?active=true", headers=analyst_headers).json()["items"] == []
     assert poller.poll_once() is True and unblocked == ["203.0.113.7"]  # nothing left to do
+
+
+def test_run_stops_the_status_reporter_before_the_sink_closes(model_file, tmp_path, monkeypatch):
+    from idps.live import sinks, status
+
+    order = []
+    real_stop, real_close = status.StatusReporter.stop, sinks.SocSink.close
+
+    def stop(self, timeout=10.0):
+        order.append("reporter.stop")
+        real_stop(self, timeout)
+
+    def close(self):
+        order.append("sink.close")
+        real_close(self)
+
+    monkeypatch.setattr(status.StatusReporter, "stop", stop)
+    monkeypatch.setattr(sinks.SocSink, "close", close)
+    monkeypatch.setenv("IDPS_SOC_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("IDPS_SOC_SENSOR_TOKEN", "idps_sensor_TOK")
+    monkeypatch.setenv("IDPS_LIVE_OUTBOX_FILE", str(tmp_path / "outbox.json"))
+    pcap = write_pcap(tmp_path / "a.pcap", attack_packets(n=3))
+    assert main(["--pcap", str(pcap), "--model", str(model_file)]) == 0
+    assert order == ["reporter.stop", "sink.close"]
+
+
+# --- Faithfulness report in the status ---------------------------------------------------------------
+
+_FAITH_METHOD = {"mean_drop": 0.377, "median_drop": 0.002, "mean_confidence_after": 0.62,
+                 "label_flip_rate": 0.42, "share_flows_beating_random": 1.0,
+                 "ratio_to_random": 38.6}
+
+
+def _faith_report(**over):
+    base = {"config": {"n_flows": 100, "top_k": 5, "model": "xgboost", "seed": 0,
+                       "classes_explained": {"BENIGN": 58}},
+            "mean_confidence_before": 0.99, "random": {"mean_drop": 0.0097, "median_drop": 0.0},
+            "methods": {"shap": _FAITH_METHOD, "lime": _FAITH_METHOD}}
+    return base | over
+
+
+def _write_faith(tmp_path, data, raw=None):
+    path = tmp_path / "faith.json"
+    path.write_text(raw if raw is not None else json.dumps(data))
+    return str(path)
+
+
+def test_a_valid_faithfulness_report_is_loaded_and_unknown_keys_are_ignored(tmp_path, caplog):
+    from idps.live.faithfulness import load_faithfulness
+
+    got = load_faithfulness(_write_faith(tmp_path, _faith_report()), "xgboost")
+    keep = {k: _FAITH_METHOD[k] for k in
+            ("mean_drop", "ratio_to_random", "label_flip_rate", "share_flows_beating_random")}
+    assert got == {"model": "xgboost", "model_matches": True, "model_check": "name", "flows": 100, "top_k": 5,
+                   "random_mean_drop": 0.0097, "methods": {"shap": keep, "lime": keep}}
+    only = _faith_report(methods={"lime": _FAITH_METHOD})
+    assert list(load_faithfulness(_write_faith(tmp_path, only), "xgboost")["methods"]) == ["lime"]
+
+
+def test_the_real_report_in_the_repo_loads():
+    from pathlib import Path
+
+    from idps.live.faithfulness import load_faithfulness
+
+    path = Path(__file__).parent.parent / "reports" / "friday_xgboost_faithfulness.json"
+    if not path.exists():
+        pytest.skip("no report in this checkout")
+    got = load_faithfulness(str(path), "xgboost")
+    assert got["methods"]["shap"]["ratio_to_random"] > 1 and got["model_matches"] is True
+
+
+def test_no_path_or_a_missing_file_means_no_faithfulness(tmp_path, caplog):
+    from idps.live.faithfulness import load_faithfulness
+
+    assert load_faithfulness(None, "xgboost") is None
+    assert load_faithfulness("", "xgboost") is None
+    with caplog.at_level(logging.WARNING, logger="idps.live"):
+        assert load_faithfulness(str(tmp_path / "nope.json"), "xgboost") is None
+    assert len([r for r in caplog.records if "ignoring the faithfulness" in r.message]) == 1
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda d: d.pop("config"),
+    lambda d: d["config"].pop("model"),
+    lambda d: d["config"].update(n_flows=0),
+    lambda d: d["config"].update(n_flows=True),
+    lambda d: d["config"].update(top_k="5"),
+    lambda d: d["random"].update(mean_drop=7),
+    lambda d: d.pop("methods"),
+    lambda d: d.update(methods={}),
+    lambda d: d.update(methods={"other": _FAITH_METHOD}),
+    lambda d: d["methods"]["shap"].update(ratio_to_random=-1e10),
+    lambda d: d["methods"]["shap"].update(ratio_to_random="x"),
+    lambda d: d["methods"]["shap"].update(mean_drop=None),
+    lambda d: d["methods"]["shap"].update(label_flip_rate=2),
+    lambda d: d["methods"]["shap"].update(mean_drop="x"),
+    lambda d: d["methods"]["shap"].pop("mean_drop"),
+])
+def test_an_invalid_faithfulness_report_is_ignored_with_one_warning(tmp_path, caplog, mutate):
+    from idps.live.faithfulness import load_faithfulness
+
+    data = json.loads(json.dumps(_faith_report()))
+    mutate(data)
+    with caplog.at_level(logging.WARNING, logger="idps.live"):
+        assert load_faithfulness(_write_faith(tmp_path, data), "xgboost") is None
+    assert len([r for r in caplog.records if "ignoring the faithfulness" in r.message]) == 1
+
+
+@pytest.mark.parametrize("raw", ["not json", "[]", '"x"', "",
+                                 json.dumps(_faith_report()).replace("38.6", "NaN"),
+                                 json.dumps(_faith_report()).replace("38.6", "Infinity"),
+                                 "[" * 100_000])
+def test_unparseable_or_non_finite_reports_are_ignored(tmp_path, raw):
+    from idps.live.faithfulness import load_faithfulness
+
+    assert load_faithfulness(_write_faith(tmp_path, None, raw=raw), "xgboost") is None
+
+
+def test_a_huge_report_is_not_read(tmp_path, monkeypatch):
+    from idps.live import faithfulness as module
+
+    path = _write_faith(tmp_path, _faith_report())
+    monkeypatch.setattr(module, "MAX_REPORT_BYTES", 10)
+    assert module.load_faithfulness(path, "xgboost") is None
+
+
+_SHA = "0f" * 32
+
+
+def test_a_digest_in_the_report_is_compared_with_the_loaded_models_digest(tmp_path, caplog):
+    from idps.live.faithfulness import load_faithfulness
+
+    data = _faith_report()
+    data["config"]["model_sha256"] = _SHA.upper()  # case does not matter
+    path = _write_faith(tmp_path, data)
+    same = load_faithfulness(path, "xgboost", _SHA)
+    assert (same["model_check"], same["model_matches"]) == ("digest", True)
+    with caplog.at_level(logging.WARNING, logger="idps.live"):
+        retrained = load_faithfulness(path, "xgboost", "11" * 32)  # same algorithm, other bytes
+    assert (retrained["model_check"], retrained["model_matches"]) == ("digest", False)
+    assert any("model_matches=false" in r.message for r in caplog.records)
+    # no digest known for the loaded model: only the name can be compared
+    assert load_faithfulness(path, "xgboost", None)["model_check"] == "name"
+
+
+@pytest.mark.parametrize("bad", ["short", "zz" * 32, 5, "a" * 65])
+def test_a_malformed_digest_makes_the_report_invalid(tmp_path, bad):
+    from idps.live.faithfulness import load_faithfulness
+
+    data = _faith_report()
+    data["config"]["model_sha256"] = bad
+    assert load_faithfulness(_write_faith(tmp_path, data), "xgboost", _SHA) is None
+
+
+def test_null_and_negative_ratios_are_kept(tmp_path):
+    from idps.live.faithfulness import load_faithfulness
+
+    data = _faith_report()
+    data["methods"]["shap"] = {**_FAITH_METHOD, "ratio_to_random": None, "mean_drop": -0.1}
+    data["methods"]["lime"] = {**_FAITH_METHOD, "ratio_to_random": -3.5}
+    got = load_faithfulness(_write_faith(tmp_path, data), "xgboost")
+    assert got["methods"]["shap"]["ratio_to_random"] is None
+    assert got["methods"]["shap"]["mean_drop"] == -0.1
+    assert got["methods"]["lime"]["ratio_to_random"] == -3.5
+    data["methods"]["lime"]["ratio_to_random"] = 1e10  # finite but beyond the bound
+    assert load_faithfulness(_write_faith(tmp_path, data), "xgboost") is None
+
+
+def test_a_report_for_another_model_is_kept_but_flagged(tmp_path, caplog):
+    from idps.live.faithfulness import load_faithfulness
+
+    with caplog.at_level(logging.WARNING, logger="idps.live"):
+        got = load_faithfulness(_write_faith(tmp_path, _faith_report()), "random_forest")
+    assert got["model"] == "xgboost" and got["model_matches"] is False
+    assert any("model_matches=false" in r.message for r in caplog.records)
+
+
+def test_the_status_carries_faithfulness_only_when_there_is_one(bundle):
+    from idps.live.status import build_status
+
+    def payload(**kw):
+        engine = ResponseEngine(Settings(dry_run=True), blocker=FakeBlocker())
+        return build_status(engine=engine, bundle=bundle, live_settings=LiveSettings(),
+                            metrics=Metrics(), sink=ListSink(), interface="eth1", **kw)
+
+    assert "faithfulness" not in payload()
+    assert payload(faithfulness={"model": "x"})["faithfulness"] == {"model": "x"}
+
+
+def test_the_setting_defaults_to_none_and_reads_the_environment(monkeypatch):
+    assert Settings().faithfulness_report is None
+    monkeypatch.setenv("IDPS_FAITHFULNESS_REPORT", "reports/x.json")
+    assert Settings().faithfulness_report == "reports/x.json"
+
+
+def test_the_loaded_report_reaches_the_soc_status(model_file, tmp_path, monkeypatch, client,
+                                                  sensor_headers, analyst_headers):
+    """End to end: main() loads the report, the status payload carries it, the SOC accepts it."""
+    from idps.live import status as status_module
+
+    sent = []
+    monkeypatch.setattr(status_module.StatusReporter, "start", lambda self: sent.append(self.build()))
+    monkeypatch.setenv("IDPS_SOC_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("IDPS_SOC_SENSOR_TOKEN", "idps_sensor_TOK")
+    monkeypatch.setenv("IDPS_LIVE_OUTBOX_FILE", str(tmp_path / "outbox.json"))
+    monkeypatch.setenv("IDPS_FAITHFULNESS_REPORT", _write_faith(tmp_path, _faith_report()))
+    pcap = write_pcap(tmp_path / "a.pcap", attack_packets(n=3))
+    assert main(["--pcap", str(pcap), "--model", str(model_file)]) == 0
+    (payload,) = sent
+    assert payload["faithfulness"]["methods"]["shap"]["ratio_to_random"] == 38.6
+    assert client.post("/sensor/status", json=payload, headers=sensor_headers).status_code == 200
+    (s,) = client.get("/sensors/status", headers=analyst_headers).json()["sensors"]
+    assert s["status"]["faithfulness"]["flows"] == 100

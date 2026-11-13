@@ -83,3 +83,13 @@ def ingest(client, sensor_headers, *alerts) -> list[int]:
     r = client.post("/ingest/alerts", json={"alerts": list(alerts)}, headers=sensor_headers)
     assert r.status_code == 201, r.text
     return r.json()["ids"]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_class_day_cache():
+    """The class-by-day result is cached in-process; every test starts without it."""
+    from soc.api.routes import metrics
+
+    metrics.clear_class_per_day_cache()
+    yield
+    metrics.clear_class_per_day_cache()

@@ -88,14 +88,16 @@ def run(args: argparse.Namespace) -> int:
         select_backend,
     )
     from idps.config import get_settings
-    from idps.detect.bundle import load_bundle
+    from idps.detect.bundle import load_bundle, read_digest
     from idps.features import FEATURE_COLUMNS, extraction_meta
     from idps.live.actions import ActionPoller
     from idps.live.config import LiveSettings
     from idps.live.detector import LiveDetector
+    from idps.live.faithfulness import load_faithfulness
     from idps.live.heartbeat import Heartbeat
     from idps.live.metrics import Metrics
     from idps.live.sinks import JsonlSink, SocSink
+    from idps.live.status import StatusReporter, build_status
     from idps.respond.engine import ResponseEngine
     from idps.respond.nft import BlockerError
     from idps.soc_client import Outbox, SocClient
@@ -143,6 +145,11 @@ def run(args: argparse.Namespace) -> int:
     except (BlockerError, ValueError, OSError) as exc:
         return _fail(f"response engine: {exc}")
 
+    try:
+        digest = read_digest(model_path)  # load_bundle verified it matches the loaded bytes
+    except (OSError, ValueError):
+        digest = None
+    faithfulness = load_faithfulness(settings.faithfulness_report, bundle.model_name, digest)
     metrics = Metrics()
     outbox = None
     client = None
@@ -181,6 +188,7 @@ def run(args: argparse.Namespace) -> int:
     code = 0
     heartbeat = None
     poller = None
+    reporter = None
     try:
         try:  # startup errors of the capture (bad interface name, ...) are "cannot start"
             if args.interface:
@@ -208,6 +216,13 @@ def run(args: argparse.Namespace) -> int:
             poller = ActionPoller(client, engine, sink, metrics, interval=live.action_poll_seconds)
             poller.start()
             log.info("polling the SOC for analyst actions every %g s", live.action_poll_seconds)
+        if client is not None:
+            reporter = StatusReporter(client, lambda: build_status(
+                engine=engine, bundle=bundle, live_settings=live, metrics=metrics, sink=sink,
+                heartbeat=heartbeat, interface=args.interface,
+                faithfulness=faithfulness), interval=live.status_seconds)
+            reporter.start()
+            log.info("reporting status to the SOC every %g s", live.status_seconds)
         try:
             detector.run(flows, stop, max_flows=args.max_flows,
                          duration=args.duration if args.interface else None)
@@ -218,6 +233,8 @@ def run(args: argparse.Namespace) -> int:
             heartbeat.stop()
         if poller is not None:
             poller.stop(timeout=ACTION_STOP_TIMEOUT)  # before the sink closes: it queues block events
+        if reporter is not None:
+            reporter.stop()
         sink.close()
         if args.interface:
             stop_capture_processes()  # or the process never exits (see the function)

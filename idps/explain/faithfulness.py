@@ -48,7 +48,7 @@ def _lime_contrib(lime: LimeExplainer, X: pd.DataFrame) -> np.ndarray:
 def faithfulness(bundle: Bundle, data: pd.DataFrame, background: pd.DataFrame | None = None, *,
                  n: int = 100, k: int = 5, repeats: int = 20, seed: int = DEFAULT_SEED,
                  include_lime: bool = True, lime_samples: int = 1000,
-                 explainer: Explainer | None = None) -> dict:
+                 explainer: Explainer | None = None, model_sha256: str | None = None) -> dict:
     """Run the deletion test; returns a JSON-serialisable results dict.
 
     `data`: flows to sample from. `background`: where baseline medians (and the MLP/LIME
@@ -99,7 +99,8 @@ def faithfulness(bundle: Bundle, data: pd.DataFrame, background: pd.DataFrame | 
         }
     return {
         "config": {"n_flows": len(X), "top_k": k, "random_repeats": repeats, "seed": seed,
-                   "model": bundle.model_name, "baseline": "median of background sample",
+                   "model": bundle.model_name, "model_sha256": model_sha256,
+                   "baseline": "median of background sample",
                    "background_rows": len(bg), "lime_samples": lime_samples if include_lime else None,
                    "classes_explained": {str(c): int((classes == i).sum()) for i, c in
                                          enumerate(bundle.label_encoder.classes_)}},

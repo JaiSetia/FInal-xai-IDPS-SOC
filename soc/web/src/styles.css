@@ -415,3 +415,26 @@ label.field.inline { flex-direction: row; align-items: center; gap: 8px; }
 .tc-live td { vertical-align: middle; }
 .tc-row3 .button-link { margin-top: 4px; }
 .tc-stacked li { flex-direction: column; align-items: stretch; gap: 4px; }
+.small-kv { font-size: 13px; gap: 6px 14px; margin-bottom: 10px; }
+table.heatmap { min-width: 0; border-spacing: 3px; font-size: 12px; }
+.heatmap th, .heatmap td { padding: 6px 4px; text-align: center; border-radius: 6px; background: none; }
+.heatmap thead th { background: none; font-weight: 500; }
+.heatmap tbody th { text-align: left; font-weight: 500; color: var(--muted); white-space: nowrap; padding-right: 8px; }
+.heatmap td { min-width: 28px; }
+.heatmap td.heat-0 { background: var(--surface-2); }
+.heatmap td.heat-1 { background: color-mix(in srgb, var(--accent) 12%, var(--surface-2)); }
+.heatmap td.heat-2 { background: color-mix(in srgb, var(--accent) 22%, var(--surface-2)); }
+.heatmap td.heat-3 { background: color-mix(in srgb, var(--accent) 32%, var(--surface-2)); font-weight: 600; }
+.heatmap td.heat-4 { background: color-mix(in srgb, var(--accent) 42%, var(--surface-2)); font-weight: 700; }
+.heatmap tr.anomaly th, .heatmap tr.anomaly td { border-top: 2px dashed var(--border); }
+@media (max-width: 760px) {
+  table.heatmap { border-spacing: 2px; font-size: 11px; }
+  .heatmap td { min-width: 0; padding: 5px 1px; }
+  .heatmap thead th { padding: 4px 1px; }
+  .heatmap tbody th { white-space: normal; max-width: 72px; padding-right: 4px; }
+}
+.trust-list { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.trust-list li { padding: 12px 14px; border-radius: 14px; background: var(--surface-2); display: flex; flex-direction: column; gap: 4px; }
+.trust-list li.used { background: var(--accent-wash); outline: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+.trust-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.trust-ratio { margin-left: auto; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }

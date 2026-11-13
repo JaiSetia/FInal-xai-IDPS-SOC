@@ -100,6 +100,15 @@ def save_bundle(bundle: Bundle, path: str | Path = DEFAULT_MODEL_PATH) -> Path:
     return path
 
 
+def read_digest(path: str | Path) -> str:
+    """The sha256 (hex) in `<path>.sha256`. After load_bundle(path) succeeded this IS the digest of
+    the loaded bytes, because load_bundle refuses a bundle that does not match it."""
+    parts = digest_path(path).read_text().split()
+    if not parts:
+        raise ValueError(f"{digest_path(path)} is empty")
+    return parts[0].lower()
+
+
 def _read_verified(path: Path) -> bytes:
     """The bundle's bytes, after checking permissions and the sha256 file. The same bytes are
     unpickled, so the file cannot change between the check and the load."""

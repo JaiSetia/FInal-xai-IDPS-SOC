@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { sensorState, sensorsStatus } from "./sensor-fixtures";
 import Admin, { AUDIT_GROUPS, DetailPairs, auditGroup, auditQuery } from "../pages/Admin";
 
 const h = vi.hoisted(() => ({ api: vi.fn() }));
@@ -18,6 +19,7 @@ const entry = (o: Record<string, unknown> = {}) => ({
 
 let users: Record<string, unknown>[];
 let sensors: Record<string, unknown>[];
+let status: unknown;
 let auditAll: Record<string, unknown>[];
 let auditCursor: string | null;
 let auditOlder: Record<string, { items: unknown[]; next_cursor?: string | null }>;
@@ -30,6 +32,7 @@ const calls = (method: string, prefix = "") =>
 beforeEach(() => {
   users = [user({ id: 1, username: "root", role: "admin" }), user(), user({ id: 3, username: "bob", disabled: true })];
   sensors = [sensor(), sensor({ id: 2, name: "old", revoked: true })];
+  status = sensorsStatus([sensorState({ sensor_id: 1, name: "gw" })]);
   auditAll = [];
   auditCursor = null;
   auditOlder = {};
@@ -40,6 +43,7 @@ beforeEach(() => {
     const m = opts?.method ?? "GET";
     if (m === "GET" && path === "/admin/users") return users;
     if (m === "GET" && path === "/admin/sensors") return sensors;
+    if (m === "GET" && path === "/sensors/status") return status;
     if (m === "GET" && path.startsWith("/admin/audit")) {
       const u = new URL(path, "http://x");
       const c = u.searchParams.get("cursor");
@@ -313,11 +317,64 @@ describe("sensors", () => {
     show();
     const item = (await screen.findByText("#1 gw")).closest("li")!;
     expect(within(item).getByText(/^created /)).toBeInTheDocument();
-    expect(within(item).getByText("active")).toHaveClass("pill");
+    expect(within(item).getByText("online")).toHaveClass("pill");
     expect(within(item).getByRole("button", { name: "Revoke sensor gw" })).toBeInTheDocument();
     const old = screen.getByText("#2 old").closest("li")!;
     expect(within(old).getByText("revoked")).toHaveClass("pill");
     expect(within(old).queryByRole("button")).toBeNull();
+  });
+  it("pill states: online, offline (seen before), never reported; suffix only with status data", async () => {
+    sensors = [sensor(), sensor({ id: 3, name: "lab" }), sensor({ id: 4, name: "new" })];
+    status = sensorsStatus([
+      sensorState({ sensor_id: 1, name: "gw" }),
+      sensorState({ sensor_id: 3, name: "lab", online: false, status: null, last_seen_at: "2026-02-01T10:00:00Z" }),
+      sensorState({ sensor_id: 4, name: "new", online: false, status: null, last_seen_at: null }),
+    ]);
+    show();
+    const gw = (await screen.findByText("#1 gw")).closest("li")!;
+    await waitFor(() => expect(within(gw).getByText("online")).toHaveClass("pill"));
+    expect(gw.textContent).toMatch(/· last seen /);
+    const lab = screen.getByText("#3 lab").closest("li")!;
+    expect(within(lab).getByText("offline")).toHaveClass("pill");
+    expect(lab.textContent).toMatch(/· last seen /);
+    const nw = screen.getByText("#4 new").closest("li")!;
+    expect(within(nw).getByText("never reported")).toHaveClass("pill");
+    expect(nw.textContent).toContain("· never reported");
+  });
+  it("a revoked sensor says revoked, with no last-seen suffix, even if status lists it online", async () => {
+    status = sensorsStatus([sensorState({ sensor_id: 2, name: "old", revoked: true })]);
+    show();
+    const old = (await screen.findByText("#2 old")).closest("li")!;
+    await waitFor(() => expect(within(old).getByText("revoked")).toHaveClass("pill"));
+    expect(within(old).queryByText("online")).toBeNull();
+    expect(old.textContent).not.toMatch(/last seen|never reported/);
+  });
+  it("shows checking… until the status loads", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const base = h.api.getMockImplementation()!;
+    h.api.mockImplementation(async (p: string, o?: unknown) => { if (p === "/sensors/status") await gate; return base(p, o); });
+    show();
+    const item = (await screen.findByText("#1 gw")).closest("li")!;
+    expect(within(item).getByText("checking…")).toHaveClass("pill");
+    expect(item.textContent).not.toMatch(/last seen|never reported/);
+    release();
+    await waitFor(() => expect(within(item).getByText("online")).toBeInTheDocument());
+  });
+  it("shows status unavailable when the status fetch fails and there is no data", async () => {
+    const base = h.api.getMockImplementation()!;
+    h.api.mockImplementation(async (p: string, o?: unknown) => { if (p === "/sensors/status") throw new Error("nope"); return base(p, o); });
+    show();
+    const item = (await screen.findByText("#1 gw")).closest("li")!;
+    await waitFor(() => expect(within(item).getByText("status unavailable")).toHaveClass("pill"));
+    expect(item.textContent).not.toMatch(/last seen|never reported/);
+    expect(within(screen.getByText("#2 old").closest("li")!).getByText("revoked")).toBeInTheDocument();
+  });
+  it("a sensor missing from the status list is never reported (not offline)", async () => {
+    status = sensorsStatus([]);
+    show();
+    const item = (await screen.findByText("#1 gw")).closest("li")!;
+    await waitFor(() => expect(within(item).getByText("never reported")).toHaveClass("pill"));
   });
   it("revoke: cancel sends nothing; confirm posts and reloads", async () => {
     vi.spyOn(window, "confirm").mockReturnValueOnce(false);

@@ -121,6 +121,11 @@ export interface MetricsSummary {
   false_positive_rate: number | null;
   detection_latency: { p50_ms: number | null; p95_ms: number | null; samples: number };
   active_blocks: number;
+  /** Dry-run block decisions in the window. */
+  would_blocks?: number;
+  /** Last 7 UTC days, oldest first, non-zero pairs only. "Anomaly" counts Isolation Forest
+   *  outliers and overlaps the class rows. */
+  by_class_per_day?: { day: string; class: string; count: number }[];
 }
 
 export interface AdminUser {
@@ -146,4 +151,80 @@ export interface AuditEntry {
   action: string;
   target: string;
   details: Record<string, unknown>;
+}
+
+// --- Phase 3: sensor status, would-block events, class by day ---------------------------
+
+export interface SensorPolicy {
+  confidence_threshold: number;
+  min_flows: number;
+  window_seconds: number;
+  min_alert_confidence: number;
+  block_ttl_seconds: number;
+  unblock_grace_seconds: number;
+  max_analyst_blocks: number;
+}
+
+export interface SensorReport {
+  dry_run: boolean;
+  blocking_enabled: boolean;
+  interface: string | null;
+  mode: "live" | "replay";
+  model: { name: string; checksum_ok: boolean };
+  policy: SensorPolicy;
+  allowlist: string[];
+  /** Full allowlist size; the list itself is capped at 100. Missing from older sensors. */
+  allowlist_total?: number;
+  outbox_pending: number;
+  /** The model's explanation-faithfulness test (offline deletion test); missing from older sensors. */
+  faithfulness?: Faithfulness | null;
+  shap_p95_ms: number | null;
+  heartbeat: { enabled: boolean; ok: boolean };
+  counters: { flows: number; alerts: number; blocked: number; would_block: number };
+  sensor_version: string | null;
+  sent_at: string | null;
+}
+
+export interface FaithfulnessMethod {
+  mean_drop: number;
+  /** null when removing random features changed nothing; negative when worse than random. */
+  ratio_to_random: number | null;
+  label_flip_rate: number;
+  share_flows_beating_random: number;
+}
+
+export interface Faithfulness {
+  model: string;
+  model_matches: boolean;
+  /** "digest": compared by model file checksum; "name": only the algorithm name (older reports). */
+  model_check?: "digest" | "name" | null;
+  flows: number;
+  top_k: number;
+  random_mean_drop: number;
+  methods: { shap?: FaithfulnessMethod; lime?: FaithfulnessMethod };
+}
+
+export interface SensorState {
+  sensor_id: number;
+  name: string;
+  revoked: boolean;
+  last_seen_at: string | null;
+  online: boolean;
+  status: SensorReport | null;
+}
+
+export interface SensorsStatus {
+  soc_allowlist: string[];
+  sensors: SensorState[];
+}
+
+export interface WouldBlock {
+  id: number;
+  sensor_id: number;
+  ip: string;
+  reason: string;
+  source: "auto" | "analyst";
+  alert_id: number | null;
+  at: string;
+  ttl_seconds: number | null;
 }

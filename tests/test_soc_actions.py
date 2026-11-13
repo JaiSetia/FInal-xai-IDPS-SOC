@@ -26,7 +26,7 @@ def test_block_and_unblock_lifecycle(client, sensor_headers, analyst_headers):
     (alert_id,) = ingest(client, sensor_headers, alert_payload())
     r = post_blocks(client, sensor_headers, block_event(alert_id=alert_id),
                     block_event(ip="2001:db8::5", ttl_seconds=None))
-    assert r.status_code == 201 and r.json() == {"blocked": 2, "unblocked": 0}
+    assert r.status_code == 201 and r.json() == {"blocked": 2, "unblocked": 0, "would_block": 0}
     active = client.get("/blocks", params={"active": "true"}, headers=analyst_headers).json()
     assert {b["ip"] for b in active["items"]} == {"203.0.113.7", "2001:db8::5"}
     first = next(b for b in active["items"] if b["ip"] == "203.0.113.7")
@@ -34,7 +34,7 @@ def test_block_and_unblock_lifecycle(client, sensor_headers, analyst_headers):
 
     r = post_blocks(client, sensor_headers, {"event": "unblocked", "ip": "203.0.113.7"},
                     {"event": "unblocked", "ip": "198.51.100.1"})
-    assert r.json() == {"blocked": 0, "unblocked": 1}
+    assert r.json() == {"blocked": 0, "unblocked": 1, "would_block": 0}
     now_active = client.get("/blocks?active=true", headers=analyst_headers).json()["items"]
     assert [b["ip"] for b in now_active] == ["2001:db8::5"]
     inactive = client.get("/blocks?active=false", headers=analyst_headers).json()["items"]

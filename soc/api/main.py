@@ -16,7 +16,18 @@ from soc.api import auth
 from soc.api.broadcast import AlertBroadcaster
 from soc.api.db import init_db, make_engine, make_session_factory
 from soc.api.geo import GeoLocator
-from soc.api.routes import actions, admin, alerts, assistant, blocks, cases, geo, live, metrics
+from soc.api.routes import (
+    actions,
+    admin,
+    alerts,
+    assistant,
+    blocks,
+    cases,
+    geo,
+    live,
+    metrics,
+    sensors,
+)
 from soc.api.security import LoginThrottle
 from soc.api.settings import SocSettings, get_settings
 
@@ -62,7 +73,7 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(auth.router)
-    for module in (alerts, live, blocks, actions, cases, metrics, geo, assistant, admin):
+    for module in (alerts, live, blocks, actions, cases, metrics, geo, assistant, admin, sensors):
         app.include_router(module.router)
     return app
 

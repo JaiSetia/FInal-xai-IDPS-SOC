@@ -45,8 +45,11 @@ The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep thei
 | `GET /alerts` | user | Filters: `severity` (repeatable), `predicted_class`, `ip` (source or destination), `status`, `since`, `until` (timezone required) |
 | `GET /alerts/{id}`, `PATCH /alerts/{id}` | user | Detail with explanation; set `status` (new, acknowledged, false_positive, resolved) |
 | `WS /ws/alerts` | user | Live feed |
-| `POST /ingest/blocks` | sensor | Up to 100 `blocked` / `unblocked` events |
+| `POST /ingest/blocks` | sensor | Up to 100 `blocked` / `unblocked` / `would_block` events (`would_block` = a dry-run decision, stored in its own table, never a block) |
 | `GET /blocks` | user | `active=true/false`, `ip` |
+| `GET /blocks/would` | user | Dry-run `would_block` decisions, newest first: `ip`, `since_hours` (1 to 720, default 24), `limit`, `cursor` |
+| `POST /sensor/status` | sensor | The sensor's status snapshot (mode, policy, allowlist, health, counters); every 30 s; overwrites the sensor's one row |
+| `GET /sensors/status` | user | `{soc_allowlist, sensors: [{sensor_id, name, revoked, last_seen_at, online, status}]}`; `status` is null for a sensor never seen; online = reported within 120 s and not revoked; no tokens or hashes |
 | `POST /actions` | user | Request `block_ip` / `unblock_ip` on a sensor; starts confirmed |
 | `GET /actions`, `GET /actions/{id}` | user | List (filter by `status`), detail |
 | `POST /actions/{id}/confirm`, `/reject` | user | Decide a pending action (for assistant proposals) |
@@ -55,7 +58,7 @@ The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep thei
 | `GET/POST /cases`, `GET/PATCH/DELETE /cases/{id}` | user | Cases |
 | `POST /cases/{id}/notes` | user | Note, up to 10,000 characters |
 | `POST /cases/{id}/alerts`, `DELETE /cases/{id}/alerts/{alert_id}` | user | Attach or detach alerts (an alert is in at most one case) |
-| `GET /metrics/summary?hours=24` | user | Alerts per bucket (hourly up to 72 h, else daily), by class and severity, top 10 sources, false-positive rate, detection latency p50/p95, active blocks |
+| `GET /metrics/summary?hours=24` | user | Alerts per bucket (hourly up to 72 h, else daily), by class and severity, top 10 sources, false-positive rate, detection latency p50/p95, active blocks, `would_blocks` (dry-run decisions in the window), `by_class_per_day` (cached for 60 s; last 7 UTC days whatever `hours` is: `[{day, class, count}]`, non-zero pairs only, classes beyond the top 25 as `(other)`, plus an `Anomaly` row per day) |
 | `GET /topology?hours=1` | user | Nodes (host, alert count, max severity) and edges (src to dst, count, max severity) |
 | `GET/POST /admin/users`, `PATCH /admin/users/{id}/role`, `POST /admin/users/{id}/disable`, `/enable`, `/reset-password` | admin | User management |
 | `GET/POST /admin/sensors`, `POST /admin/sensors/{id}/revoke` | admin | Sensors; the token is returned once, on creation |
@@ -78,6 +81,45 @@ Rules worth knowing:
   executed or failed. A sensor only sees and answers its own actions.
   The live sensor polls and executes them (see "Analyst actions" in `live.md`); in dry-run it
   reports them failed with `sensor is in dry-run: not applied`.
+- **Would-block events.** A dry-run sensor reports each block it *would* have applied as
+  `{"event": "would_block", "ip", "reason", "ttl_seconds", "decided_at"}` through `/ingest/blocks`. They go to
+  the `would_blocks` table, never `blocks`, so active-block counts and the firewall are unaffected;
+  a sensor that blocks for real never sends them. `expires_at` is refused on them. `decided_at`
+  (timezone required, optional) is the sensor's decision time and is stored as `at`, so an event
+  delayed in the outbox keeps its real time; absent (older sensors) or more than 60 s in the future
+  it, or older than 24 h (a wrong sensor clock), is replaced by the receive time. Known gap: the `would_blocks` table is never pruned yet.
+- **Sensor status.** The live sensor posts a status report at start and every 30 s
+  (`IDPS_LIVE_STATUS_SECONDS`, 5 to 3600). The SOC's bounds on the policy fields cover everything the
+  sensor's settings allow (`unblock_grace_seconds` is capped at one year on both sides), so a valid
+  sensor never gets a 422 on its status. A stored status that no longer validates (older schema)
+  is listed as `status: null` instead of failing the listing. The body is strict (unknown fields refused; strings,
+  lists, numbers bounded; at most 100 allowlist entries). `last_seen_at` is the SOC's clock, not
+  the sensor's. These posts are not audited (one every 30 s would bury the audit log). Shape of one
+  entry's `status`: `dry_run`, `blocking_enabled`, `interface` (null in replay), `mode`
+  (`live`/`replay`), `model {name, checksum_ok}`, `policy {confidence_threshold, min_flows,
+  window_seconds, min_alert_confidence, block_ttl_seconds, unblock_grace_seconds,
+  max_analyst_blocks}`, `allowlist` (the sensor's `IDPS_ALLOWLIST`), `allowlist_total` (the real count; `allowlist` is cut at 100), `outbox_pending`, `shap_p95_ms`, `heartbeat {enabled, ok}`, `counters {flows, alerts, blocked, would_block}`,
+  `faithfulness` (optional, absent from older sensors or when the sensor has no report):
+  `{model, model_matches, model_check, flows, top_k, random_mean_drop, methods: {shap?, lime?}}` with
+  each method `{mean_drop, ratio_to_random, label_flip_rate, share_flows_beating_random}`.
+  `ratio_to_random` may be `null` (random removal changed nothing) or negative (deleting the
+  explanation raised confidence): the worst outcomes are reported, not dropped. `model_check` is
+  `"digest"` (report and loaded model compared by sha256) or `"name"` (older report without a
+  digest, or older sensor: only the algorithm name was compared, a weak match), absent from older
+  sensors; at least one
+  method; unknown keys are refused. Model-level numbers from the offline faithfulness report, not
+  live LIME. `sensor_version`, `sent_at` (the sensor's clock, informational).
+- **Anomaly row.** `by_class_per_day` counts alerts whose stored `anomaly_score` is above 0 as
+  `Anomaly`: that is exactly the Isolation Forest's outlier flag (score = -decision_function).
+  The result is one grouped query over the week's alerts, cached in-process for 60 s per database
+  and UTC day (new alerts show up to a minute late; a new day never reuses yesterday's buckets).
+  The cost still grows with the alerts of the last 7 days. The model now declares an index
+  `ix_alerts_received_class_anomaly` on `alerts (received_at, predicted_class, anomaly_score)`, so
+  new databases get it from `create_all`; an **existing** database does not (create_all never
+  touches existing tables), so add it by hand:
+  `CREATE INDEX ix_alerts_received_class_anomaly ON alerts (received_at, predicted_class, anomaly_score);`
+  It overlaps the class rows (an alert has a class and may also be an outlier) and ignores alerts
+  with no score (a model without an anomaly detector).
 - **Last admin.** Demoting or disabling the last enabled admin, including yourself, returns 409.
 - **Audit.** Every mutating request writes one audit row in the same transaction as the change
   (an alert or block batch is one row). `POST /auth/login` is not audited.
@@ -122,7 +164,7 @@ means recreating the development database. Timestamps are stored and returned as
 UTC.
 
 Tables: `users`, `sensor_tokens`, `alerts`, `blocks`, `actions`, `cases`, `case_notes`,
-`audit_log`.
+`audit_log`, `would_blocks`, `sensor_status`.
 
 ## Maps
 

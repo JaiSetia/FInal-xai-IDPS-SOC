@@ -1,11 +1,15 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import ThreatCenter, { ago, searchTarget, TC_WINDOWS } from "../pages/ThreatCenter";
+import { report, sensorState, sensorsStatus } from "./sensor-fixtures";
+import ThreatCenter, { ago, lastSevenDays, searchTarget, TC_WINDOWS } from "../pages/ThreatCenter";
 
-const h = vi.hoisted(() => ({ api: vi.fn(), onAlert: null as null | ((a: unknown) => void), reload: null as null | (() => void) }));
+const h = vi.hoisted(() => ({ api: vi.fn(), onAlert: null as null | ((a: unknown) => void), reload: null as null | (() => void), reloadAll: null as null | (() => void) }));
 vi.mock("../api/client", async (orig) => ({ ...(await orig<typeof import("../api/client")>()), api: h.api }));
 vi.mock("../useLiveRefresh", () => ({
-  useLiveRefresh: (f: () => void, onAlert?: (a: unknown) => void) => { if (onAlert) { h.onAlert = onAlert; h.reload = f; } return true; },
+  useLiveRefresh: (f: () => void, onAlert?: (a: unknown) => void, every?: number) => {
+    if (onAlert) { h.onAlert = onAlert; h.reload = f; } else if (every === undefined) h.reloadAll = f;
+    return true;
+  },
 }));
 vi.mock("../pages/WorldMap", () => ({
   default: (p: { hours: number; compact?: boolean }) => <div>map-stub hours={p.hours} compact={String(!!p.compact)}</div>,
@@ -32,17 +36,20 @@ const metrics = (o: Record<string, unknown> = {}) => ({
 });
 
 let d: {
+  would: unknown[]; sensors: unknown;
   metrics: unknown; blocks: unknown[]; alerts: unknown[]; actions: unknown[]; next: string | null; topo: unknown;
 };
 const page = (items: unknown[], next_cursor: string | null = null) => ({ items, total: items.length, next_cursor });
 const calls = (prefix: string) => h.api.mock.calls.map(([p]) => String(p)).filter((p) => p.startsWith(prefix));
 
 beforeEach(() => {
-  d = { metrics: metrics(), blocks: [], alerts: [], actions: [], next: null, topo: { hours: 24, nodes: [], edges: [] } };
+  d = { would: [], sensors: sensorsStatus(), metrics: metrics(), blocks: [], alerts: [], actions: [], next: null, topo: { hours: 24, nodes: [], edges: [] } };
   h.api.mockReset();
   h.onAlert = null;
   h.api.mockImplementation(async (path: string) => {
     if (path.startsWith("/metrics/summary")) return d.metrics;
+    if (path.startsWith("/sensors/status")) return d.sensors;
+    if (path.startsWith("/blocks/would")) return page(d.would);
     if (path.startsWith("/blocks")) return page(d.blocks);
     if (path.startsWith("/alerts")) return page(d.alerts);
     if (path.startsWith("/actions")) return page(d.actions, d.next);
@@ -90,7 +97,8 @@ describe("requests and window", () => {
     show();
     await screen.findByText("1,234");
     expect(calls("/metrics/summary")).toEqual(["/metrics/summary?hours=24"]);
-    expect(calls("/blocks")).toEqual(["/blocks?active=true&limit=200"]);
+    expect(calls("/blocks")).toEqual(["/blocks?active=true&limit=200", "/blocks/would?since_hours=24&limit=200"]);
+    expect(calls("/sensors/status")).toEqual(["/sensors/status"]);
     expect(calls("/alerts")).toEqual(["/alerts?limit=10"]);
     expect(calls("/actions")).toEqual(["/actions?status=pending&limit=20"]);
     expect(calls("/topology")).toEqual(["/topology?hours=24"]);
@@ -160,10 +168,10 @@ describe("KPIs", () => {
     expect(within(cardOf("Detection latency (p50)")).getByText("—")).toBeInTheDocument();
   });
   it("shows a metrics error", async () => {
+    const base = h.api.getMockImplementation()!;
     h.api.mockImplementation(async (p: string) => {
       if (p.startsWith("/metrics")) throw new Error("metrics down");
-      if (p.startsWith("/topology")) return d.topo;
-      return page([]);
+      return base(p);
     });
     show();
     expect(await screen.findByText("metrics down")).toBeInTheDocument();
@@ -338,9 +346,9 @@ describe("decisions card", () => {
 });
 
 describe("sensor health and topology", () => {
-  it("sensor health waits for data", async () => {
+  it("sensor health with no sensors registered", async () => {
     show();
-    expect(await screen.findByText("waiting for data")).toBeInTheDocument();
+    expect(await screen.findByText(/No sensors registered/)).toBeInTheDocument();
   });
 
   it("topology summary: counts, top 4 edges by count, link opens Maps", async () => {
@@ -422,12 +430,10 @@ describe("review fixes", () => {
   });
 
   it("a paged /blocks shows N+ active and All N+ blocks", async () => {
+    const base = h.api.getMockImplementation()!;
     h.api.mockImplementation(async (path: string) => {
-      if (path.startsWith("/blocks")) return page([1, 2, 3, 4].map((i) => block({ id: i, ip: `1.1.1.${i}` })), "more");
-      if (path.startsWith("/metrics/summary")) return d.metrics;
-      if (path.startsWith("/alerts")) return page([]);
-      if (path.startsWith("/actions")) return page([]);
-      return d.topo;
+      if (path.startsWith("/blocks?")) return page([1, 2, 3, 4].map((i) => block({ id: i, ip: `1.1.1.${i}` })), "more");
+      return base(path);
     });
     show();
     expect(await screen.findByText("4+ active")).toBeInTheDocument();
@@ -445,9 +451,10 @@ describe("review fixes", () => {
     expect(await screen.findByText("No alerts yet.")).toBeInTheDocument();
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
+    const base = h.api.getMockImplementation()!;
     h.api.mockImplementation(async (path: string) => {
       if (path.startsWith("/alerts")) { await gate; return page([]); }
-      return path.startsWith("/metrics") ? d.metrics : path.startsWith("/topology") ? d.topo : page([]);
+      return base(path);
     });
     act(() => { h.reload!(); });
     expect(screen.getByText("No alerts yet.")).toBeInTheDocument();
@@ -509,5 +516,331 @@ describe("review fixes", () => {
     const map = await screen.findByText(/map-stub/);
     expect(map.parentElement).toHaveClass("stack");
     expect(map.parentElement!.children.length).toBe(1);
+  });
+});
+
+describe("lastSevenDays", () => {
+  it("is 7 UTC dates, oldest first", () => {
+    expect(lastSevenDays(Date.UTC(2026, 5, 15, 12))).toEqual(
+      ["2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-13", "2026-06-14", "2026-06-15"]);
+  });
+  it("crosses a month boundary", () => {
+    expect(lastSevenDays(Date.UTC(2026, 2, 1, 0, 0, 1))).toEqual(
+      ["2026-02-23", "2026-02-24", "2026-02-25", "2026-02-26", "2026-02-27", "2026-02-28", "2026-03-01"]);
+  });
+  it("includes 29 Feb in a leap year", () => {
+    expect(lastSevenDays(Date.UTC(2024, 2, 1, 5))).toEqual(
+      ["2024-02-24", "2024-02-25", "2024-02-26", "2024-02-27", "2024-02-28", "2024-02-29", "2024-03-01"]);
+  });
+  it("crosses a year boundary", () => {
+    expect(lastSevenDays(Date.UTC(2026, 0, 2, 9))[0]).toBe("2025-12-27");
+    expect(lastSevenDays(Date.UTC(2026, 0, 2, 9))[6]).toBe("2026-01-02");
+  });
+  it("flips exactly at UTC midnight", () => {
+    expect(lastSevenDays(Date.UTC(2026, 1, 28, 23, 59, 59))[6]).toBe("2026-02-28");
+    expect(lastSevenDays(Date.UTC(2026, 2, 1, 0, 0, 0))[6]).toBe("2026-03-01");
+  });
+});
+
+describe("class by day heatmap", () => {
+  const days = lastSevenDays(Date.now());
+  const row = (cls: string, counts: number[]) => counts.map((count, i) => ({ day: days[i], class: cls, count })).filter((r) => r.count);
+  const heatRows = (t: HTMLElement) => Array.from(t.querySelectorAll("tbody tr")) as HTMLElement[];
+  const names = (t: HTMLElement) => heatRows(t).map((r) => r.querySelector("th")!.textContent);
+
+  it("is absent without by_class_per_day", async () => {
+    show();
+    await screen.findByText("1,234");
+    expect(screen.queryByText(/Alerts per class per day/)).toBeNull();
+    expect(document.querySelector("table.heatmap")).toBeNull();
+  });
+
+  it("shows the top 5 classes, the rest summed into other classes before Anomaly", async () => {
+    d.metrics = metrics({
+      by_class_per_day: [
+        ...row("C1", [0, 0, 0, 0, 0, 0, 60]), ...row("C2", [0, 0, 0, 0, 0, 0, 50]), ...row("C3", [0, 0, 0, 0, 0, 0, 40]),
+        ...row("C4", [0, 0, 0, 0, 0, 0, 30]), ...row("C5", [0, 0, 0, 0, 0, 0, 20]),
+        ...row("C6", [0, 0, 0, 0, 0, 5, 10]), ...row("C7", [0, 0, 0, 0, 0, 1, 2]),
+        ...row("(other)", [0, 0, 0, 0, 0, 0, 1]),
+        ...row("Anomaly", [0, 0, 0, 0, 0, 0, 999]),
+      ],
+    });
+    show();
+    await screen.findByText("1,234");
+    const t = document.querySelector("table.heatmap") as HTMLElement;
+    expect(names(t)).toEqual(["C1", "C2", "C3", "C4", "C5", "other classes", "Anomaly"]);
+    const other = Array.from(heatRows(t)[5].querySelectorAll("td")).map((c) => c.textContent);
+    expect(other.slice(5)).toEqual(["6", "13"]); // C6 + C7 (+ the API's (other) on the last day)
+    expect(heatRows(t).at(-1)).toHaveClass("anomaly");
+    expect(heatRows(t).filter((r) => r.classList.contains("anomaly")).length).toBe(1);
+  });
+
+  it("(other) from the API is never a top row, even when it is the biggest", async () => {
+    d.metrics = metrics({ by_class_per_day: [...row("(other)", [0, 0, 0, 0, 0, 0, 500]), ...row("A", [0, 0, 0, 0, 0, 0, 1])] });
+    show();
+    await screen.findByText("1,234");
+    expect(names(document.querySelector("table.heatmap") as HTMLElement)).toEqual(["A", "other classes", "Anomaly"]);
+  });
+
+  it("no other row when nothing lies beyond the top 5", async () => {
+    d.metrics = metrics({ by_class_per_day: ["A", "B", "C", "D", "E"].flatMap((c, i) => row(c, [0, 0, 0, 0, 0, 0, 10 - i])) });
+    show();
+    await screen.findByText("1,234");
+    expect(names(document.querySelector("table.heatmap") as HTMLElement)).toEqual(["A", "B", "C", "D", "E", "Anomaly"]);
+  });
+
+  it("column headers carry an sr-only full date", async () => {
+    d.metrics = metrics({ by_class_per_day: row("A", [0, 0, 0, 0, 0, 0, 1]) });
+    show();
+    await screen.findByText("1,234");
+    const heads = Array.from(document.querySelectorAll("table.heatmap thead th")).slice(1);
+    heads.forEach((th, i) => {
+      expect(th.querySelector(".sr-only")).toHaveTextContent(days[i]);
+    });
+  });
+
+  it("Anomaly is its own last row even with no anomaly data; totals use the sum over days", async () => {
+    d.metrics = metrics({ by_class_per_day: [...row("Small", [5, 5, 5, 5, 5, 5, 5]), ...row("Big", [0, 0, 0, 0, 0, 0, 30])] });
+    show();
+    await screen.findByText("1,234");
+    const t = document.querySelector("table.heatmap") as HTMLElement;
+    expect(names(t)).toEqual(["Small", "Big", "Anomaly"]);
+  });
+
+  it("(other) is shown as other classes", async () => {
+    d.metrics = metrics({ by_class_per_day: row("(other)", [0, 0, 0, 0, 0, 0, 3]) });
+    show();
+    await screen.findByText("1,234");
+    const t = document.querySelector("table.heatmap") as HTMLElement;
+    expect(names(t)[0]).toBe("other classes");
+  });
+
+  it("has 7 day columns, empty cells with sr-only 0, and heat levels 0 to 4", async () => {
+    d.metrics = metrics({ by_class_per_day: row("Hot", [0, 1, 25, 50, 75, 100, 0]) });
+    show();
+    await screen.findByText("1,234");
+    const t = document.querySelector("table.heatmap") as HTMLElement;
+    const heads = t.querySelectorAll("thead th");
+    expect(heads.length).toBe(8);
+    expect(heads[1]).toHaveAttribute("title", days[0]);
+    const cells = Array.from(heatRows(t)[0].querySelectorAll("td")) as HTMLElement[];
+    expect(cells.length).toBe(7);
+    expect(cells[0]).toHaveClass("heat-0");
+    expect(cells[0].querySelector(".sr-only")).toHaveTextContent("0");
+    expect(cells[0].textContent).toBe("0");
+    expect(cells[1]).toHaveClass("heat-1");
+    expect(cells[1].textContent).toBe("1");
+    expect(cells[2]).toHaveClass("heat-1");
+    expect(cells[3]).toHaveClass("heat-2");
+    expect(cells[4]).toHaveClass("heat-3");
+    expect(cells[5]).toHaveClass("heat-4");
+    expect(cells[5].textContent).toBe("100");
+    expect(cells[5].querySelector(".sr-only")).toHaveTextContent("");
+    expect(cells[6]).toHaveClass("heat-0");
+    // the Anomaly row is all zeros
+    const anomaly = Array.from(heatRows(t).at(-1)!.querySelectorAll("td"));
+    expect(anomaly.every((c) => c.classList.contains("heat-0"))).toBe(true);
+  });
+
+  it("ties in the weekly total sort by name", async () => {
+    d.metrics = metrics({ by_class_per_day: [...row("Zed", [0, 0, 0, 0, 0, 0, 5]), ...row("Abe", [0, 0, 0, 0, 0, 0, 5])] });
+    show();
+    await screen.findByText("1,234");
+    expect(names(document.querySelector("table.heatmap") as HTMLElement).slice(0, 2)).toEqual(["Abe", "Zed"]);
+  });
+});
+
+describe("sensor health card", () => {
+  const sensorCard = () => within(cardOf("Sensor health"));
+  const st = (id: number, name: string, o: Record<string, unknown> = {}, report_: Record<string, unknown> = {}) =>
+    sensorState({ sensor_id: id, name, status: report(report_), last_seen_at: iso(-3 * 60_000), ...o });
+
+  it("pill online when every sensor reports", async () => {
+    d.sensors = sensorsStatus([st(1, "gw")]);
+    show();
+    expect(await sensorCard().findByText("online")).toHaveClass("pill");
+  });
+
+  it("pill offline when no sensor reports, with never-reported and offline lines", async () => {
+    d.sensors = sensorsStatus([
+      sensorState({ sensor_id: 1, name: "gw", online: false, status: null, last_seen_at: iso(-2 * 3600_000) }),
+      sensorState({ sensor_id: 2, name: "fresh", online: false, status: null, last_seen_at: null }),
+    ]);
+    show();
+    expect(await sensorCard().findByText("offline")).toHaveClass("pill");
+    const text = cardOf("Sensor health").textContent!;
+    expect(text).toContain("gw: offline, last seen 2 h ago");
+    expect(text).toContain("fresh: has never reported");
+    expect(cardOf("Sensor health").querySelector("dl")).toBeNull();
+  });
+
+  it("N of M online counts only non-revoked sensors", async () => {
+    d.sensors = sensorsStatus([
+      st(1, "a"), sensorState({ sensor_id: 2, name: "b", online: false, status: null }),
+      sensorState({ sensor_id: 3, name: "gone", revoked: true, online: false, status: null }),
+    ]);
+    show();
+    expect(await sensorCard().findByText("1 of 2 online")).toHaveClass("pill");
+    expect(cardOf("Sensor health").textContent).not.toContain("gone");
+  });
+
+  it("No sensors registered when the list is empty", async () => {
+    show();
+    expect(await sensorCard().findByText(/No sensors registered/)).toBeInTheDocument();
+    expect(sensorCard().getByText("offline")).toBeInTheDocument();
+  });
+
+  it("shows live sensor details", async () => {
+    d.sensors = sensorsStatus([st(1, "gw", {}, { shap_p95_ms: 12.5, outbox_pending: 1234, allowlist: ["a", "b"] })]);
+    show();
+    await sensorCard().findByText("gw");
+    const card = cardOf("Sensor health");
+    expect(card.textContent).toContain("live on eth0");
+    expect(card.textContent).toContain("blocking");
+    expect(card.textContent).toContain("rf-v3 · checksum ok");
+    expect(card.textContent).toContain("1 / s · ok");
+    expect(card.textContent).toContain("1,234 pending");
+    expect(card.textContent).toContain("12.50 ms");
+    expect(card.textContent).toContain("2 entries");
+    expect(card.textContent).toContain("3 min ago");
+  });
+
+  it.each([
+    [{ dry_run: true }, "dry-run (blocks only logged)"],
+    [{ dry_run: false, blocking_enabled: false }, "not blocking"],
+  ])("mode text %j", async (o, text) => {
+    d.sensors = sensorsStatus([st(1, "gw", {}, o)]);
+    show();
+    await sensorCard().findByText("gw");
+    expect(cardOf("Sensor health").textContent).toContain(text);
+  });
+
+  it("heartbeat off or failing, SHAP dash, checksum failure, replay, one entry", async () => {
+    d.sensors = sensorsStatus([st(1, "gw", {}, {
+      heartbeat: { enabled: true, ok: false }, shap_p95_ms: null, model: { name: "m", checksum_ok: false },
+      mode: "replay", allowlist: ["x"],
+    })]);
+    show();
+    await sensorCard().findByText("gw");
+    const t = cardOf("Sensor health").textContent!;
+    expect(t).toContain("failing");
+    expect(t).toContain("SHAP p95—");
+    expect(t).toContain("checksum FAILED");
+    expect(t).toContain("replaying a capture");
+    expect(t).toContain("1 entry");
+  });
+
+  it("heartbeat disabled says off", async () => {
+    d.sensors = sensorsStatus([st(1, "gw", {}, { heartbeat: { enabled: false, ok: false } })]);
+    show();
+    await sensorCard().findByText("gw");
+    expect(cardOf("Sensor health").textContent).toContain("Heartbeatoff");
+  });
+
+  it("the allowlist count uses allowlist_total when present", async () => {
+    d.sensors = sensorsStatus([st(1, "gw", {}, { allowlist: ["a", "b"], allowlist_total: 300 })]);
+    show();
+    await sensorCard().findByText("gw");
+    expect(cardOf("Sensor health").textContent).toContain("300 entries");
+    expect(cardOf("Sensor health").textContent).not.toContain("2 entries");
+  });
+
+  it("allowlist_total of 1 says entry", async () => {
+    d.sensors = sensorsStatus([st(1, "gw", {}, { allowlist: ["a"], allowlist_total: 1 })]);
+    show();
+    await sensorCard().findByText("gw");
+    expect(cardOf("Sensor health").textContent).toContain("1 entry");
+  });
+
+  it("shows at most 2 sensors and 'and N more online'", async () => {
+    d.sensors = sensorsStatus([st(1, "s1"), st(2, "s2"), st(3, "s3"), st(4, "s4")]);
+    show();
+    await sensorCard().findByText("and 2 more online.");
+    expect(cardOf("Sensor health").querySelectorAll("dl").length).toBe(2);
+    expect(sensorCard().queryByText("s3")).toBeNull();
+  });
+
+  it("a status error is shown", async () => {
+    const base = h.api.getMockImplementation()!;
+    h.api.mockImplementation(async (p: string) => { if (p.startsWith("/sensors")) throw new Error("no status"); return base(p); });
+    show();
+    expect(await sensorCard().findByText("no status")).toBeInTheDocument();
+  });
+});
+
+describe("dry-run decisions", () => {
+  const would = (ip: string) => ({ id: 1, sensor_id: 1, ip, reason: "r", source: "auto", alert_id: null, at: iso(-1000), ttl_seconds: 900 });
+  const cellFor = (id: string) => bodyRows().find((r) => r.textContent!.includes(`#${id} `))!.textContent!;
+
+  it("Response column: blocked beats would block beats observe", async () => {
+    d.alerts = [alert({ id: 1, src_ip: "10.0.0.1" }), alert({ id: 2, src_ip: "10.0.0.2" }), alert({ id: 3, src_ip: "10.0.0.3" })];
+    d.blocks = [block({ ip: "10.0.0.1" })];
+    d.would = [would("10.0.0.1"), would("10.0.0.2")];
+    show();
+    await within(liveCard()).findByText("would block · dry-run");
+    expect(cellFor("1")).toContain("blocked · auto");
+    expect(cellFor("1")).not.toContain("would block");
+    expect(cellFor("2")).toContain("would block · dry-run");
+    expect(cellFor("3")).toContain("observe");
+  });
+
+  it("a would-block counts only while at + ttl is in the future", async () => {
+    d.alerts = [1, 2, 3, 4].map((i) => alert({ id: i, src_ip: `10.0.0.${i}` }));
+    d.would = [
+      { ...would("10.0.0.1"), at: iso(-30 * 60_000), ttl_seconds: 900 },   // expired 15 min ago
+      { ...would("10.0.0.2"), at: iso(-30 * 60_000), ttl_seconds: 7200 },  // still running
+      { ...would("10.0.0.3"), at: iso(-30 * 60_000), ttl_seconds: null },  // default 1 h, still running
+      { ...would("10.0.0.4"), at: iso(-90 * 60_000), ttl_seconds: null },  // default 1 h, over
+    ];
+    show();
+    await within(liveCard()).findAllByText("would block · dry-run");
+    expect(cellFor("1")).toContain("observe");
+    expect(cellFor("2")).toContain("would block");
+    expect(cellFor("3")).toContain("would block");
+    expect(cellFor("4")).toContain("observe");
+  });
+
+  it("a would-block only matches alerts from the same sensor", async () => {
+    d.alerts = [alert({ id: 1, sensor_id: 1, src_ip: "10.0.0.1" }), alert({ id: 2, sensor_id: 2, src_ip: "10.0.0.1" })];
+    d.would = [{ ...would("10.0.0.1"), sensor_id: 2 }];
+    show();
+    await within(liveCard()).findByText("would block · dry-run");
+    expect(cellFor("1")).toContain("observe");
+    expect(cellFor("2")).toContain("would block");
+  });
+
+  it("an expired block falls through to would block", async () => {
+    d.alerts = [alert({ id: 1, src_ip: "10.0.0.1" })];
+    d.blocks = [block({ ip: "10.0.0.1", blocked_at: iso(-120_000), expires_at: iso(-60_000) })];
+    d.would = [would("10.0.0.1")];
+    show();
+    await within(liveCard()).findByText("would block · dry-run");
+  });
+
+  it("would-blocks reload with the page reload", async () => {
+    show();
+    await screen.findByText("1,234");
+    await waitFor(() => expect(calls("/blocks/would").length).toBe(1));
+    act(() => { h.reloadAll!(); });
+    await waitFor(() => expect(calls("/blocks/would").length).toBe(2));
+    expect(calls("/blocks?").length).toBe(2);
+    expect(calls("/metrics/summary").length).toBe(2);
+  });
+
+  it("Active blocks KPI shows the dry-run count only when positive", async () => {
+    d.metrics = metrics({ would_blocks: 1234 });
+    const { unmount } = show();
+    expect(await within(cardOf("Active blocks")).findByText("+ 1,234 dry-run decisions")).toBeInTheDocument();
+    unmount();
+    d.metrics = metrics({ would_blocks: 0 });
+    show();
+    await screen.findByText("1,234");
+    expect(screen.queryByText(/dry-run decisions/)).toBeNull();
+  });
+
+  it("no dry-run line when would_blocks is missing", async () => {
+    show();
+    await screen.findByText("1,234");
+    expect(screen.queryByText(/dry-run decisions/)).toBeNull();
   });
 });

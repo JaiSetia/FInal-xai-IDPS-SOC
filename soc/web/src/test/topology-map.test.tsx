@@ -365,6 +365,8 @@ describe("TopologyMap", () => {
     afterEach(() => vi.useRealTimers());
     const frames = (n: number) => { for (let i = 0; i < n; i++) act(() => { vi.advanceTimersByTime(16); }); };
     const fakeFrames = () => vi.useFakeTimers({ toFake: ["requestAnimationFrame", "cancelAnimationFrame"] });
+    // Let any async layout/refresh updates land first: a new `nodes` array cancels the refocus frames.
+    const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 60)); });
     const selectedIds = () => h.nodes.filter((n) => n.selected).map((n) => n.id);
 
     it("passes selected: true only for the selected host", async () => {
@@ -386,6 +388,7 @@ describe("TopologyMap", () => {
     it.each([["Enter"], [" "]])("focus returns to the host after %j", async (key) => {
       show();
       await screen.findByLabelText(/^10\.0\.0\.2,/);
+      await settle();
       fakeFrames();
       const n = node("10.0.0.2");
       n.focus();
@@ -401,6 +404,7 @@ describe("TopologyMap", () => {
     it("focus returns to the host after Escape", async () => {
       show();
       await screen.findByLabelText(/^10\.0\.0\.2,/);
+      await settle();
       fakeFrames();
       const n = node("10.0.0.2");
       n.focus();
@@ -420,6 +424,7 @@ describe("TopologyMap", () => {
     it("a mouse click selection does not move focus", async () => {
       show();
       await screen.findByLabelText(/^10\.0\.0\.2,/);
+      await settle();
       fakeFrames();
       const other = screen.getByRole("button", { name: "Open the world map" });
       other.focus();
@@ -429,9 +434,95 @@ describe("TopologyMap", () => {
       expect(document.activeElement).toBe(other);
     });
 
+    describe("refocus is only for a real selection change", () => {
+      const refresh = async () => {
+        const reload = h.live.find((l) => l.ms === undefined)!.fn;
+        topology = { ...topo, nodes: topo.nodes.map((n) => ({ ...n })) }; // a new data object, so new nodes
+        await act(async () => { reload(); await new Promise((r) => setTimeout(r, 20)); });
+      };
+      const ready = async () => {
+        show();
+        await screen.findByLabelText(/^10\.0\.0\.2,/);
+        await settle();
+      };
+
+      it("Escape with nothing selected, then a refresh: focus does not move", async () => {
+        await ready();
+        fakeFrames();
+        const n = node("10.0.0.2");
+        n.focus();
+        fireEvent.keyDown(n, { key: "Escape" });
+        frames(1); // the simulated React Flow blur
+        expect(document.activeElement).toBe(document.body);
+        await refresh();
+        frames(5);
+        expect(document.activeElement).toBe(document.body);
+      });
+
+      it("Enter on the already-selected host, then a refresh: no focus jump", async () => {
+        await ready();
+        fakeFrames();
+        fireEvent.click(node("10.0.0.2"));
+        await screen.findByLabelText("Selected host 10.0.0.2");
+        frames(5);
+        const n = node("10.0.0.2");
+        n.focus();
+        fireEvent.keyDown(n, { key: "Enter" });
+        frames(1);
+        expect(document.activeElement).toBe(document.body);
+        await refresh();
+        frames(5);
+        expect(document.activeElement).toBe(document.body);
+        expect(screen.getByLabelText("Selected host 10.0.0.2")).toBeInTheDocument();
+      });
+
+      it("a key press that changes nothing clears an earlier pending refocus", async () => {
+        await ready();
+        fakeFrames();
+        const n = node("10.0.0.2");
+        n.focus();
+        fireEvent.keyDown(n, { key: "Enter" }); // requests a refocus
+        await screen.findByLabelText("Selected host 10.0.0.2");
+        fireEvent.keyDown(node("10.0.0.2"), { key: "Enter" }); // already selected: clears it
+        frames(1);
+        await refresh();
+        frames(5);
+        expect(document.activeElement).toBe(document.body);
+      });
+
+      it("focus moved to the side panel before the frames is not pulled back", async () => {
+        await ready();
+        fakeFrames();
+        const n = node("10.0.0.2");
+        n.focus();
+        fireEvent.keyDown(n, { key: "Enter" });
+        await screen.findByLabelText("Selected host 10.0.0.2");
+        const panel = screen.getByRole("button", { name: "Open the world map" });
+        panel.focus();
+        frames(5);
+        expect(document.activeElement).toBe(panel);
+      });
+
+      it("Escape with a selection still restores focus, also after a refresh in between", async () => {
+        await ready();
+        fakeFrames();
+        const n = node("10.0.0.2");
+        n.focus();
+        fireEvent.keyDown(n, { key: "Enter" });
+        await screen.findByLabelText("Selected host 10.0.0.2");
+        frames(5);
+        fireEvent.keyDown(node("10.0.0.2"), { key: "Escape" });
+        await screen.findByText("Click a host to see who it talks to.");
+        await refresh(); // the effect re-runs and must still refocus
+        frames(5);
+        expect(document.activeElement).toBe(node("10.0.0.2"));
+      });
+    });
+
     it("pending refocus frames are cancelled on unmount", async () => {
       const { unmount } = show();
       await screen.findByLabelText(/^10\.0\.0\.2,/);
+      await settle();
       fakeFrames();
       const n = node("10.0.0.2");
       n.focus();
