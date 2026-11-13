@@ -12,11 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from soc.api.common import IPAddress, audit
+from soc.api.common import IPAddress, audit, clean_reason
 from soc.api.models import (
     Action,
     ActionKind,
@@ -90,6 +90,11 @@ class ProposeBlockArgs(_Args):
     reason: str = Field(min_length=1, max_length=400)
     alert_id: int | None = Field(default=None, ge=1)
     sensor_id: int | None = Field(default=None, ge=1)
+
+    @field_validator("reason")
+    @classmethod
+    def _plain_reason(cls, value: str) -> str:
+        return clean_reason(value)  # model-written text: no control/bidi characters, no NUL
 
 
 def _schema(model: type[BaseModel]) -> dict:

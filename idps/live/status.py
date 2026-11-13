@@ -13,6 +13,7 @@ import threading
 from datetime import UTC, datetime
 from importlib import metadata
 
+from idps.live.text import clean
 from idps.soc_client import SocError, SocRejectedError
 
 log = logging.getLogger("idps.live")
@@ -40,9 +41,9 @@ def build_status(*, engine, bundle, live_settings, metrics, sink, heartbeat=None
     payload = {
         "dry_run": bool(engine.dry_run),
         "blocking_enabled": not engine.dry_run,  # the engine only builds a real blocker then
-        "interface": interface[:MAX_TEXT] if interface else None,
+        "interface": clean(interface)[:MAX_TEXT] or None if interface else None,
         "mode": "live" if interface else "replay",
-        "model": {"name": str(bundle.model_name)[:MAX_TEXT], "checksum_ok": bool(checksum_ok)},
+        "model": {"name": clean(str(bundle.model_name))[:MAX_TEXT], "checksum_ok": bool(checksum_ok)},
         "policy": {
             "confidence_threshold": policy.confidence_threshold,
             "min_flows": policy.min_flows,

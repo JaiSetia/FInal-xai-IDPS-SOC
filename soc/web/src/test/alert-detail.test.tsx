@@ -343,7 +343,7 @@ describe("AlertDetail page", () => {
     show();
     await loaded();
     const link = screen.getByRole("link", { name: "Block source IP…" });
-    expect(link).toHaveAttribute("href", "/response?ip=10.0.0.1&sensor=3&reason=alert+%237%3A+PortScan");
+    expect(link).toHaveAttribute("href", "/response?ip=10.0.0.1&sensor=3&alert=7");
     fireEvent.click(link);
     expect(calls("POST").length).toBe(0);
   });
@@ -703,6 +703,41 @@ describe("Can I trust it? card", () => {
       const [shap, lime] = await rows();
       expect(shap.querySelector(".trust-ratio .sr-only")).toBeNull();
       expect(lime.querySelector(".trust-ratio .sr-only")).toBeNull();
+    });
+  });
+
+  describe("stale last report", () => {
+    const STALE = (w: string) => `This is the sensor's last report: it is ${w} now, so it may run a different model.`;
+    const note = async () => (await (await card()).findByText(/Measured offline for model/)).textContent!;
+    it("offline sensor", async () => {
+      sensorsBody = sensorsStatus([sensorWith(faith(), { online: false })]);
+      show();
+      await loaded();
+      expect(await note()).toContain(STALE("offline"));
+    });
+    it("revoked sensor", async () => {
+      sensorsBody = sensorsStatus([sensorWith(faith(), { revoked: true, online: false })]);
+      show();
+      await loaded();
+      expect(await note()).toContain(STALE("revoked"));
+    });
+    it("a revoked sensor that is still marked online says revoked", async () => {
+      sensorsBody = sensorsStatus([sensorWith(faith(), { revoked: true })]);
+      show();
+      await loaded();
+      expect(await note()).toContain(STALE("revoked"));
+    });
+    it("online sensor: no stale sentence", async () => {
+      sensorsBody = sensorsStatus([sensorWith(faith())]);
+      show();
+      await loaded();
+      expect(await note()).not.toContain("last report");
+    });
+    it("a revoked sensor shown to analysts has no status, so the card says it hasn't reported", async () => {
+      sensorsBody = sensorsStatus([sensorState({ sensor_id: 3, name: "gw", revoked: true, online: false, status: null })]);
+      show();
+      await loaded();
+      expect(await (await card()).findByText(/Sensor gw hasn't reported/)).toBeInTheDocument();
     });
   });
 

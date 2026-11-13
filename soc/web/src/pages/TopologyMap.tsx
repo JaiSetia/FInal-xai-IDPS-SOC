@@ -258,9 +258,10 @@ function HostPanel({ node, edges, hours }: { node: TopoNode; edges: TopoEdge[]; 
   const active = (blocks.data?.items ?? []).find((b) => b.ip === node.ip && b.active);
   // The sensor is a guess (the newest alert may be one where this host was the target, on another
   // sensor), so the link says so and the block form shows its "check the sensor" hint.
+  // Numbers only: the block form writes the reason itself, so a link never carries free text.
   const blockLink = `/response${query({
     ip: node.ip, sensor, sensor_guess: sensor ? 1 : undefined,
-    reason: `topology: ${node.alert_count} alerts in the last ${hours} h`,
+    from: "topology", count: node.alert_count, hours,
   })}`;
 
   return (

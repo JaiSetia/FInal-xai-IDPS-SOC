@@ -123,9 +123,10 @@ export interface MetricsSummary {
   active_blocks: number;
   /** Dry-run block decisions in the window. */
   would_blocks?: number;
-  /** Last 7 UTC days, oldest first, non-zero pairs only. "Anomaly" counts Isolation Forest
-   *  outliers and overlaps the class rows. */
+  /** Last 7 UTC days, oldest first, non-zero pairs only. Outliers are in `anomaly_per_day`. */
   by_class_per_day?: { day: string; class: string; count: number }[];
+  /** Isolation Forest outliers per day, last 7 UTC days, non-zero only. */
+  anomaly_per_day?: { day: string; count: number }[];
 }
 
 export interface AdminUser {
@@ -171,8 +172,9 @@ export interface SensorReport {
   interface: string | null;
   mode: "live" | "replay";
   model: { name: string; checksum_ok: boolean };
-  policy: SensorPolicy;
-  allowlist: string[];
+  /** null for analysts: only admins see the policy and allowlists. */
+  policy: SensorPolicy | null;
+  allowlist: string[] | null;
   /** Full allowlist size; the list itself is capped at 100. Missing from older sensors. */
   allowlist_total?: number;
   outbox_pending: number;
@@ -214,7 +216,9 @@ export interface SensorState {
 }
 
 export interface SensorsStatus {
-  soc_allowlist: string[];
+  /** null for analysts (redacted). */
+  soc_allowlist: string[] | null;
+  redacted?: boolean;
   sensors: SensorState[];
 }
 

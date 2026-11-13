@@ -218,7 +218,7 @@ def test_poll_keeps_confirmed_actions_while_blocking_is_unconfigured(
                                 "1" * 46, "2606:4700::1%" + "z" * 20_000])
 def test_block_refuses_zone_ids_and_overlong_addresses(client, analyst_headers, sensor_id, ip):
     r = request_block(client, analyst_headers, sensor_id, ip=ip)
-    assert r.status_code == 422
+    assert r.status_code in (422, 413)  # the 20 KB one is cut by the body limit first
     assert len(r.content) < 2000  # the bad value isn't echoed back
 
 
@@ -287,3 +287,42 @@ def test_actions_pagination(client, analyst_headers, sensor_id):
     page = client.get("/actions?limit=3", headers=analyst_headers).json()
     assert len(page["items"]) == 3 and page["next_cursor"]
     assert client.get("/actions?limit=501", headers=analyst_headers).status_code == 422
+
+
+def test_the_allowlist_refusal_names_the_network_only_for_admins(
+        client, analyst_headers, admin_headers, sensor_id):
+    a = request_block(client, analyst_headers, sensor_id, ip="10.10.1.1")
+    assert a.status_code == 422
+    assert "can't be blocked" in a.json()["detail"] and "10.10.1.1" in a.json()["detail"]
+    assert "10.10.1.1/32" not in a.text and "(" not in a.json()["detail"]
+    assert "block allowlist (" not in a.text
+    adm = request_block(client, admin_headers, sensor_id, ip="10.10.1.1")
+    assert adm.status_code == 422 and "10.10.1.1/32" in adm.json()["detail"]
+
+
+def test_confirming_a_pending_action_after_the_allowlist_changed_is_generic_for_analysts(
+        client, soc_app, analyst_headers, admin_headers, sensor_id):
+    from soc.api.models import Action, ActionKind, ActionStatus
+
+    with soc_app.state.session_factory() as db:
+        db.add(Action(kind=ActionKind.BLOCK_IP, params={"ip": "10.10.2.2"}, reason="x",
+                      proposed_by="assistant", sensor_id=sensor_id, status=ActionStatus.PENDING))
+        db.commit()
+        action_id = db.query(Action).one().id
+    r = client.post(f"/actions/{action_id}/confirm", headers=analyst_headers)
+    assert r.status_code == 422 and "10.10.2.2/32" not in r.text
+    r = client.post(f"/actions/{action_id}/confirm", headers=admin_headers)
+    assert r.status_code == 422 and "10.10.2.2/32" in r.text
+
+
+def test_the_action_reason_loses_control_and_direction_characters(
+        client, analyst_headers, sensor_id):
+    r = request_block(client, analyst_headers, sensor_id, reason="scan\u202e\n\x1b[31m ok\u200b")
+    assert r.status_code == 201
+    assert r.json()["reason"] == "scan[31m ok"
+
+
+def test_a_nul_or_blank_action_reason_is_refused(client, analyst_headers, sensor_id):
+    assert request_block(client, analyst_headers, sensor_id, reason="a\x00b").status_code == 422
+    assert request_block(client, analyst_headers, sensor_id, reason="\u202e\n").status_code == 422
+    assert request_block(client, analyst_headers, sensor_id, reason="   ").status_code == 422

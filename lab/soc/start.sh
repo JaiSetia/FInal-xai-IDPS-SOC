@@ -46,4 +46,5 @@ unset LAB_SOC_ADMIN_PASSWORD
 
 # One process: the live alert feed is an in-process broadcaster (see soc/api/main.py).
 exec uvicorn soc.api.main:app --host 0.0.0.0 --port 8443 \
+  --ws-max-size 65536 \
   --ssl-keyfile "$DATA/server.key" --ssl-certfile "$DATA/server.pem"

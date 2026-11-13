@@ -178,8 +178,8 @@ def test_by_class_per_day_groups_the_rest_as_other(pinned, client, soc_app, sens
     assert got == {"A": 3, "B": 2, "(other)": 2}
 
 
-def test_anomaly_row_counts_alerts_the_isolation_forest_flagged(pinned, client, soc_app, sensor_token,
-                                                                analyst_headers):
+def test_anomaly_per_day_counts_alerts_the_isolation_forest_flagged(pinned, client, soc_app,
+                                                                    sensor_token, analyst_headers):
     now = NOW
     with soc_app.state.session_factory() as db:
         add_alert(db, now, "SSH-Patator", anomaly=0.2)    # flagged
@@ -189,8 +189,29 @@ def test_anomaly_row_counts_alerts_the_isolation_forest_flagged(pinned, client, 
         add_alert(db, now, "DDoS", anomaly=None)           # no anomaly detector in the bundle
         db.commit()
     got = {c: n for _, c, n in per_day(client, analyst_headers)}
-    assert got == {"DDoS": 4, "SSH-Patator": 1, "Anomaly": 2}
+    assert got == {"DDoS": 4, "SSH-Patator": 1}  # no synthetic "Anomaly" class row any more
+    m = client.get("/metrics/summary", headers=analyst_headers).json()
+    assert m["anomaly_per_day"] == [{"day": "2026-11-13", "count": 2}]
 
+
+def test_anomaly_per_day_buckets_by_day_and_omits_empty_days(pinned, client, soc_app,
+                                                             sensor_token, analyst_headers):
+    with soc_app.state.session_factory() as db:
+        add_alert(db, TODAY - timedelta(microseconds=1), "DDoS", anomaly=0.5)  # yesterday
+        add_alert(db, TODAY, "DDoS", anomaly=0.5)  # today
+        add_alert(db, TODAY - timedelta(days=6), "Bot", anomaly=0.1)
+        add_alert(db, TODAY - timedelta(days=7), "Bot", anomaly=0.1)  # outside the 7 days
+        add_alert(db, TODAY - timedelta(days=3), "Bot", anomaly=-1.0)  # inlier: day omitted
+        db.commit()
+    m = client.get("/metrics/summary?hours=1", headers=analyst_headers).json()
+    assert m["anomaly_per_day"] == [{"day": "2026-11-07", "count": 1},
+                                    {"day": "2026-11-12", "count": 1},
+                                    {"day": "2026-11-13", "count": 1}]
+    assert all(r["class"] != "Anomaly" for r in m["by_class_per_day"])
+
+
+def test_an_empty_anomaly_series(pinned, client, analyst_headers):
+    assert client.get("/metrics/summary", headers=analyst_headers).json()["anomaly_per_day"] == []
 
 def test_by_class_per_day_is_cached_per_day_and_expires(pinned, client, soc_app, sensor_token,
                                                         analyst_headers, monkeypatch):
@@ -319,9 +340,70 @@ def test_the_cache_cannot_be_changed_through_a_returned_list(pinned, client, soc
     with soc_app.state.session_factory() as db:
         add_alert(db, NOW, "DDoS", anomaly=None)
         db.commit()
-        first = class_per_day(db, NOW)
-        first.clear()
-        first_again = class_per_day(db, NOW)  # served from the cache
-        first_again.append("junk")
-        assert [(r.day, r.class_, r.count) for r in class_per_day(db, NOW)] == [
-            ("2026-11-13", "DDoS", 1)]
+        add_alert(db, NOW, "DDoS", anomaly=1.0)
+        db.commit()
+        classes, outliers = class_per_day(db, NOW)
+        classes.clear()
+        outliers.clear()
+        again_classes, again_outliers = class_per_day(db, NOW)  # served from the cache
+        again_classes.append("junk")
+        again_outliers.append("junk")
+        classes, outliers = class_per_day(db, NOW)
+        assert [(r.day, r.class_, r.count) for r in classes] == [("2026-11-13", "DDoS", 2)]
+        assert [(r.day, r.count) for r in outliers] == [("2026-11-13", 1)]
+
+
+# --- sensor-supplied text (L5) and class names (L6) -----------------------------------------
+
+def test_a_would_block_cannot_claim_an_analyst(client, soc_app, sensor_headers, analyst_headers):
+    r = post_events(client, sensor_headers, would(source="analyst"))
+    assert r.status_code == 201
+    (item,) = client.get("/blocks/would", headers=analyst_headers).json()["items"]
+    assert item["source"] == "auto"
+
+
+def test_real_analyst_blocks_still_keep_their_source(client, sensor_headers, analyst_headers):
+    post_events(client, sensor_headers, {"event": "blocked", "ip": "203.0.113.9",
+                                         "ttl_seconds": 60, "source": "analyst"})
+    (b,) = client.get("/blocks", headers=analyst_headers).json()["items"]
+    assert b["source"] == "analyst"
+
+
+def test_reasons_lose_control_and_direction_characters_and_nul_is_refused(
+        client, sensor_headers, analyst_headers):
+    r = post_events(client, sensor_headers, would(reason="5 flows\u202e\n\x1b[31m ok\u200b"))
+    assert r.status_code == 201
+    (item,) = client.get("/blocks/would", headers=analyst_headers).json()["items"]
+    assert item["reason"] == "5 flows[31m ok"
+    assert post_events(client, sensor_headers, would(reason="a\x00b")).status_code == 422
+    assert post_events(client, sensor_headers, {"event": "blocked", "ip": "203.0.113.9",
+                                                "reason": "a\x00b", "ttl_seconds": 60}
+                       ).status_code == 422
+
+
+@pytest.mark.parametrize("name", ["(other)", "(anything)", " (x)"])
+def test_a_class_starting_with_a_parenthesis_is_refused_at_ingest(client, sensor_headers, name):
+    r = client.post("/ingest/alerts", headers=sensor_headers,
+                    json={"alerts": [alert_payload(predicted_class=name)]})
+    assert r.status_code == 422
+
+
+def test_nul_and_control_characters_in_alert_text_are_refused(client, sensor_headers):
+    def post_alert(**kw):
+        return client.post("/ingest/alerts", headers=sensor_headers,
+                           json={"alerts": [alert_payload(**kw)]}).status_code
+
+    assert post_alert(predicted_class="Do\x00S") == 422
+    assert post_alert(predicted_class="Do\u202eS") == 422
+    expl = {"method": "shap", "top_features": [{"feature": "a\x00b", "value": 1.0,
+                                                 "contribution": 0.1}]}
+    assert post_alert(explanation=expl) == 422
+    assert post_alert(explanation={"method": "sh\x00ap"}) == 422
+    assert post_alert(explanation={"k\x00": 1}) == 422
+    assert post_alert(predicted_class="Web Attack – Brute Force") == 201  # ordinary unicode
+
+
+def test_nul_in_an_action_result_is_refused(client, soc_app, sensor_headers, admin_headers):
+    r = client.post("/sensor/actions/1/result", headers=sensor_headers,
+                    json={"success": False, "result": {"error": "bad\x00"}})
+    assert r.status_code == 422

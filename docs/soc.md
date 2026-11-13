@@ -10,7 +10,7 @@ pip install -e ".[dev]"
 export IDPS_SOC_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 python -m soc.api create-user alice --role admin      # asks for the password (12+ characters)
 python -m soc.api create-sensor lab-sensor-1          # prints the sensor token once
-uvicorn soc.api.main:app --reload                     # one process, see "Live feed" below
+uvicorn soc.api.main:app --ws-max-size 65536 --reload   # one process, see "Live feed" below
 ```
 
 Settings (environment variables, prefix `IDPS_SOC_`):
@@ -50,7 +50,7 @@ The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep thei
 | `GET /blocks` | user | `active=true/false`, `ip` |
 | `GET /blocks/would` | user | Dry-run `would_block` decisions, newest first: `ip`, `since_hours` (1 to 720, default 24), `limit`, `cursor` |
 | `POST /sensor/status` | sensor | The sensor's status snapshot (mode, policy, allowlist, health, counters); every 30 s; overwrites the sensor's one row |
-| `GET /sensors/status` | user | `{soc_allowlist, sensors: [{sensor_id, name, revoked, last_seen_at, online, status}]}`; `status` is null for a sensor never seen; online = reported within 120 s and not revoked; no tokens or hashes |
+| `GET /sensors/status` | user | `{redacted, soc_allowlist, sensors: [{sensor_id, name, revoked, last_seen_at, online, status}]}`; `status` is null for a sensor never seen (and, for non-admins, for a revoked one); **non-admins get `redacted: true`, `soc_allowlist: null` and `allowlist: null`, `policy: null` in each status** (admins get all of it); online = reported within 120 s and not revoked; no tokens or hashes |
 | `POST /actions` | user | Request `block_ip` / `unblock_ip` on a sensor; starts confirmed |
 | `GET /actions`, `GET /actions/{id}` | user | List (filter by `status`), detail |
 | `POST /actions/{id}/confirm`, `/reject` | user | Decide a pending action (for assistant proposals) |
@@ -59,7 +59,7 @@ The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep thei
 | `GET/POST /cases`, `GET/PATCH/DELETE /cases/{id}` | user | Cases |
 | `POST /cases/{id}/notes` | user | Note, up to 10,000 characters |
 | `POST /cases/{id}/alerts`, `DELETE /cases/{id}/alerts/{alert_id}` | user | Attach or detach alerts (an alert is in at most one case) |
-| `GET /metrics/summary?hours=24` | user | Alerts per bucket (hourly up to 72 h, else daily), by class and severity, top 10 sources, false-positive rate, detection latency p50/p95, active blocks, `would_blocks` (dry-run decisions in the window), `by_class_per_day` (cached for 60 s; last 7 UTC days whatever `hours` is: `[{day, class, count}]`, non-zero pairs only, classes beyond the top 25 as `(other)`, plus an `Anomaly` row per day) |
+| `GET /metrics/summary?hours=24` | user | Alerts per bucket (hourly up to 72 h, else daily), by class and severity, top 10 sources, false-positive rate, detection latency p50/p95, active blocks, `would_blocks` (dry-run decisions in the window), `by_class_per_day` (cached for 60 s; last 7 UTC days whatever `hours` is: `[{day, class, count}]`, non-zero pairs only, classes beyond the top 25 as `(other)`), `anomaly_per_day` (same 7 days and cache: `[{day, count}]`, alerts the Isolation Forest also flagged, non-zero days only) |
 | `GET /topology?hours=1` | user | Nodes (host, alert count, max severity) and edges (src to dst, count, max severity) |
 | `GET/POST /admin/users`, `PATCH /admin/users/{id}/role`, `POST /admin/users/{id}/disable`, `/enable`, `/reset-password` | admin | User management |
 | `GET/POST /admin/sensors`, `POST /admin/sensors/{id}/revoke` | admin | Sensors; the token is returned once, on creation |
@@ -119,8 +119,10 @@ Rules worth knowing:
   sensors; at least one
   method; unknown keys are refused. Model-level numbers from the offline faithfulness report, not
   live LIME. `sensor_version`, `sent_at` (the sensor's clock, informational).
-- **Anomaly row.** `by_class_per_day` counts alerts whose stored `anomaly_score` is above 0 as
-  `Anomaly`: that is exactly the Isolation Forest's outlier flag (score = -decision_function).
+- **Anomaly series.** `anomaly_per_day` counts alerts whose stored `anomaly_score` is above 0:
+  exactly the Isolation Forest's outlier flag (score = -decision_function). It is a separate
+  series, not a synthetic class row, so no class name can collide with it; ingest also refuses a
+  `predicted_class` starting with `(` so nothing real collides with the `(other)` fold bucket.
   The result is one grouped query over the week's alerts, cached in-process for 60 s per database
   and UTC day (new alerts show up to a minute late; a new day never reuses yesterday's buckets).
   The cost still grows with the alerts of the last 7 days. The model now declares an index
@@ -128,9 +130,49 @@ Rules worth knowing:
   new databases get it from `create_all`; an **existing** database does not (create_all never
   touches existing tables), so add it by hand:
   `CREATE INDEX ix_alerts_received_class_anomaly ON alerts (received_at, predicted_class, anomaly_score);`
-  It overlaps the class rows (an alert has a class and may also be an outlier) and ignores alerts
-  with no score (a model without an anomaly detector).
+  An alert has a class and may also be an outlier, so the series overlaps the class rows; alerts
+  with no score (a model without an anomaly detector) are ignored.
 - **Last admin.** Demoting or disabling the last enabled admin, including yourself, returns 409.
+- **Request body limits.** `soc/api/limits.py` (pure ASGI middleware, constants in one place)
+  answers 413 before anything is read or parsed (so before authentication, even for a revoked
+  sensor): by `Content-Length` when sent, and by counting streamed bytes (chunked bodies) until the
+  limit. 10 MiB for `/ingest/alerts` (500 alerts x 16 KiB explanation fit), 128 KiB `/ingest/blocks`
+  and `/cases`, 64 KiB `/sensor/status` and `/assistant`, 16 KiB `/actions`, `/sensor/actions` and
+  `/admin`, 4 KiB `/auth/login`, 256 KiB anything else. A malformed `Content-Length` is a 400. The
+  Caddyfile in `infra/templates/soc-user-data.sh.tftpl` also sets `request_body { max_size 11MiB }`,
+  `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`.
+- **Sensor-supplied text.** Interface, model and sensor-version names in a status report are
+  refused (422) if they contain control, formatting (bidi override, zero-width) or separator
+  characters; would-block and block reasons, the `reason` of `POST /actions` and the assistant's
+  `propose_block` reason have those characters removed (a reason that is blank afterwards is
+  refused); a NUL anywhere in a
+  stored string (alert class, explanation, reason, action result, status) is refused because
+  PostgreSQL cannot store it. Allowlist entries must be IP addresses or networks (stored
+  normalised, e.g. `10.1.1.1/32`), `allowlist_total` must be at least the list's length, and
+  booleans and integers are strict (`"yes"` is not a bool). A `would_block` event always has
+  `source: "auto"`, whatever the sensor says.
+- **WebSocket size.** The body-limit middleware does not see WebSocket messages, and the live feed
+  reads the first message before checking its 4096 characters, so start uvicorn with
+  `--ws-max-size 65536` (every start script in the repo does; its default is 16 MiB). The server
+  then closes an oversized message with 1009 before any handler runs.
+- **What analysts can see (decided, deliberate).** `GET /sensors/status` withholds the SOC
+  allowlist and each sensor's allowlist and block policy from non-admins, and the 422 for a blocked
+  address on the allowlist names the matching network only to admins (analysts, and the assistant,
+  get "this address is on the block allowlist"). Block reasons and action results stay visible to
+  analysts because they need them to triage. An analyst can therefore still infer from a reason
+  such as "5 flows >= 0.9 confidence in 60s" the sensor's threshold, flow count, window and block
+  length, and from refused actions the analyst-block cap. That is accepted: redacting reasons would
+  make blocks impossible to review; the allowlist (who is never blocked) is the part that matters.
+- **Sensor status audit.** One audit row (`sensor_status_first`) on a sensor's first report, and
+  `sensor_status_changed` when `dry_run`, `blocking_enabled`, `mode`, `model`, the `policy`, the
+  allowlist (or its total) or `faithfulness.model_matches` changes: `details.changed` maps each
+  field to `[old, new]` (policy: per sub-field; allowlist: counts, totals and at most 20 added and
+  removed entries plus `more`). Counters, outbox size and times never cause a row. At most one row
+  per sensor per field per 10 minutes (`AUDIT_WINDOW_SECONDS`): a change inside the window is not
+  lost, the next post after it compares with the last *audited* value and writes one row (old to
+  latest) with `details.folded[field]` counting the changes it absorbed; the throttle state is in
+  memory, after a restart the stored status is the baseline. Stored allowlists from before entries
+  were normalised (`10.10.1.1`) are normalised before comparing, so an upgrade is not a change.
 - **Audit.** Every mutating request writes one audit row in the same transaction as the change
   (an alert or block batch is one row). `POST /auth/login` is not audited.
 

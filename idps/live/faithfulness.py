@@ -11,7 +11,9 @@ import json
 import logging
 import math
 import os
-from pathlib import Path
+import stat
+
+from idps.live.text import has_unsafe
 
 log = logging.getLogger("idps.live")
 
@@ -36,7 +38,10 @@ class FaithfulnessError(ValueError):
 def _number(value, low: float, high: float, what: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise FaithfulnessError(f"{what} is not a number")
-    value = float(value)
+    try:
+        value = float(value)
+    except OverflowError as exc:  # an integer with hundreds of digits
+        raise FaithfulnessError(f"{what} is too large") from exc
     if not math.isfinite(value) or not low <= value <= high:
         raise FaithfulnessError(f"{what} is outside {low:g}..{high:g}")
     return value
@@ -65,8 +70,9 @@ def parse_report(data: object, model_name: str, model_sha256: str | None = None)
     data = _dict(data, "the report")
     config = _dict(data.get("config"), "config")
     model = config.get("model")
-    if not isinstance(model, str) or not model.strip() or len(model) > 64:
-        raise FaithfulnessError("config.model is not a short string")
+    if (not isinstance(model, str) or not model.strip() or len(model) > 64
+            or has_unsafe(model)):
+        raise FaithfulnessError("config.model is not a short plain string")
     methods_in = _dict(data.get("methods"), "methods")
     methods = {}
     for name in METHODS:
@@ -99,21 +105,38 @@ def parse_report(data: object, model_name: str, model_sha256: str | None = None)
     }
 
 
+def _read_capped(path: str) -> bytes:
+    """The file's bytes, at most MAX_REPORT_BYTES. Opened once and checked on the open descriptor
+    (no is_file()-then-open window): never blocks on a FIFO and refuses anything but a regular
+    file. The path is the operator's own setting, so a symlink to the report is fine."""
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise FaithfulnessError("not a regular file")
+        chunks, total = [], 0
+        while total <= MAX_REPORT_BYTES:
+            chunk = os.read(fd, min(65536, MAX_REPORT_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+    finally:
+        os.close(fd)
+    if total > MAX_REPORT_BYTES:
+        raise FaithfulnessError(f"file is over {MAX_REPORT_BYTES} bytes")
+    return b"".join(chunks)
+
+
 def load_faithfulness(path: str | None, model_name: str,
                       model_sha256: str | None = None) -> dict | None:
     """Read and validate the report once. None (with one warning) if there is none to use."""
     if not path:
         return None
     try:
-        p = Path(path)
-        if not p.is_file():
-            raise FaithfulnessError("no such file")
-        with open(p, "rb") as f:
-            raw = f.read(MAX_REPORT_BYTES + 1)
-        if len(raw) > MAX_REPORT_BYTES:
-            raise FaithfulnessError(f"file is over {MAX_REPORT_BYTES} bytes")
+        raw = _read_capped(path)
         result = parse_report(json.loads(raw), model_name, model_sha256)
-    except (OSError, ValueError, RecursionError) as exc:  # FaithfulnessError and JSON errors
+    except (OSError, ValueError, ArithmeticError, RecursionError) as exc:  # incl. FaithfulnessError
         log.warning("ignoring the faithfulness report %s (%s): the status goes without it",
                     os.path.basename(path), exc)
         return None

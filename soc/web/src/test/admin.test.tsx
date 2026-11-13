@@ -87,10 +87,19 @@ describe("auditGroup", () => {
     expect(AUDIT_GROUPS.blocks).toEqual(["ingest_blocks"]);
     expect(AUDIT_GROUPS.alerts).toEqual(["ingest_alerts", "alert_status"]);
     expect(AUDIT_GROUPS.cases).toEqual(["case_create", "case_update", "case_delete", "case_note", "case_attach", "case_detach"]);
-    expect(AUDIT_GROUPS.users).toEqual(["user_create", "user_role", "user_disable", "user_enable", "user_reset_password", "sensor_create", "sensor_revoke"]);
+    expect(AUDIT_GROUPS.users).toEqual(["user_create", "user_role", "user_disable", "user_enable", "user_reset_password", "sensor_create", "sensor_revoke",
+      "sensor_status_first", "sensor_status_changed"]);
   });
   it.each(["action_proposed", "user_login", "assistant_chat", "case_created", "ingest_other", "alert_", "action_", "", "login_failed"])(
     "%j is other (exact names only)", (a) => { expect(auditGroup(a)).toBe("other"); });
+});
+
+describe("auditQuery users group", () => {
+  it("sends the sensor status actions too", () => {
+    const q = new URLSearchParams(auditQuery("users", ""));
+    expect(q.getAll("action")).toEqual(expect.arrayContaining(["sensor_status_first", "sensor_status_changed", "sensor_create", "sensor_revoke"]));
+  });
+  it.each(["sensor_status_first", "sensor_status_changed"])("%s belongs to the users group", (a) => { expect(auditGroup(a)).toBe("users"); });
 });
 
 describe("auditQuery", () => {

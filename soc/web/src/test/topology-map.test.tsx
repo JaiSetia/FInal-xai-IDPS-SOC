@@ -269,7 +269,7 @@ describe("TopologyMap", () => {
       show();
       const panel = within(await select("10.0.0.9"));
       await waitFor(() => expect(panel.getByRole("link", { name: "Block…" }))
-        .toHaveAttribute("href", "/response?ip=10.0.0.9&sensor=4&sensor_guess=1&reason=topology%3A+2+alerts+in+the+last+24+h"));
+        .toHaveAttribute("href", "/response?ip=10.0.0.9&sensor=4&sensor_guess=1&from=topology&count=2&hours=24"));
       expect(calls("/alerts?ip=10.0.0.9&limit=1").length).toBe(1);
       expect(calls("/blocks?ip=10.0.0.9&active=true&limit=20").length).toBe(1);
       expect(await panel.findByText("none active")).toBeInTheDocument();
@@ -281,7 +281,7 @@ describe("TopologyMap", () => {
       const panel = within(await select("10.0.0.9"));
       await waitFor(() => expect(panel.queryByText("Looking up its sensor…")).toBeNull());
       expect(panel.getByRole("link", { name: "Block…" }))
-        .toHaveAttribute("href", "/response?ip=10.0.0.9&reason=topology%3A+2+alerts+in+the+last+24+h");
+        .toHaveAttribute("href", "/response?ip=10.0.0.9&from=topology&count=2&hours=24");
     });
 
     it("refreshes the block state through useLiveRefresh every 30 s", async () => {
@@ -297,11 +297,18 @@ describe("TopologyMap", () => {
       expect(calls("/blocks?ip=10.0.0.9").length).toBe(2);
     });
 
-    it("uses the hours prop in the reason", async () => {
+    it("uses the hours prop in the link", async () => {
       show(6);
       const panel = within(await select("10.0.0.9"));
       await waitFor(() => expect(panel.getByRole("link", { name: "Block…" }))
-        .toHaveAttribute("href", expect.stringContaining("in+the+last+6+h")));
+        .toHaveAttribute("href", expect.stringContaining("from=topology&count=2&hours=6")));
+    });
+
+    it("the Block link never carries a reason", async () => {
+      show();
+      const panel = within(await select("10.0.0.9"));
+      const link = await waitFor(() => panel.getByRole("link", { name: "Block…" }));
+      expect(link.getAttribute("href")).not.toContain("reason");
     });
 
     it("a pure target has no Block link", async () => {

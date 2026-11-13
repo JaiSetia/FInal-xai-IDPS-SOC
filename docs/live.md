@@ -161,7 +161,12 @@ reported, with `model_matches: false` and a warning. `python -m idps.explain fai
 the bundle's sha256 as `config.model_sha256`; when present it is compared with the loaded model's
 digest (`model_check: "digest"`, so a retrained model of the same algorithm does not match). Older
 reports without it fall back to the algorithm name (`model_check: "name"`, a weak match).
-`ratio_to_random` may be `null` or negative and is passed on as is.
+`ratio_to_random` may be `null` or negative and is passed on as is. The report is opened once
+(a symlink is fine, it is the operator's own setting; a pipe or a directory is refused, and the
+file is read with a 1 MB cap); an absurd number in it (a
+400-digit integer) or a control character in its model name makes it invalid, with the same single
+warning, and the sensor starts without it. The interface and model names in the status are cleaned
+of control and direction-override characters, because the SOC refuses a status that has them.
 
 Block events travel through the same sender thread as the alerts (detection never waits), in
 batches of at most 100 (`POST /ingest/blocks`), and are retried while the SOC is unavailable, with

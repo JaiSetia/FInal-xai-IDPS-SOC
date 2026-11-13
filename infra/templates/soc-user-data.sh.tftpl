@@ -74,6 +74,16 @@ cat > /opt/idps/Caddyfile <<'CADDY'
 https://${soc_public_ip} {
 	tls internal
 	# The dashboard (soc/web) is not served yet; add a file_server block here when it is.
+	# Largest body any endpoint accepts (/ingest/alerts, 10 MiB: soc/api/limits.py) plus margin; the
+	# API enforces tighter limits per path, this one stops oversized bodies at the edge.
+	request_body {
+		max_size 11MiB
+	}
+	# The dashboard must not be framed (clickjacking).
+	header {
+		X-Frame-Options DENY
+		Content-Security-Policy "frame-ancestors 'none'"
+	}
 	reverse_proxy api:8000
 }
 
@@ -119,7 +129,7 @@ services:
       fastapi uvicorn websockets sqlalchemy pydantic pydantic-settings pyjwt anthropic geoip2
       argon2-cffi 'psycopg[binary]'
       && exec uvicorn soc.api.main:app --host 0.0.0.0 --port 8000
-      --proxy-headers --forwarded-allow-ips='*'"
+      --proxy-headers --forwarded-allow-ips='*' --ws-max-size 65536"
     # No published ports: only Caddy, on the same network, reaches the API.
 
   caddy:

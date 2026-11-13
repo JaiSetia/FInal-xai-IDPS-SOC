@@ -1,6 +1,7 @@
 """Small helpers shared by the route modules: audit log, severity, IP checks, pagination."""
 
 import ipaddress
+import unicodedata
 from typing import Annotated, Generic, TypeVar
 
 from fastapi import HTTPException, Query, status
@@ -39,6 +40,60 @@ def derive_severity(settings: SocSettings, predicted_class: str, confidence: flo
     return base
 
 
+# --- text from sensors ------------------------------------------------------------------
+
+# Control (incl. NUL, newline), format (bidi overrides, zero-width), surrogate, private-use and
+# line/paragraph separator characters: none belongs in a name or a reason shown to an analyst.
+UNSAFE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})
+
+
+def unsafe_chars(text: str) -> bool:
+    return any(unicodedata.category(c) in UNSAFE_CATEGORIES for c in text)
+
+
+def plain_text(text: str) -> str:
+    """Refuse `text` with unsafe characters (ValueError, for pydantic validators)."""
+    if unsafe_chars(text):
+        raise ValueError("control, formatting or direction-override characters are not allowed")
+    return text
+
+
+def strip_unsafe(text: str) -> str:
+    """`text` without the unsafe characters, except that NUL is refused (PostgreSQL cannot store
+    it, and it is never legitimate)."""
+    if "\x00" in text:
+        raise ValueError("NUL characters are not allowed")
+    return "".join(c for c in text if unicodedata.category(c) not in UNSAFE_CATEGORIES)
+
+
+def clean_reason(text: str) -> str:
+    """A free-text reason: control/bidi characters stripped, NUL refused, never left blank."""
+    text = strip_unsafe(text).strip()
+    if not text:
+        raise ValueError("the reason must not be blank")
+    return text
+
+
+def has_nul(value, depth: int = 0) -> bool:
+    """True if a JSON-like value holds a NUL in any string or key (PostgreSQL JSON refuses it)."""
+    if depth > 64:
+        raise ValueError("too deeply nested")
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, dict):
+        return any(has_nul(k, depth + 1) or has_nul(v, depth + 1) for k, v in value.items())
+    if isinstance(value, list | tuple):
+        return any(has_nul(v, depth + 1) for v in value)
+    return False
+
+
+def no_nul(value):
+    """Validator body: refuse a JSON-like value that contains NUL anywhere."""
+    if has_nul(value):
+        raise ValueError("NUL characters are not allowed")
+    return value
+
+
 # --- IP addresses -----------------------------------------------------------------------
 
 MAX_IP_LENGTH = 45  # longest textual IPv6 address with an embedded IPv4 part
@@ -72,10 +127,12 @@ class BlockingUnavailable(HTTPException):
                          "analysts); refusing to request any block until it is")
 
 
-def check_blockable(ip: str, settings: SocSettings) -> None:
+def check_blockable(ip: str, settings: SocSettings, *, reveal: bool = False) -> None:
     """Raise if the SOC must not ask for `ip` to be blocked.
 
-    422: the address is never blockable (special-purpose or allowlisted).
+    422: the address is never blockable (special-purpose or allowlisted). Only with `reveal`
+    (admins) does the message name the allowlist network that matched; for everyone else it says
+    only that the address is on the allowlist (the list itself is not for analysts to map).
     503 (BlockingUnavailable): the allowlist isn't configured, so nothing may be blocked.
     """
     addr = ipaddress.ip_address(_canonical_ip(ip))
@@ -88,8 +145,9 @@ def check_blockable(ip: str, settings: SocSettings) -> None:
         raise BlockingUnavailable()
     for net in settings.block_allowlist:
         if addr.version == net.version and addr in net:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT,
-                                f"{addr} is in the block allowlist ({net}) and can't be blocked")
+            detail = (f"{addr} is in the block allowlist ({net}) and can't be blocked" if reveal
+                      else f"{addr} is on the block allowlist and can't be blocked")
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, detail)
 
 
 # --- pagination -------------------------------------------------------------------------

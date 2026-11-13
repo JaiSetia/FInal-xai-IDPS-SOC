@@ -1142,10 +1142,10 @@ def test_status_does_not_disturb_the_metrics_flow_rate(bundle):
     assert metrics._last[1] == first["flows"]
 
 
-def test_the_status_payload_is_accepted_by_the_soc(bundle, client, sensor_headers, analyst_headers):
+def test_the_status_payload_is_accepted_by_the_soc(bundle, client, sensor_headers, admin_headers):
     p, _ = _status(bundle, allowlist=["10.10.1.1", "10.10.2.0/24"])
     assert client.post("/sensor/status", json=p, headers=sensor_headers).status_code == 200
-    (s,) = client.get("/sensors/status", headers=analyst_headers).json()["sensors"]
+    (s,) = client.get("/sensors/status", headers=admin_headers).json()["sensors"]
     assert s["status"]["policy"]["min_flows"] == 5 and s["online"] is True
 
 
@@ -2281,3 +2281,83 @@ def test_the_loaded_report_reaches_the_soc_status(model_file, tmp_path, monkeypa
     assert client.post("/sensor/status", json=payload, headers=sensor_headers).status_code == 200
     (s,) = client.get("/sensors/status", headers=analyst_headers).json()["sensors"]
     assert s["status"]["faithfulness"]["flows"] == 100
+
+
+# --- Faithfulness loader hardening / status text ------------------------------------------------
+
+def test_a_huge_integer_in_the_report_is_a_warning_not_a_crash(tmp_path, caplog):
+    from idps.live.faithfulness import load_faithfulness
+
+    big = "9" * 400  # float() of this integer raises OverflowError
+    raw = json.dumps(_faith_report()).replace('"mean_drop": 0.377', f'"mean_drop": {big}', 1)
+    assert big in raw
+    with caplog.at_level(logging.WARNING, logger="idps.live"):
+        assert load_faithfulness(_write_faith(tmp_path, None, raw=raw), "xgboost") is None
+    assert len([r for r in caplog.records if "ignoring the faithfulness" in r.message]) == 1
+    raw = json.dumps(_faith_report()).replace('"top_k": 5', f'"top_k": {big}')
+    assert load_faithfulness(_write_faith(tmp_path, None, raw=raw), "xgboost") is None
+    raw = json.dumps(_faith_report()).replace('"mean_drop": 0.0097', f'"mean_drop": -{big}')
+    assert load_faithfulness(_write_faith(tmp_path, None, raw=raw), "xgboost") is None
+
+
+def test_the_sensor_starts_with_a_hostile_report(model_file, tmp_path, monkeypatch):
+    big = "9" * 400
+    path = tmp_path / "f.json"
+    path.write_text(json.dumps(_faith_report()).replace('"mean_drop": 0.377', f'"mean_drop": {big}'))
+    monkeypatch.setenv("IDPS_FAITHFULNESS_REPORT", str(path))
+    pcap = write_pcap(tmp_path / "a.pcap", attack_packets(n=3))
+    out = tmp_path / "alerts.jsonl"
+    assert main(["--pcap", str(pcap), "--model", str(model_file), "--alerts-file", str(out)]) == 0
+
+
+def test_only_a_regular_file_is_read(tmp_path):
+    from idps.live.faithfulness import load_faithfulness
+
+    good = _write_faith(tmp_path, _faith_report())
+    link = tmp_path / "link.json"
+    link.symlink_to(good)
+    assert load_faithfulness(str(link), "xgboost") is not None  # the operator's own link: fine
+    dangling = tmp_path / "dangling.json"
+    dangling.symlink_to(tmp_path / "missing.json")
+    assert load_faithfulness(str(dangling), "xgboost") is None
+    to_dir = tmp_path / "to_dir.json"
+    to_dir.symlink_to(tmp_path)
+    assert load_faithfulness(str(to_dir), "xgboost") is None  # still must be a regular file
+    assert load_faithfulness(str(tmp_path), "xgboost") is None  # a directory
+    fifo = tmp_path / "fifo.json"
+    os.mkfifo(fifo)
+    assert load_faithfulness(str(fifo), "xgboost") is None  # does not block on a pipe
+    assert load_faithfulness(good, "xgboost") is not None
+
+
+@pytest.mark.parametrize("bad", ["eth\x1b[0m", "a\u202eb", "a\nb"])
+def test_a_report_model_name_with_control_characters_is_invalid(tmp_path, bad):
+    from idps.live.faithfulness import load_faithfulness
+
+    data = _faith_report()
+    data["config"]["model"] = bad
+    assert load_faithfulness(_write_faith(tmp_path, data), "xgboost") is None
+
+
+def test_the_status_text_is_cleaned_so_the_soc_accepts_it(bundle):
+    from idps.live.status import build_status
+
+    engine = ResponseEngine(Settings(dry_run=True), blocker=FakeBlocker())
+    p = build_status(engine=engine, bundle=bundle, live_settings=LiveSettings(), metrics=Metrics(),
+                     sink=ListSink(), interface="et\u202eh\x001")
+    assert p["interface"] == "eth1"
+    assert build_status(engine=engine, bundle=bundle, live_settings=LiveSettings(),
+                        metrics=Metrics(), sink=ListSink(), interface="\u200b")["interface"] is None
+
+
+def test_the_sensors_status_always_passes_the_socs_strict_schema(bundle):
+    from idps.live.status import build_status
+    from soc.api.routes.sensors import StatusReport
+
+    for dry_run in (True, False):
+        engine = ResponseEngine(Settings(dry_run=dry_run, allowlist=["10.10.1.1", "10.9.0.0/16"]),
+                                blocker=FakeBlocker())
+        for interface in ("eth1", None):
+            payload = build_status(engine=engine, bundle=bundle, live_settings=LiveSettings(),
+                                   metrics=Metrics(), sink=ListSink(), interface=interface)
+            StatusReport.model_validate(json.loads(json.dumps(payload)))

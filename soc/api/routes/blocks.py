@@ -13,7 +13,7 @@ from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
 from soc.api.auth import AnyUser, Sensor
-from soc.api.common import Cursor, IPAddress, Limit, Page, audit, paginate
+from soc.api.common import Cursor, IPAddress, Limit, Page, audit, paginate, strip_unsafe
 from soc.api.db import get_db
 from soc.api.models import Alert, Block, BlockSource, WouldBlock
 
@@ -104,6 +104,11 @@ class BlockEvent(BaseModel):
     # When the sensor decided (would_block only; optional so older sensors still work).
     decided_at: datetime | None = None
 
+    @field_validator("reason")
+    @classmethod
+    def _plain_reason(cls, value: str) -> str:
+        return strip_unsafe(value)  # control/bidi characters dropped; NUL refused
+
     @field_validator("expires_at", "decided_at")
     @classmethod
     def _aware(cls, value: datetime | None) -> datetime | None:
@@ -121,6 +126,8 @@ class BlockEvent(BaseModel):
             raise ValueError("a would_block event has ttl_seconds, not expires_at")
         if self.event != "would_block" and self.decided_at is not None:
             raise ValueError("decided_at is only for would_block events")
+        if self.event == "would_block":
+            self.source = BlockSource.AUTO  # a sensor cannot claim an analyst made this decision
         return self
 
 

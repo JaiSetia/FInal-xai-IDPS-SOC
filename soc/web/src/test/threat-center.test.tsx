@@ -557,12 +557,12 @@ describe("class by day heatmap", () => {
 
   it("shows the top 5 classes, the rest summed into other classes before Anomaly", async () => {
     d.metrics = metrics({
+      anomaly_per_day: [{ day: days[6], count: 999 }],
       by_class_per_day: [
         ...row("C1", [0, 0, 0, 0, 0, 0, 60]), ...row("C2", [0, 0, 0, 0, 0, 0, 50]), ...row("C3", [0, 0, 0, 0, 0, 0, 40]),
         ...row("C4", [0, 0, 0, 0, 0, 0, 30]), ...row("C5", [0, 0, 0, 0, 0, 0, 20]),
         ...row("C6", [0, 0, 0, 0, 0, 5, 10]), ...row("C7", [0, 0, 0, 0, 0, 1, 2]),
         ...row("(other)", [0, 0, 0, 0, 0, 0, 1]),
-        ...row("Anomaly", [0, 0, 0, 0, 0, 0, 999]),
       ],
     });
     show();
@@ -573,24 +573,72 @@ describe("class by day heatmap", () => {
     expect(other.slice(5)).toEqual(["6", "13"]); // C6 + C7 (+ the API's (other) on the last day)
     expect(heatRows(t).at(-1)).toHaveClass("anomaly");
     expect(heatRows(t).filter((r) => r.classList.contains("anomaly")).length).toBe(1);
+    expect(heatRows(t).at(-1)!.querySelectorAll("td")[6].textContent).toBe("999");
+  });
+
+  it("the Anomaly row exists, with zeros, whenever anomaly_per_day exists, even empty", async () => {
+    d.metrics = metrics({ anomaly_per_day: [], by_class_per_day: row("A", [0, 0, 0, 0, 0, 0, 1]) });
+    show();
+    await screen.findByText("1,234");
+    const t = document.querySelector("table.heatmap") as HTMLElement;
+    expect(heatRows(t).at(-1)).toHaveClass("anomaly");
+    expect(names(t).at(-1)).toBe("Anomaly");
+    expect(Array.from(heatRows(t).at(-1)!.querySelectorAll("td")).every((c) => c.classList.contains("heat-0"))).toBe(true);
+  });
+
+  it("no Anomaly row when anomaly_per_day is absent", async () => {
+    d.metrics = metrics({ by_class_per_day: row("A", [0, 0, 0, 0, 0, 0, 1]) });
+    show();
+    await screen.findByText("1,234");
+    const t = document.querySelector("table.heatmap") as HTMLElement;
+    expect(names(t)).toEqual(["A"]);
+    expect(t.querySelector("tr.anomaly")).toBeNull();
+  });
+
+  it("anomaly counts fill the Anomaly row by day and count in the heat scale", async () => {
+    d.metrics = metrics({ anomaly_per_day: row("x", [0, 4, 0, 0, 0, 0, 8]).map(({ day, count }) => ({ day, count })), by_class_per_day: row("A", [0, 0, 0, 0, 0, 0, 2]) });
+    show();
+    await screen.findByText("1,234");
+    const cells = Array.from(document.querySelector("tr.anomaly")!.querySelectorAll("td"));
+    expect(cells[1].textContent).toBe("4");
+    expect(cells[6].textContent).toBe("8");
+    expect(cells[6]).toHaveClass("heat-4");
+    expect(cells[1]).toHaveClass("heat-2");
+    expect(cells[6]).toHaveAttribute("title", `Anomaly, ${days[6]}: 8`);
+  });
+
+  it("a real class named Anomaly is an ordinary class row and does not mix with the outlier row", async () => {
+    d.metrics = metrics({
+      anomaly_per_day: [{ day: days[6], count: 3 }],
+      by_class_per_day: [...row("Anomaly", [0, 0, 0, 0, 0, 0, 50]), ...row("B", [0, 0, 0, 0, 0, 0, 10])],
+    });
+    show();
+    await screen.findByText("1,234");
+    const t = document.querySelector("table.heatmap") as HTMLElement;
+    expect(names(t)).toEqual(["Anomaly", "B", "Anomaly"]);
+    const rows = heatRows(t);
+    expect(rows[0]).not.toHaveClass("anomaly");
+    expect(rows[0].querySelectorAll("td")[6].textContent).toBe("50");
+    expect(rows[2]).toHaveClass("anomaly");
+    expect(rows[2].querySelectorAll("td")[6].textContent).toBe("3");
   });
 
   it("(other) from the API is never a top row, even when it is the biggest", async () => {
-    d.metrics = metrics({ by_class_per_day: [...row("(other)", [0, 0, 0, 0, 0, 0, 500]), ...row("A", [0, 0, 0, 0, 0, 0, 1])] });
+    d.metrics = metrics({ anomaly_per_day: [], by_class_per_day: [...row("(other)", [0, 0, 0, 0, 0, 0, 500]), ...row("A", [0, 0, 0, 0, 0, 0, 1])] });
     show();
     await screen.findByText("1,234");
     expect(names(document.querySelector("table.heatmap") as HTMLElement)).toEqual(["A", "other classes", "Anomaly"]);
   });
 
   it("no other row when nothing lies beyond the top 5", async () => {
-    d.metrics = metrics({ by_class_per_day: ["A", "B", "C", "D", "E"].flatMap((c, i) => row(c, [0, 0, 0, 0, 0, 0, 10 - i])) });
+    d.metrics = metrics({ anomaly_per_day: [], by_class_per_day: ["A", "B", "C", "D", "E"].flatMap((c, i) => row(c, [0, 0, 0, 0, 0, 0, 10 - i])) });
     show();
     await screen.findByText("1,234");
     expect(names(document.querySelector("table.heatmap") as HTMLElement)).toEqual(["A", "B", "C", "D", "E", "Anomaly"]);
   });
 
   it("column headers carry an sr-only full date", async () => {
-    d.metrics = metrics({ by_class_per_day: row("A", [0, 0, 0, 0, 0, 0, 1]) });
+    d.metrics = metrics({ anomaly_per_day: [], by_class_per_day: row("A", [0, 0, 0, 0, 0, 0, 1]) });
     show();
     await screen.findByText("1,234");
     const heads = Array.from(document.querySelectorAll("table.heatmap thead th")).slice(1);
@@ -600,7 +648,7 @@ describe("class by day heatmap", () => {
   });
 
   it("Anomaly is its own last row even with no anomaly data; totals use the sum over days", async () => {
-    d.metrics = metrics({ by_class_per_day: [...row("Small", [5, 5, 5, 5, 5, 5, 5]), ...row("Big", [0, 0, 0, 0, 0, 0, 30])] });
+    d.metrics = metrics({ anomaly_per_day: [], by_class_per_day: [...row("Small", [5, 5, 5, 5, 5, 5, 5]), ...row("Big", [0, 0, 0, 0, 0, 0, 30])] });
     show();
     await screen.findByText("1,234");
     const t = document.querySelector("table.heatmap") as HTMLElement;
@@ -608,7 +656,7 @@ describe("class by day heatmap", () => {
   });
 
   it("(other) is shown as other classes", async () => {
-    d.metrics = metrics({ by_class_per_day: row("(other)", [0, 0, 0, 0, 0, 0, 3]) });
+    d.metrics = metrics({ anomaly_per_day: [], by_class_per_day: row("(other)", [0, 0, 0, 0, 0, 0, 3]) });
     show();
     await screen.findByText("1,234");
     const t = document.querySelector("table.heatmap") as HTMLElement;
@@ -616,7 +664,7 @@ describe("class by day heatmap", () => {
   });
 
   it("has 7 day columns, empty cells with sr-only 0, and heat levels 0 to 4", async () => {
-    d.metrics = metrics({ by_class_per_day: row("Hot", [0, 1, 25, 50, 75, 100, 0]) });
+    d.metrics = metrics({ anomaly_per_day: [], by_class_per_day: row("Hot", [0, 1, 25, 50, 75, 100, 0]) });
     show();
     await screen.findByText("1,234");
     const t = document.querySelector("table.heatmap") as HTMLElement;
@@ -643,7 +691,7 @@ describe("class by day heatmap", () => {
   });
 
   it("ties in the weekly total sort by name", async () => {
-    d.metrics = metrics({ by_class_per_day: [...row("Zed", [0, 0, 0, 0, 0, 0, 5]), ...row("Abe", [0, 0, 0, 0, 0, 0, 5])] });
+    d.metrics = metrics({ anomaly_per_day: [], by_class_per_day: [...row("Zed", [0, 0, 0, 0, 0, 0, 5]), ...row("Abe", [0, 0, 0, 0, 0, 0, 5])] });
     show();
     await screen.findByText("1,234");
     expect(names(document.querySelector("table.heatmap") as HTMLElement).slice(0, 2)).toEqual(["Abe", "Zed"]);
@@ -745,6 +793,22 @@ describe("sensor health card", () => {
     expect(cardOf("Sensor health").textContent).not.toContain("2 entries");
   });
 
+  it("allowlist shows a dash when neither total nor list is known (redacted, older sensor)", async () => {
+    d.sensors = { redacted: true, soc_allowlist: null, sensors: [st(1, "gw", {}, { allowlist: null })] };
+    show();
+    await sensorCard().findByText("gw");
+    const t = cardOf("Sensor health").textContent!;
+    expect(t).toContain("Allowlist—");
+    expect(t).not.toContain("0 entries");
+  });
+
+  it("redacted status keeps the total when the list is null", async () => {
+    d.sensors = { redacted: true, soc_allowlist: null, sensors: [st(1, "gw", {}, { allowlist: null, allowlist_total: 12 })] };
+    show();
+    await sensorCard().findByText("gw");
+    expect(cardOf("Sensor health").textContent).toContain("12 entries");
+  });
+
   it("allowlist_total of 1 says entry", async () => {
     d.sensors = sensorsStatus([st(1, "gw", {}, { allowlist: ["a"], allowlist_total: 1 })]);
     show();
@@ -809,6 +873,24 @@ describe("dry-run decisions", () => {
     expect(cellFor("2")).toContain("would block");
   });
 
+  it("a block on another sensor does not mark the alert blocked", async () => {
+    d.alerts = [alert({ id: 1, sensor_id: 1, src_ip: "10.0.0.1" }), alert({ id: 2, sensor_id: 2, src_ip: "10.0.0.1" })];
+    d.blocks = [block({ sensor_id: 2, ip: "10.0.0.1" })];
+    show();
+    await within(liveCard()).findByText("blocked · auto");
+    expect(cellFor("1")).toContain("observe");
+    expect(cellFor("2")).toContain("blocked · auto");
+  });
+
+  it("a block on another sensor falls through to would block", async () => {
+    d.alerts = [alert({ id: 1, sensor_id: 1, src_ip: "10.0.0.1" })];
+    d.blocks = [block({ sensor_id: 2, ip: "10.0.0.1" })];
+    d.would = [would("10.0.0.1")];
+    show();
+    await within(liveCard()).findByText("would block · dry-run");
+    expect(cellFor("1")).not.toContain("blocked ·");
+  });
+
   it("an expired block falls through to would block", async () => {
     d.alerts = [alert({ id: 1, src_ip: "10.0.0.1" })];
     d.blocks = [block({ ip: "10.0.0.1", blocked_at: iso(-120_000), expires_at: iso(-60_000) })];
@@ -842,5 +924,23 @@ describe("dry-run decisions", () => {
     show();
     await screen.findByText("1,234");
     expect(screen.queryByText(/dry-run decisions/)).toBeNull();
+  });
+});
+
+describe("untrusted reasons are one line, capped at 300", () => {
+  const evil = "first\nsecond‮third";
+  const long = "y".repeat(400);
+  it("firewall card block reason", async () => {
+    d.blocks = [block({ reason: evil }), block({ id: 2, ip: "9.9.9.9", reason: long })];
+    show();
+    expect(await screen.findByText("auto · first second third")).toBeInTheDocument();
+    const el = screen.getByText(/^auto · y+…$/);
+    expect([...el.textContent!.slice("auto · ".length)]).toHaveLength(300);
+  });
+  it("decisions card reason", async () => {
+    d.actions = [action({ reason: evil }), action({ id: 4, reason: long })];
+    show();
+    expect(await screen.findByText("“first second third”")).toBeInTheDocument();
+    expect(screen.getByText(/^“y+…”$/).textContent!.length).toBe(302);
   });
 });

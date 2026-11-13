@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
-import Response, { exactPercent, ttlText } from "../pages/Response";
+import Response, { exactPercent, linkReason, ttlText } from "../pages/Response";
 import { policy, report, sensorState, sensorsStatus } from "./sensor-fixtures";
 
 const h = vi.hoisted(() => ({ api: vi.fn(), reload: null as null | (() => void) }));
@@ -17,6 +17,8 @@ let sensorsBody: unknown;
 let postError: Error | null;
 let postGate: Promise<void> | null;
 let alertGate: Promise<void> | null;
+let alertById: Record<string, unknown>;
+let alertByIdGate: Promise<void> | null;
 let olderGate: Promise<void> | null;
 let olderFail: Error | null;
 
@@ -56,6 +58,8 @@ beforeEach(() => {
   postError = null;
   postGate = null;
   alertGate = null;
+  alertById = {};
+  alertByIdGate = null;
   olderGate = null;
   olderFail = null;
   h.api.mockReset();
@@ -69,6 +73,12 @@ beforeEach(() => {
     if (path === "/sensors/status") return sensorsBody;
     const page = (items: unknown[], next_cursor: string | null = null) => ({ items, total: items.length, next_cursor });
     if (path.startsWith("/blocks")) return page(data.blocks);
+    const byId = /^\/alerts\/(\d+)$/.exec(path);
+    if (byId) {
+      if (alertByIdGate) await alertByIdGate;
+      if (!(byId[1] in alertById)) throw new Error("not found");
+      return alertById[byId[1]];
+    }
     if (path.startsWith("/alerts?limit=1")) {
       if (alertGate) await alertGate;
       return page(data.alerts);
@@ -317,22 +327,22 @@ describe("notice", () => {
 
 describe("block form", () => {
   it("prefills ip, sensor and reason from the URL and skips /alerts", async () => {
-    show("/response?ip=1.2.3.4&sensor=4&reason=hello");
+    show("/response?ip=1.2.3.4&sensor=4&from=topology&count=12&hours=24");
     await screen.findByText("No active blocks.");
     expect(form().getByLabelText("IP address")).toHaveValue("1.2.3.4");
     expect(form().getByLabelText("Sensor #")).toHaveValue("4");
-    expect(form().getByLabelText("Reason")).toHaveValue("hello");
+    expect(form().getByLabelText("Reason")).toHaveValue("topology: 12 alerts in the last 24 h");
     expect(calls("GET", "/alerts").length).toBe(0);
   });
 
   it("navigating to another prefill link refills all three fields", async () => {
-    show("/response?ip=A&sensor=1&reason=r1", "/response?ip=B&sensor=2&reason=r2");
+    show("/response?ip=A&sensor=1&from=topology&count=1&hours=24", "/response?ip=B&sensor=2&from=topology&count=2&hours=24");
     expect(form().getByLabelText("IP address")).toHaveValue("A");
     await userEvent.type(form().getByLabelText("Reason"), "edited");
     await userEvent.click(screen.getByText("go-there"));
     await waitFor(() => expect(form().getByLabelText("IP address")).toHaveValue("B"));
     expect(form().getByLabelText("Sensor #")).toHaveValue("2");
-    expect(form().getByLabelText("Reason")).toHaveValue("r2");
+    expect(form().getByLabelText("Reason")).toHaveValue("topology: 2 alerts in the last 24 h");
   });
 
   describe("sensor from the newest alert", () => {
@@ -399,15 +409,15 @@ describe("block form", () => {
 
   it("cancelled confirm posts nothing", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(false);
-    show("/response?sensor=2&ip=1.2.3.4&reason=r");
+    show("/response?sensor=2&ip=1.2.3.4&from=topology&count=5&hours=24");
     await userEvent.click(form().getByRole("button", { name: "Request block" }));
     expect(window.confirm).toHaveBeenCalled();
     expect(posts().length).toBe(0);
   });
 
   it("on success clears ip and reason, clears the query string, keeps the notice", async () => {
-    show("/response?ip=1.2.3.4&sensor=2&reason=r");
-    expect(screen.getByTestId("loc").textContent).toBe("/response?ip=1.2.3.4&sensor=2&reason=r");
+    show("/response?ip=1.2.3.4&sensor=2&from=topology&count=5&hours=24");
+    expect(screen.getByTestId("loc").textContent).toBe("/response?ip=1.2.3.4&sensor=2&from=topology&count=5&hours=24");
     await userEvent.click(form().getByRole("button", { name: "Request block" }));
     await waitFor(() => expect(screen.getByTestId("loc").textContent).toBe("/response"));
     expect(screen.getByRole("status")).toHaveTextContent(/Block requested \(action #9/);
@@ -496,7 +506,7 @@ const openDone = async () => { await userEvent.click(await screen.findByRole("bu
 
 describe("form is remounted only by a new prefill", () => {
   it("keeps sensor and duration after success, clears ip/reason, no new /alerts call", async () => {
-    show("/response?ip=A&sensor=2&reason=r", "/response?ip=B&sensor=3&reason=r2");
+    show("/response?ip=A&sensor=2&from=topology&count=5&hours=24", "/response?ip=B&sensor=3&from=topology&count=2&hours=24");
     await userEvent.selectOptions(form().getByLabelText("For"), "1 h");
     await userEvent.click(form().getByRole("button", { name: "Request block" }));
     await waitFor(() => expect(screen.getByTestId("loc").textContent).toBe("/response"));
@@ -510,7 +520,7 @@ describe("form is remounted only by a new prefill", () => {
     await userEvent.click(screen.getByText("go-there"));
     await waitFor(() => expect(form().getByLabelText("IP address")).toHaveValue("B"));
     expect(form().getByLabelText("Sensor #")).toHaveValue("3");
-    expect(form().getByLabelText("Reason")).toHaveValue("r2");
+    expect(form().getByLabelText("Reason")).toHaveValue("topology: 2 alerts in the last 24 h");
   });
 });
 
@@ -603,7 +613,7 @@ describe("Load older", () => {
 describe("notice and block-form submit", () => {
   it("a confirmed, valid submit clears an old notice before the request", async () => {
     data.pending = { items: [action()] };
-    show("/response?ip=1.2.3.4&sensor=2&reason=r");
+    show("/response?ip=1.2.3.4&sensor=2&from=topology&count=5&hours=24");
     await userEvent.click(await screen.findByRole("button", { name: "Reject action #3" }));
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Action #3 rejected."));
     const g = gate();
@@ -622,7 +632,7 @@ describe("notice and block-form submit", () => {
 
   it("a cancelled confirm leaves the old notice alone", async () => {
     data.pending = { items: [action()] };
-    show("/response?ip=1.2.3.4&sensor=2&reason=r");
+    show("/response?ip=1.2.3.4&sensor=2&from=topology&count=5&hours=24");
     await userEvent.click(await screen.findByRole("button", { name: "Reject action #3" }));
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("rejected"));
     vi.spyOn(window, "confirm").mockReturnValue(false);
@@ -635,7 +645,7 @@ describe("per-field validation", () => {
   const submitForm = () => userEvent.click(form().getByRole("button", { name: "Request block" }));
 
   it("blank IP: aria-invalid, describedby, focus and message", async () => {
-    show("/response?sensor=2&reason=r");
+    show("/response?sensor=2&from=topology&count=5&hours=24");
     const ip = form().getByLabelText("IP address");
     expect(ip).not.toHaveAttribute("aria-invalid");
     await submitForm();
@@ -653,7 +663,7 @@ describe("per-field validation", () => {
 
   it("bad sensor keeps sensor-guess in aria-describedby", async () => {
     data.alerts = [{ id: 1, sensor_id: -1 }];
-    show("/response?ip=1.2.3.4&reason=r");
+    show("/response?ip=1.2.3.4&from=topology&count=5&hours=24");
     await waitFor(() => expect(form().getByLabelText("Sensor #")).toHaveValue("-1"));
     await submitForm();
     const s = form().getByLabelText("Sensor #");
@@ -832,5 +842,207 @@ describe("policy and allowlist cards", () => {
     h.api.mockImplementation(async (p: string, o?: unknown) => { if (p === "/sensors/status") throw new Error("sensors down"); return base(p, o); });
     show();
     await waitFor(() => expect(screen.getAllByText("sensors down")).toHaveLength(2));
+  });
+});
+
+describe("linkReason", () => {
+  const r = (q: string) => linkReason(new URLSearchParams(q));
+  it("topology link with counts gives the sentence", () => {
+    expect(r("from=topology&count=5&hours=24")).toBe("topology: 5 alerts in the last 24 h");
+    expect(r("from=topology&count=0&hours=1")).toBe("topology: 0 alerts in the last 1 h");
+    expect(r("from=topology&count=123456789&hours=168")).toBe("topology: 123456789 alerts in the last 168 h");
+  });
+  it.each([
+    [""], ["reason=anything"], ["from=other&count=5&hours=24"], ["count=5&hours=24"], ["from=topology"],
+    ["from=topology&count=5"], ["from=topology&hours=24"], ["from=topology&count=5&hours=0"],
+    ["from=topology&count=x&hours=24"], ["from=topology&count=5&hours=2x"], ["from=topology&count=-1&hours=24"],
+    ["from=topology&count=1.5&hours=24"], ["from=topology&count=1234567890&hours=24"], ["from=topology&count=5&hours=1234567890"],
+    ["from=topology&count=5&hours=24&reason=evil"], ["alert=7"],
+  ])("%j gives an empty reason (or ignores extras)", (q) => {
+    const out = r(q);
+    expect(out === "" || out === "topology: 5 alerts in the last 24 h").toBe(true);
+    if (q.includes("reason=")) expect(out).not.toContain("evil");
+  });
+  it("hours 0 is empty", () => { expect(r("from=topology&count=5&hours=0")).toBe(""); });
+});
+
+describe("block form prefill from a link", () => {
+  const reasonBox = () => form().getByLabelText("Reason");
+  const alertFetches = () => calls("GET", "/alerts/");
+  it("a topology link fills the reason", async () => {
+    show("/response?ip=1.2.3.4&sensor=2&from=topology&count=3&hours=6");
+    await screen.findByText("No active blocks.");
+    expect(reasonBox()).toHaveValue("topology: 3 alerts in the last 6 h");
+    expect(alertFetches().length).toBe(0);
+  });
+  it("?alert=N fetches the alert and fills the reason when src_ip matches", async () => {
+    alertById["42"] = { id: 42, src_ip: "1.2.3.4", dst_ip: "9.9.9.9", predicted_class: "PortScan" };
+    show("/response?ip=1.2.3.4&sensor=2&alert=42");
+    await waitFor(() => expect(reasonBox()).toHaveValue("alert #42: PortScan"));
+    expect(alertFetches().map(([p]) => p)).toEqual(["/alerts/42"]);
+    expect(screen.queryByText(/so the reason was left empty/)).toBeNull();
+  });
+  it("matches on dst_ip too", async () => {
+    alertById["42"] = { id: 42, src_ip: "9.9.9.9", dst_ip: "1.2.3.4", predicted_class: "DoS" };
+    show("/response?ip=1.2.3.4&sensor=2&alert=42");
+    await waitFor(() => expect(reasonBox()).toHaveValue("alert #42: DoS"));
+  });
+  it("an alert that does not involve the ip leaves the reason empty and says so", async () => {
+    alertById["42"] = { id: 42, src_ip: "5.5.5.5", dst_ip: "6.6.6.6", predicted_class: "PortScan" };
+    show("/response?ip=1.2.3.4&sensor=2&alert=42");
+    expect(await screen.findByText("Alert #42 doesn't involve 1.2.3.4, so the reason was left empty.")).toBeInTheDocument();
+    expect(reasonBox()).toHaveValue("");
+  });
+  it("a failed fetch leaves the reason empty and says so", async () => {
+    show("/response?ip=1.2.3.4&sensor=2&alert=404");
+    expect(await screen.findByText("Alert #404 couldn't be loaded, so the reason was left empty.")).toBeInTheDocument();
+    expect(reasonBox()).toHaveValue("");
+  });
+  it("does not overwrite a reason typed before the alert arrives", async () => {
+    alertById["42"] = { id: 42, src_ip: "1.2.3.4", dst_ip: "9.9.9.9", predicted_class: "PortScan" };
+    let release!: () => void;
+    alertByIdGate = new Promise<void>((r) => { release = r; });
+    show("/response?ip=1.2.3.4&sensor=2&alert=42");
+    await userEvent.type(reasonBox(), "my own reason");
+    release();
+    await waitFor(() => expect(calls("GET", "/alerts/").length).toBe(1));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(reasonBox()).toHaveValue("my own reason");
+  });
+  it("the alert note does not show without an alert param", async () => {
+    show("/response?ip=1.2.3.4&sensor=2");
+    await screen.findByText("No active blocks.");
+    expect(screen.queryByText(/so the reason was left empty/)).toBeNull();
+  });
+  it.each([["abc"], ["12abc"], ["0"], ["-3"], ["007"], [""], ["1.5"], ["12345678901234567890"]])("?alert=%j does not fetch and leaves the reason empty", async (v) => {
+    show(`/response?ip=1.2.3.4&sensor=2&alert=${v}`);
+    await screen.findByText("No active blocks.");
+    expect(reasonBox()).toHaveValue("");
+    expect(alertFetches().length).toBe(0);
+  });
+  it("without ?ip= an alert param does not fetch", async () => {
+    show("/response?sensor=2&alert=42");
+    await screen.findByText("No active blocks.");
+    expect(alertFetches().length).toBe(0);
+  });
+  it("no alert param leaves the reason empty", async () => {
+    show("/response?ip=1.2.3.4&sensor=2");
+    await screen.findByText("No active blocks.");
+    expect(reasonBox()).toHaveValue("");
+  });
+  it("?reason= is ignored entirely, also next to other params", async () => {
+    const { unmount } = show("/response?ip=1.2.3.4&sensor=2&reason=sneaky+text");
+    await screen.findByText("No active blocks.");
+    expect(reasonBox()).toHaveValue("");
+    unmount();
+    show("/response?ip=1.2.3.4&sensor=2&reason=x&from=topology&count=2&hours=3");
+    await screen.findByText("No active blocks.");
+    expect(reasonBox()).toHaveValue("topology: 2 alerts in the last 3 h");
+    expect(screen.queryByDisplayValue("x")).toBeNull();
+  });
+  it("shows the check-the-address hint only when ?ip= is present", async () => {
+    const { unmount } = show("/response?ip=1.2.3.4&sensor=2&alert=1");
+    await screen.findByText("No active blocks.");
+    expect(screen.getByRole("note")).toHaveTextContent("Filled in from a link. Check the address and the sensor before you request the block.");
+    unmount();
+    show("/response?sensor=2");
+    await screen.findByText("No active blocks.");
+    expect(screen.queryByText(/Filled in from a link/)).toBeNull();
+  });
+});
+
+describe("confirm dialogs flatten untrusted text", () => {
+  it("block request: IP and reason are one line", async () => {
+    show("/response?sensor=2");
+    await userEvent.type(form().getByLabelText("IP address"), "1.2.3.4");
+    await userEvent.type(form().getByLabelText("Reason"), "scan\t\tReason: fake\u202Eevil");
+    await userEvent.click(form().getByRole("button", { name: "Request block" }));
+    const msg = (window.confirm as unknown as { mock: { calls: string[][] } }).mock.calls[0][0];
+    expect(msg).toContain("Reason: scan Reason: fake evil");
+    expect(msg.split("\n").filter((l) => l.startsWith("Reason:")).length).toBe(1);
+    expect(msg).not.toContain("\u202E");
+  });
+  it("action confirm: reason with line breaks is one line", async () => {
+    data.pending = { items: [action({ reason: "line1\nline2\u2066x" })] };
+    show();
+    await userEvent.click(await screen.findByRole("button", { name: "Confirm action #3" }));
+    const msg = (window.confirm as unknown as { mock: { calls: string[][] } }).mock.calls[0][0];
+    expect(msg).toContain("Reason: line1 line2 x");
+    expect(msg).not.toContain("\u2066");
+  });
+});
+
+describe("redacted sensor status (analysts)", () => {
+  const redacted = (sensors: unknown[]) => ({ redacted: true, soc_allowlist: null, sensors });
+  const analystSensor = (id: number, name: string, o: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) =>
+    sensorState({ sensor_id: id, name, status: report({ policy: null, allowlist: null, allowlist_total: 3, ...o }), ...extra });
+  const card = (t: string) => within(screen.getByText(t, { selector: "h2" }).closest(".card") as HTMLElement);
+
+  it("policy card: only-admins text, and says a sensor is blocking", async () => {
+    sensorsBody = redacted([analystSensor(1, "gw")]);
+    show();
+    const c = card("Response policy");
+    expect(await c.findByText(/Only admins can see the sensors' auto-block thresholds\./)).toBeInTheDocument();
+    expect(c.getByText(/At least one online sensor is blocking\./)).toBeInTheDocument();
+    expect(c.queryByText(/flows/)).toBeNull();
+    expect(c.queryByText(/No sensor is online/)).toBeNull();
+  });
+  it("policy card: dry-run sentence when every online sensor is in dry-run", async () => {
+    sensorsBody = redacted([analystSensor(1, "gw", { dry_run: true })]);
+    show();
+    expect(await card("Response policy").findByText(/The online sensors are in dry-run: blocks are only logged\./)).toBeInTheDocument();
+  });
+  it("policy card: no mode sentence when no sensor is online", async () => {
+    sensorsBody = redacted([analystSensor(1, "gw", {}, { online: false })]);
+    show();
+    const c = card("Response policy");
+    const t = (await c.findByText(/Only admins can see/)).textContent!;
+    expect(t).not.toMatch(/blocking\.|dry-run/);
+  });
+  it("allowlist card: only-admins text, no lists", async () => {
+    sensorsBody = redacted([analystSensor(1, "gw")]);
+    show();
+    const c = card("Never blocked · allowlist");
+    expect(await c.findByText("Only admins can see the allowlists. Allowlisted addresses are still refused, by the SOC and again by the sensor.")).toBeInTheDocument();
+    expect(c.queryByText("empty")).toBeNull();
+    expect(c.queryByRole("heading", { level: 3 })).toBeNull();
+  });
+  it("a sensor with a null policy is skipped in the admin view", async () => {
+    sensorsBody = { redacted: false, soc_allowlist: [], sensors: [analystSensor(1, "nopol"), sensorState({ sensor_id: 2, name: "withpol", status: report() })] };
+    show();
+    const c = card("Response policy");
+    expect(await c.findByRole("heading", { name: "withpol" })).toBeInTheDocument();
+    expect(c.queryByRole("heading", { name: "nopol" })).toBeNull();
+    expect(c.getAllByText(/flows/)).toHaveLength(1);
+  });
+  it("allowlist card with a null sensor allowlist (admin view) says empty rather than crashing", async () => {
+    sensorsBody = { redacted: false, soc_allowlist: [], sensors: [analystSensor(1, "gw")] };
+    show();
+    const c = card("Never blocked · allowlist");
+    await waitFor(() => expect(c.getAllByText("empty").length).toBeGreaterThan(0));
+  });
+});
+
+describe("untrusted reasons in lists are one line, capped at 300", () => {
+  const evil = "first\nsecond\u202Ethird";
+  const long = "x".repeat(400);
+  it("blocks table", async () => {
+    data.blocks = [block({ reason: evil }), block({ id: 2, ip: "10.10.1.20", reason: long })];
+    show();
+    expect(await screen.findByText("first second third")).toBeInTheDocument();
+    const cell = screen.getByText(/^x+…$/);
+    expect([...cell.textContent!]).toHaveLength(300);
+  });
+  it("pending action list", async () => {
+    data.pending = { items: [action({ reason: evil }), action({ id: 4, reason: long })] };
+    show();
+    expect(await screen.findByText("“first second third”")).toBeInTheDocument();
+    expect(screen.getByText(/^“x+…”$/).textContent!.length).toBe(302);
+  });
+  it("history list (Done tab)", async () => {
+    data.done.executed = { items: [action({ id: 30, status: "executed", reason: evil })] };
+    show();
+    await userEvent.click(await screen.findByRole("button", { name: "Done" }));
+    expect(await screen.findByText("“first second third”")).toBeInTheDocument();
   });
 });

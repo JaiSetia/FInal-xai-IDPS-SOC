@@ -23,7 +23,6 @@ MAX_TOPOLOGY_EDGES = 1000
 # Bounded work per request, however many alerts arrive (e.g. during a flood):
 MAX_CLASSES = 25  # classes listed in by_class; the rest are summed as "(other)"
 CLASS_DAYS = 7  # by_class_per_day covers this many UTC days, today included
-ANOMALY_CLASS = "Anomaly"  # row of by_class_per_day: alerts the Isolation Forest also flagged
 LATENCY_SAMPLE = 20_000  # latency percentiles use the newest alerts only
 Hours = Annotated[int, Query(ge=1, le=MAX_HOURS)]
 
@@ -53,6 +52,11 @@ class ClassDay(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class AnomalyDay(BaseModel):
+    day: str  # YYYY-MM-DD, UTC
+    count: int
+
+
 class MetricsSummary(BaseModel):
     hours: int
     since: datetime
@@ -70,10 +74,13 @@ class MetricsSummary(BaseModel):
     would_blocks: int  # dry-run block decisions in the window (not blocks)
     # Last CLASS_DAYS UTC days whatever `hours` is; only non-zero (day, class) pairs.
     by_class_per_day: list[ClassDay]
+    # Same 7 days: alerts per day that the Isolation Forest also flagged as outliers (alerts of
+    # any class; non-zero days only). A separate series, so it can't collide with a class name.
+    anomaly_per_day: list[AnomalyDay]
 
 
 _cache_lock = threading.Lock()
-_class_day_cache: dict[tuple, tuple[float, tuple[ClassDay, ...]]] = {}
+_class_day_cache: dict[tuple, tuple[float, tuple[tuple[ClassDay, ...], tuple[AnomalyDay, ...]]]] = {}
 CLASS_DAY_CACHE_SECONDS = 60.0
 
 
@@ -90,8 +97,9 @@ def clear_class_per_day_cache() -> None:
         _class_day_cache.clear()
 
 
-def class_per_day(db: Session, now: datetime) -> list[ClassDay]:
-    """Alerts per UTC day and class for the last CLASS_DAYS days (oldest day first).
+def class_per_day(db: Session, now: datetime) -> tuple[list[ClassDay], list[AnomalyDay]]:
+    """Alerts per UTC day and class for the last CLASS_DAYS days (oldest day first), and the
+    per-day count of alerts flagged as outliers.
 
     One grouped query over the last 7 days of alerts (day, class, and the number of outliers);
     the work grows with the alerts of those 7 days (it is served by the index on
@@ -101,15 +109,16 @@ def class_per_day(db: Session, now: datetime) -> list[ClassDay]:
     buckets. New alerts show up in this view up to that long late.
 
     The busiest MAX_CLASSES classes over the whole period keep their name, the rest are
-    "(other)". "Anomaly" counts alerts whose anomaly_score is above 0, which is exactly what the
-    Isolation Forest calls an outlier (-decision_function > 0 <=> predict == -1); it overlaps with
-    the class rows (an alert has a class AND may be an outlier), so it is not additive."""
+    "(other)"; ingest refuses a class starting with "(" so nothing real collides with it. The
+    outlier series counts alerts whose anomaly_score is above 0, which is exactly what the
+    Isolation Forest calls an outlier (-decision_function > 0 <=> predict == -1); an alert has a
+    class AND may be an outlier, so it is a separate series, not extra class rows."""
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     key = (id(db.get_bind()), today.date().isoformat(), MAX_CLASSES)
     with _cache_lock:
         hit = _class_day_cache.get(key)
         if hit is not None and _monotonic() - hit[0] < CLASS_DAY_CACHE_SECONDS:
-            return list(hit[1])  # a copy: callers must not be able to change the cache
+            return list(hit[1][0]), list(hit[1][1])  # copies: the cache stays unchanged
     days = [today - timedelta(days=n) for n in range(CLASS_DAYS - 1, -1, -1)]
     # Portable "which day" without date functions (they depend on the database's time zone):
     # compare with the day starts, newest first.
@@ -129,6 +138,7 @@ def class_per_day(db: Session, now: datetime) -> list[ClassDay]:
         totals[str(name)] = totals.get(str(name), 0) + n
     keep = {name for name, _ in sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))[:MAX_CLASSES]}
     result: list[ClassDay] = []
+    outlier_days: list[AnomalyDay] = []
     for lo, counts, n_anomaly in zip(days, per_day, anomalies, strict=True):
         day = lo.strftime("%Y-%m-%d")
         merged: dict[str, int] = {}
@@ -138,12 +148,12 @@ def class_per_day(db: Session, now: datetime) -> list[ClassDay]:
         result += [ClassDay(day=day, **{"class": name}, count=n)
                    for name, n in sorted(merged.items(), key=lambda kv: (-kv[1], kv[0]))]
         if n_anomaly:
-            result.append(ClassDay(day=day, **{"class": ANOMALY_CLASS}, count=n_anomaly))
+            outlier_days.append(AnomalyDay(day=day, count=n_anomaly))
     with _cache_lock:
         if len(_class_day_cache) > 32:  # a few databases at most; never grow without bound
             _class_day_cache.clear()
-        _class_day_cache[key] = (_monotonic(), tuple(result))
-    return result
+        _class_day_cache[key] = (_monotonic(), (tuple(result), tuple(outlier_days)))
+    return list(result), list(outlier_days)
 
 
 @router.get("/metrics/summary", response_model=MetricsSummary)
@@ -184,6 +194,7 @@ def metrics_summary(user: AnyUser, db: Annotated[Session, Depends(get_db)], hour
     triaged = sum(n for s, n in by_status.items() if s != AlertStatus.NEW.value)
     fp = by_status.get(AlertStatus.FALSE_POSITIVE.value, 0)
     p50, p95 = (float(np.percentile(latencies, q)) for q in (50, 95)) if latencies else (None,) * 2
+    by_day, outliers = class_per_day(db, now)
     return MetricsSummary(
         hours=hours, since=since, bucket_seconds=step, alerts_total=sum(by_class.values()),
         alerts_per_bucket=series, by_class=by_class, by_severity=by_severity,
@@ -195,7 +206,7 @@ def metrics_summary(user: AnyUser, db: Annotated[Session, Depends(get_db)], hour
                                 .where(active_clause(now))) or 0,
         would_blocks=db.scalar(select(func.count()).select_from(WouldBlock)
                                .where(WouldBlock.at >= since)) or 0,
-        by_class_per_day=class_per_day(db, now))
+        by_class_per_day=by_day, anomaly_per_day=outliers)
 
 
 # --- topology ---------------------------------------------------------------------------

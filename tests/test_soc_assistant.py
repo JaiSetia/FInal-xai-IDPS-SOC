@@ -385,3 +385,37 @@ def test_get_playbook_accepts_aliases(soc_app):
         for asked, file in [("port scan", "portscan.md"), ("PortScan", "portscan.md"),
                             ("web attacks", "web-attack.md"), ("Web Attack", "web-attack.md")]:
             assert heading(file) in playbook(asked), asked
+
+
+def test_propose_block_reason_is_cleaned_and_nul_is_refused(client, soc_app, sensor_headers,
+                                                            analyst_headers, fake):
+    alert_id = ingest(client, sensor_headers, alert_payload(src_ip="203.0.113.50"))[0]
+    fake(tool("propose_block", {"ip": "203.0.113.50", "reason": "scan\u202e\n\x1b[31m ok\u200b",
+                                "alert_id": alert_id}), text("Proposed."))
+    events = chat(client, analyst_headers, "Block that attacker")
+    (proposed,) = [e for e in events if e["type"] == "action_proposed"]
+    with soc_app.state.session_factory() as db:
+        assert db.get(Action, proposed["action_id"]).reason == (
+            "[assistant, model-written] scan[31m ok")
+
+
+def test_propose_block_with_a_nul_in_the_reason_is_refused(client, soc_app, sensor_headers,
+                                                           analyst_headers, fake):
+    alert_id = ingest(client, sensor_headers, alert_payload(src_ip="203.0.113.50"))[0]
+    fake(tool("propose_block", {"ip": "203.0.113.50", "reason": "a\x00b", "alert_id": alert_id}),
+         text("Could not."))
+    events = chat(client, analyst_headers, "Block that attacker")
+    assert [e["ok"] for e in events if e["type"] == "tool_result"] == [False]
+    assert not [e for e in events if e["type"] == "action_proposed"]
+    with soc_app.state.session_factory() as db:
+        assert db.query(Action).count() == 0
+
+
+def test_the_assistant_is_told_nothing_about_the_allowlist_network(client, sensor_headers,
+                                                                   analyst_headers, fake):
+    alert_id = ingest(client, sensor_headers, alert_payload(src_ip="10.10.1.1"))[0]
+    llm = fake(tool("propose_block", {"ip": "10.10.1.1", "reason": "x", "alert_id": alert_id}),
+               text("That address can't be blocked."))
+    chat(client, analyst_headers, "block the gateway")
+    results = json.dumps(llm.calls[-1]["messages"][-1]["content"])
+    assert "10.10.1.1/32" not in results and "on the block allowlist" in results

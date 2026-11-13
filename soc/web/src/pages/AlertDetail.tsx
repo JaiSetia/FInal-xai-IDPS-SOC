@@ -118,7 +118,8 @@ function AlertPage({ id }: { id: string }) {
   const related = relatedBlocks(alert, allBlocks);
   const blocked = activeBlock(alert, allBlocks, now);
   const delay = delayText(alert.end_ms, alert.received_at);
-  const blockLink = `/response${query({ ip: alert.src_ip, sensor: alert.sensor_id, reason: `alert #${alert.id}: ${alert.predicted_class}` })}`;
+  // The form writes the reason itself from the alert number: a link never carries free text.
+  const blockLink = `/response${query({ ip: alert.src_ip, sensor: alert.sensor_id, alert: alert.id })}`;
 
   async function setStatus(status: AlertStatus) {
     if (status === alert!.status) return;
@@ -281,6 +282,7 @@ function TrustCard({ sensorId, method }: { sensorId: number; method: string | nu
   const { data, error } = useSensors();
   const sensor = data?.sensors.find((s) => s.sensor_id === sensorId);
   const f = sensor?.status?.faithfulness ?? null;
+  const stale = sensor && f ? (sensor.revoked ? "revoked" : !sensor.online ? "offline" : null) : null;
   const methods = f ? (["shap", "lime"] as const).filter((m) => f.methods[m]) : [];
   const weakMatch = f?.model_check === "name";
   return (
@@ -329,6 +331,7 @@ function TrustCard({ sensorId, method }: { sensorId: number; method: string | nu
           </ul>
           <p className="muted small-text" style={{ marginBottom: 0 }}>
             Measured offline for model <b>{f.model}</b>. It describes this model's explanations in general, not this one alert.
+            {stale && ` This is the sensor's last report: it is ${stale} now, so it may run a different model.`}
             {!f.model_matches && " The sensor runs a different model than the one tested, so these numbers may not apply."}
             {f.model_matches && weakMatch && " The report only names the algorithm, so a retrained model of the same kind would also match."}
           </p>

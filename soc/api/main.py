@@ -1,7 +1,7 @@
 """SOC API application.
 
 Run (after setting IDPS_SOC_JWT_SECRET and creating an admin with `python -m soc.api create-user`):
-    uvicorn soc.api.main:app --reload
+    uvicorn soc.api.main:app --ws-max-size 65536 --reload
 
 Run a single process (no --workers): the live alert feed is an in-process broadcaster.
 See docs/soc.md for settings, endpoints and the auth model.
@@ -16,6 +16,7 @@ from soc.api import auth
 from soc.api.broadcast import AlertBroadcaster
 from soc.api.db import init_db, make_engine, make_session_factory
 from soc.api.geo import GeoLocator
+from soc.api.limits import BodyLimitMiddleware
 from soc.api.routes import (
     actions,
     admin,
@@ -28,6 +29,7 @@ from soc.api.routes import (
     metrics,
     sensors,
 )
+from soc.api.routes.sensors import SensorAuditState
 from soc.api.security import LoginThrottle
 from soc.api.settings import SocSettings, get_settings
 
@@ -50,11 +52,14 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
     app.state.assistant_llm = make_llm(settings.assistant_model, settings.assistant_effort)
     app.state.assistant_limiter = None
     app.state.assistant_slots = None
+    app.state.sensor_audit = SensorAuditState()  # throttles sensor-status audit rows
     app.state.broadcaster = AlertBroadcaster(settings.ws_max_connections, settings.ws_queue_size)
     app.state.login_throttle = LoginThrottle(
         settings.login_max_failures, settings.login_max_failures_per_ip,
         settings.login_lockout_minutes * 60)
 
+    # Added before CORS so the CORS headers are on its 413s too (the last one added is outermost).
+    app.add_middleware(BodyLimitMiddleware)
     app.add_middleware(
         CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
         allow_methods=["GET", "POST", "PATCH", "DELETE"],

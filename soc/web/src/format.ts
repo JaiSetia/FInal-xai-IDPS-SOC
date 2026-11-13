@@ -27,3 +27,13 @@ export function num(x: number | null | undefined, digits = 3): string {
 export function label(s: string): string {
   return s.replace(/_/g, " ");
 }
+
+/** Untrusted text shown on one line (confirm dialogs, reasons in lists): whitespace, control,
+ *  format (bidi, zero-width), private-use and line/paragraph separator characters collapse to one
+ *  space, the same classes the server strips. Capped at `max` characters (code points, so an emoji
+ *  is never cut in half). */
+export function oneLine(text: string, max = 200): string {
+  const flat = text.replace(/[\s\p{Cc}\p{Cf}\p{Co}\p{Zl}\p{Zp}]+/gu, " ").trim();
+  const chars = [...flat];
+  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : flat;
+}

@@ -10,7 +10,7 @@ React + Vite + TypeScript dashboard for the SOC API (see ../../docs/soc.md for t
    export IDPS_SOC_JWT_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
    export IDPS_SOC_DATABASE_URL=sqlite:///./dev-soc.db
    python scripts/dev_seed.py --i-understand-this-adds-demo-logins   # optional demo data
-   uvicorn soc.api.main:app --port 8000
+   uvicorn soc.api.main:app --port 8000 --ws-max-size 65536
    ```
 
 2. Start the dashboard (from this folder):
@@ -47,4 +47,6 @@ npm run build       # production bundle in dist/
   WebSocket's first message.
 - API data is always rendered as text; the dashboard never uses `dangerouslySetInnerHTML`.
 - In production, serve `dist/` from the same origin as the API behind HTTPS, with a
-  Content-Security-Policy such as `default-src 'self'; connect-src 'self' wss:`.
+  Content-Security-Policy such as `default-src 'self'; connect-src 'self' wss:; frame-ancestors 'none'`,
+  plus `X-Frame-Options: DENY` (the SOC's Caddyfile in `infra/templates/soc-user-data.sh.tftpl` sets
+  both on API responses and caps request bodies with `request_body { max_size 11MiB }`).

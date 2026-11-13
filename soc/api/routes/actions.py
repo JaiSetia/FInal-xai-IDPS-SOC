@@ -24,11 +24,13 @@ from soc.api.common import (
     Page,
     audit,
     check_blockable,
+    clean_reason,
     get_or_404,
+    no_nul,
     paginate,
 )
 from soc.api.db import get_db
-from soc.api.models import Action, ActionKind, ActionStatus, SensorToken, User
+from soc.api.models import Action, ActionKind, ActionStatus, Role, SensorToken, User
 from soc.api.settings import SocSettings
 
 router = APIRouter(tags=["actions"])
@@ -46,6 +48,11 @@ class ActionIn(BaseModel):
     sensor_id: int = Field(ge=1, le=2**62)
     reason: str = Field(min_length=1, max_length=500)
     ttl_seconds: int | None = Field(default=None, ge=1, le=MAX_TTL_SECONDS)
+
+    @field_validator("reason")
+    @classmethod
+    def _plain_reason(cls, value: str) -> str:
+        return clean_reason(value)
 
     @model_validator(mode="after")
     def _ttl_only_for_block(self) -> Self:
@@ -87,12 +94,14 @@ class ActionResult(BaseModel):
             raise ValueError("result must be plain JSON") from exc
         if size > MAX_RESULT_BYTES:
             raise ValueError(f"result is {size} bytes; the limit is {MAX_RESULT_BYTES}")
-        return value
+        return no_nul(value)
 
 
-def _check_params(kind: ActionKind, params: dict, settings: SocSettings) -> None:
+def _check_params(kind: ActionKind, params: dict, settings: SocSettings,
+                  user: User | None = None) -> None:
     if kind == ActionKind.BLOCK_IP:
-        check_blockable(params["ip"], settings)
+        # Only an admin is told which allowlist network matched.
+        check_blockable(params["ip"], settings, reveal=user is not None and user.role == Role.ADMIN)
 
 
 def create_action(db: Session, settings: SocSettings, *, kind: ActionKind, params: dict,
@@ -108,7 +117,7 @@ def create_action(db: Session, settings: SocSettings, *, kind: ActionKind, param
     sensor = db.get(SensorToken, sensor_id)
     if sensor is None or sensor.revoked:
         raise HTTPException(422, "unknown or revoked sensor_id")
-    _check_params(kind, params, settings)
+    _check_params(kind, params, settings, user)
     now = datetime.now(UTC)
     action = Action(
         kind=kind, params=params, reason=reason, proposed_by=proposed_by,
@@ -159,7 +168,7 @@ def _decide(action_id: int, user: User, db: Session, new: ActionStatus,
     if action.status != ActionStatus.PENDING:
         raise HTTPException(409, f"action is {action.status.value}, not pending")
     if new == ActionStatus.CONFIRMED:
-        _check_params(action.kind, action.params, settings)  # the allowlist may have changed
+        _check_params(action.kind, action.params, settings, user)  # the allowlist may have changed
     # Conditional update: of two simultaneous decisions (confirm vs reject), exactly one wins.
     changed = db.execute(
         update(Action).where(Action.id == action_id, Action.status == ActionStatus.PENDING)

@@ -5,7 +5,7 @@ import type { Action, ActionStatus, Alert, Block, Page } from "../api/types";
 import {
   Card, Countdown, ErrorText, PageHead, Pill, Segmented, useAction, useLoad, useNow, type Tone,
 } from "../components/common";
-import { dateTime, label } from "../format";
+import { dateTime, label, oneLine } from "../format";
 import { reporting, useSensors } from "../sensors";
 import { useLiveRefresh } from "../useLiveRefresh";
 
@@ -85,6 +85,16 @@ export function exactPercent(x: number): string {
 function PolicyCard() {
   const { data, error } = useSensors();
   const live = reporting(data);
+  if (data?.redacted) {
+    return (
+      <Card title="Response policy">
+        <p className="muted" style={{ margin: 0 }}>
+          Only admins can see the sensors' auto-block thresholds. {live.length > 0 && (live.some((s) => !s.status.dry_run)
+            ? "At least one online sensor is blocking." : "The online sensors are in dry-run: blocks are only logged.")}
+        </p>
+      </Card>
+    );
+  }
   return (
     <Card title="Response policy">
       <ErrorText error={error} />
@@ -93,6 +103,7 @@ function PolicyCard() {
       )}
       {live.map(({ sensor_id, name, status: st }) => {
         const p = st.policy;
+        if (!p) return null;
         return (
           <div key={sensor_id} style={{ marginBottom: 12 }}>
             {live.length > 1 && <h3>{name}</h3>}
@@ -121,7 +132,16 @@ function PolicyCard() {
 function AllowlistCard() {
   const { data, error } = useSensors();
   const live = reporting(data);
-  const list = (items: string[]) => items.length === 0
+  if (data?.redacted) {
+    return (
+      <Card title="Never blocked · allowlist">
+        <p className="muted" style={{ margin: 0 }}>
+          Only admins can see the allowlists. Allowlisted addresses are still refused, by the SOC and again by the sensor.
+        </p>
+      </Card>
+    );
+  }
+  const list = (items: string[] | null) => !items || items.length === 0
     ? <p className="muted small-text" style={{ margin: 0 }}>empty</p>
     : <ul className="detail-pairs mono">{items.map((n, i) => <li key={`${i}-${n}`}>{n}</li>)}</ul>;
   return (
@@ -135,7 +155,7 @@ function AllowlistCard() {
             <div key={sensor_id} style={{ marginTop: 12 }}>
               <h3>Sensor {name} <span className="muted small-text">(IDPS_ALLOWLIST)</span></h3>
               {list(st.allowlist)}
-              {st.allowlist_total !== undefined && st.allowlist_total > st.allowlist.length && (
+              {st.allowlist && st.allowlist_total !== undefined && st.allowlist_total > st.allowlist.length && (
                 <p className="muted small-text" style={{ margin: "6px 0 0" }}>
                   and {st.allowlist_total - st.allowlist.length} more not shown (the sensor reports the first {st.allowlist.length}).
                 </p>
@@ -239,7 +259,7 @@ export default function Response() {
   }
 
   async function decide(a: Action, decision: "confirm" | "reject") {
-    if (decision === "confirm" && !window.confirm(`Confirm: ${actionSummary(a)}?\n\nReason: ${a.reason}`)) return;
+    if (decision === "confirm" && !window.confirm(`Confirm: ${oneLine(actionSummary(a))}?\n\nReason: ${oneLine(a.reason)}`)) return;
     setNotice(null);
     const res = await act.run(() => api<Action>(`/actions/${a.id}/${decision}`, { method: "POST" }));
     if (res) {
@@ -300,7 +320,7 @@ export default function Response() {
                           </div>
                         </td>
                         <td><Pill tone={b.source === "analyst" ? "accent" : "neutral"}>{b.source}</Pill></td>
-                        <td>{b.reason}</td>
+                        <td>{oneLine(b.reason, 300)}</td>
                         <td>{dateTime(b.blocked_at)}</td>
                         <td>
                           {b.active
@@ -343,7 +363,7 @@ export default function Response() {
                         {" · waiting for an analyst"}
                       </span>
                       <span style={{ fontSize: 15, fontWeight: 600 }}>#{a.id} {actionSummary(a)}</span>
-                      <span className="muted wrap-anywhere">“{a.reason}”</span>
+                      <span className="muted wrap-anywhere">“{oneLine(a.reason, 300)}”</span>
                     </div>
                     <div className="row-actions">
                       <button className="primary" disabled={act.busy} onClick={() => decide(a, "confirm")}
@@ -379,7 +399,7 @@ export default function Response() {
                         <span className="wrap-anywhere" style={{ minWidth: 0 }}>
                           #{a.id} {actionSummary(a)} · by {who(a)}
                           <span className="muted small-text"> · {dateTime(a.created_at)}</span>
-                          <span className="muted small-text" style={{ display: "block" }}>“{a.reason}”</span>
+                          <span className="muted small-text" style={{ display: "block" }}>“{oneLine(a.reason, 300)}”</span>
                           {result && <span className="small-text" style={{ display: "block" }}>Sensor: {result}</span>}
                         </span>
                         <Pill tone={STATUS_TONE[a.status] ?? "neutral"}>
@@ -416,7 +436,12 @@ export default function Response() {
               links never mix; clearing the prefill after a block keeps the form as it is. */}
           <BlockForm key={formKey}
             initial={{
-              ip: params.get("ip") ?? "", sensor: params.get("sensor") ?? "", reason: params.get("reason") ?? "",
+              ip: params.get("ip") ?? "", sensor: params.get("sensor") ?? "",
+              // A link never carries free text for the audit log: only an alert number (checked
+              // against the address before it's used) or the topology panel's two numbers.
+              reason: linkReason(params),
+              linkAlert: /^[1-9]\d{0,17}$/.test(params.get("alert") ?? "") ? Number(params.get("alert")) : undefined,
+              fromLink: !!params.get("ip"),
               // A link that only guessed the sensor (from the address's newest alert) says so.
               sensorGuessed: params.get("sensor_guess") === "1" && !!params.get("sensor"),
             }}
@@ -435,8 +460,20 @@ export default function Response() {
 
 type Field = "ip" | "sensor" | "reason";
 
+/** The reason a link may pre-fill: only the topology panel's numbers (an alert number is checked
+ *  against the address first, in the form). Anything else in the address is ignored. */
+export function linkReason(params: URLSearchParams): string {
+  const num = (k: string) => (/^\d{1,9}$/.test(params.get(k) ?? "") ? Number(params.get(k)) : null);
+  if (params.get("from") === "topology") {
+    const count = num("count");
+    const hours = num("hours");
+    if (count !== null && hours !== null && hours > 0) return `topology: ${count} alerts in the last ${hours} h`;
+  }
+  return "";
+}
+
 function BlockForm({ initial, onStart, onDone }: {
-  initial: { ip: string; sensor: string; reason: string; sensorGuessed?: boolean };
+  initial: { ip: string; sensor: string; reason: string; sensorGuessed?: boolean; fromLink?: boolean; linkAlert?: number };
   onStart: () => void;
   onDone: (a: Action) => void;
 }) {
@@ -457,6 +494,25 @@ function BlockForm({ initial, onStart, onDone }: {
     const input = inputs.ip.current;
     input?.scrollIntoView?.({ block: "center" });
     input?.focus({ preventScroll: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // A link's alert number becomes the reason only if that alert really involves the address, so a
+  // crafted link can't cite an unrelated alert in the audit log.
+  const [alertNote, setAlertNote] = useState<string | null>(null);
+  useEffect(() => {
+    const id = initial.linkAlert;
+    if (!id || !initial.ip) return;
+    let cancelled = false;
+    api<Alert>(`/alerts/${id}`)
+      .then((a) => {
+        if (cancelled) return;
+        const ipNow = initial.ip.trim();
+        if (a.src_ip === ipNow || a.dst_ip === ipNow) setReason((r) => r || `alert #${id}: ${a.predicted_class}`);
+        else setAlertNote(`Alert #${id} doesn't involve ${ipNow}, so the reason was left empty.`);
+      })
+      .catch(() => { if (!cancelled) setAlertNote(`Alert #${id} couldn't be loaded, so the reason was left empty.`); });
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -493,7 +549,7 @@ function BlockForm({ initial, onStart, onDone }: {
     setInvalid(null);
     const sensorId = Number(sensor.trim());
     const duration = DURATIONS.find((d) => d.seconds === ttl)?.text ?? `${ttl} s`;
-    if (!window.confirm(`Ask sensor #${sensorId} to block ${cleanIp} for ${duration}?\n\nReason: ${cleanReason}`)) return;
+    if (!window.confirm(`Ask sensor #${sensorId} to block ${oneLine(cleanIp, 60)} for ${duration}?\n\nReason: ${oneLine(cleanReason)}`)) return;
     onStart();
     const a = await act.run(() => api<Action>("/actions", {
       method: "POST",
@@ -515,6 +571,11 @@ function BlockForm({ initial, onStart, onDone }: {
   return (
     <section id="new-block" className="card" aria-labelledby="new-block-title">
       <h2 id="new-block-title">Block an IP</h2>
+      {initial.fromLink && (
+        <p className="hint" role="note" style={{ marginTop: 0 }}>
+          Filled in from a link. Check the address and the sensor before you request the block.
+        </p>
+      )}
       <form className="stack" style={{ gap: 12 }} onSubmit={submit} noValidate>
         <label className="field">IP address
           <input id="block-ip" ref={inputs.ip} {...fieldProps("ip")} value={ip} onChange={(e) => setIp(e.target.value)} placeholder="e.g. 10.10.1.10"
@@ -540,6 +601,7 @@ function BlockForm({ initial, onStart, onDone }: {
           <input ref={inputs.reason} {...fieldProps("reason")} value={reason} onChange={(e) => setReason(e.target.value)} required maxLength={500}
             placeholder="Why (kept in the audit log)" />
         </label>
+        {alertNote && <p className="muted small-text" style={{ margin: "-4px 0 0" }}>{alertNote}</p>}
         {invalid && <div id="block-error" className="error" role="alert">{invalid.message}</div>}
         <ErrorText error={act.error} />
         <button className="danger" type="submit" disabled={act.busy}>{act.busy ? "Requesting…" : "Request block"}</button>

@@ -288,7 +288,8 @@ export const AUDIT_GROUPS: Record<Exclude<AuditGroup, "all">, string[]> = {
   blocks: ["ingest_blocks"],
   alerts: ["ingest_alerts", "alert_status"],
   cases: ["case_create", "case_update", "case_delete", "case_note", "case_attach", "case_detach"],
-  users: ["user_create", "user_role", "user_disable", "user_enable", "user_reset_password", "sensor_create", "sensor_revoke"],
+  users: ["user_create", "user_role", "user_disable", "user_enable", "user_reset_password", "sensor_create", "sensor_revoke",
+    "sensor_status_first", "sensor_status_changed"],
 };
 
 /** Which group an audit action belongs to. */

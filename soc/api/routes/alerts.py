@@ -18,7 +18,9 @@ from soc.api.common import (
     audit,
     derive_severity,
     get_or_404,
+    no_nul,
     paginate,
+    plain_text,
 )
 from soc.api.db import get_db
 from soc.api.models import Alert, AlertStatus, Severity
@@ -70,9 +72,11 @@ class AlertIn(BaseModel):
     @field_validator("predicted_class")
     @classmethod
     def _strip(cls, value: str) -> str:
-        value = value.strip()
+        value = plain_text(value.strip())
         if not value:
             raise ValueError("predicted_class must not be blank")
+        if value.startswith("("):  # "(other)" is the dashboard's fold bucket: no real class collides
+            raise ValueError("predicted_class must not start with '('")
         return value
 
     @field_validator("explanation", mode="before")
@@ -86,7 +90,7 @@ class AlertIn(BaseModel):
             raise ValueError("explanation must be plain JSON") from exc
         if size > MAX_EXPLANATION_BYTES:
             raise ValueError(f"explanation is {size} bytes; the limit is {MAX_EXPLANATION_BYTES}")
-        return value
+        return no_nul(value)
 
     @model_validator(mode="after")
     def _start_before_end(self) -> Self:

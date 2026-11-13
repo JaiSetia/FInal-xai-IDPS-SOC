@@ -7,7 +7,7 @@ import {
 import {
   Card, ConfidenceBar, Countdown, ErrorText, PageHead, Pill, SeverityBadge, StatusText, useLoad, useNow,
 } from "../components/common";
-import { endpoint, percent } from "../format";
+import { endpoint, oneLine, percent } from "../format";
 import { reporting, useSensors } from "../sensors";
 import { useLiveRefresh } from "../useLiveRefresh";
 import { actionSummary, who } from "./Response";
@@ -126,11 +126,13 @@ function LiveAlerts({ blocks, wouldBlocks }: { blocks: Block[]; wouldBlocks: Wou
     timers.current.add(t);
   }, [severity, setData]));
 
-  // An address's newest unexpired active block decides its Response column.
+  // The newest unexpired active block on the alert's own sensor decides its Response column
+  // (a block on another sensor doesn't stop this traffic).
   const blockedBy = useMemo(() => {
     const m = new Map<string, Block["source"]>();
     for (const b of blocks) {
-      if (b.active && (!b.expires_at || Date.parse(b.expires_at) > now) && !m.has(b.ip)) m.set(b.ip, b.source);
+      const key = `${b.sensor_id}|${b.ip}`;
+      if (b.active && (!b.expires_at || Date.parse(b.expires_at) > now) && !m.has(key)) m.set(key, b.source);
     }
     return m;
   }, [blocks, now]);
@@ -182,7 +184,7 @@ function LiveAlerts({ blocks, wouldBlocks }: { blocks: Block[]; wouldBlocks: Wou
           </thead>
           <tbody>
             {rows.map((a) => {
-              const src = blockedBy.get(a.src_ip);
+              const src = blockedBy.get(`${a.sensor_id}|${a.src_ip}`);
               return (
                 <tr key={a.id} className={`clickable${fresh.has(a.id) ? " fresh" : ""}`} onClick={() => navigate(`/alerts/${a.id}`)}>
                   <td>
@@ -225,7 +227,7 @@ function Firewall({ blocks, more, error }: { blocks: Block[] | null; more: boole
               <Link to={`/alerts${query({ ip: b.ip })}`} className="mono"><b>{b.ip}</b></Link>
               <Countdown start={b.blocked_at} end={b.expires_at} />
             </div>
-            <span className="muted small-text">{b.source} · {b.reason || "no reason given"}</span>
+            <span className="muted small-text">{b.source} · {b.reason ? oneLine(b.reason, 300) : "no reason given"}</span>
           </li>
         ))}
         {blocks && active.length === 0 && <li className="muted">No address is blocked right now.</li>}
@@ -253,7 +255,7 @@ function Decisions() {
           <li key={a.id}>
             <span className="eyebrow">Proposed by {who(a)}</span>
             <b>{actionSummary(a)}</b>
-            {a.reason && <span className="muted">“{a.reason}”</span>}
+            {a.reason && <span className="muted">“{oneLine(a.reason, 300)}”</span>}
           </li>
         ))}
         {pending.data && items.length === 0 && <li className="muted">Nothing waits for a decision.</li>}
@@ -288,7 +290,10 @@ function SensorHealth() {
           <dt>Heartbeat</dt><dd>{!st.heartbeat.enabled ? "off" : st.heartbeat.ok ? "1 / s · ok" : "failing"}</dd>
           <dt>Outbox</dt><dd>{st.outbox_pending.toLocaleString()} pending</dd>
           <dt>SHAP p95</dt><dd>{st.shap_p95_ms == null ? "—" : `${st.shap_p95_ms.toFixed(2)} ms`}</dd>
-          <dt>Allowlist</dt><dd>{st.allowlist_total ?? st.allowlist.length} {(st.allowlist_total ?? st.allowlist.length) === 1 ? "entry" : "entries"}</dd>
+          <dt>Allowlist</dt><dd>{(() => {
+            const n = st.allowlist_total ?? st.allowlist?.length;
+            return n === undefined ? "—" : `${n} ${n === 1 ? "entry" : "entries"}`;
+          })()}</dd>
           <dt>Last seen</dt><dd>{last_seen_at ? ago(last_seen_at, now) : "—"}</dd>
         </dl>
       ))}
@@ -343,14 +348,20 @@ export function lastSevenDays(now: number): string[] {
 
 /** Attack classes by day (wireframe heatmap). "Anomaly" (Isolation Forest outliers) is its own
  *  row: those alerts also have a class, so it isn't part of the class totals. */
-function Heatmap({ rows }: { rows: NonNullable<MetricsSummary["by_class_per_day"]> }) {
+function Heatmap({ rows, anomaly }: {
+  rows: NonNullable<MetricsSummary["by_class_per_day"]>; anomaly: MetricsSummary["anomaly_per_day"];
+}) {
   const days = lastSevenDays(Date.now());
   const counts = new Map<string, number>();
   const totals = new Map<string, number>();
   for (const r of rows) {
     counts.set(`${r.class}|${r.day}`, r.count);
-    if (r.class !== ANOMALY) totals.set(r.class, (totals.get(r.class) ?? 0) + r.count);
+    totals.set(r.class, (totals.get(r.class) ?? 0) + r.count);
   }
+  // Outliers come in their own field, so a class that happens to be called "Anomaly" can't mix
+  // with them: their row has its own key.
+  const ANOMALY_KEY = "\u0000anomaly";
+  for (const a of anomaly ?? []) counts.set(`${ANOMALY_KEY}|${a.day}`, a.count);
   const ranked = [...totals.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([c]) => c);
   const classes = ranked.filter((c) => c !== OTHER).slice(0, HEAT_CLASSES);
   // Everything past the top rows (and the API's own "(other)") is summed into one row.
@@ -361,7 +372,7 @@ function Heatmap({ rows }: { rows: NonNullable<MetricsSummary["by_class_per_day"
       counts.set(`${OTHER}|${d}`, n);
     }
   }
-  const names = [...classes, ...(rest.length > 0 ? [OTHER] : []), ANOMALY];
+  const names = [...classes, ...(rest.length > 0 ? [OTHER] : []), ...(anomaly ? [ANOMALY_KEY] : [])];
   const max = Math.max(1, ...names.flatMap((c) => days.map((d) => counts.get(`${c}|${d}`) ?? 0)));
   const level = (n: number) => (n === 0 ? 0 : Math.min(4, 1 + Math.floor((n / max) * 3.999)));
   const weekday = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString([], { weekday: "short", timeZone: "UTC" });
@@ -375,11 +386,12 @@ function Heatmap({ rows }: { rows: NonNullable<MetricsSummary["by_class_per_day"
         </thead>
         <tbody>
           {names.map((c) => (
-            <tr key={c} className={c === ANOMALY ? "anomaly" : undefined}>
-              <th scope="row">{c === OTHER ? "other classes" : c}</th>
+            <tr key={c} className={c === ANOMALY_KEY ? "anomaly" : undefined}>
+              <th scope="row">{c === OTHER ? "other classes" : c === ANOMALY_KEY ? ANOMALY : c}</th>
               {days.map((d) => {
                 const n = counts.get(`${c}|${d}`) ?? 0;
-                return <td key={d} className={`heat-${level(n)}`} title={`${c}, ${d}: ${n}`}>{n || ""}<span className="sr-only">{n ? "" : "0"}</span></td>;
+                const name = c === ANOMALY_KEY ? ANOMALY : c === OTHER ? "other classes" : c;
+                return <td key={d} className={`heat-${level(n)}`} title={`${name}, ${d}: ${n}`}>{n || ""}<span className="sr-only">{n ? "" : "0"}</span></td>;
               })}
             </tr>
           ))}
@@ -413,7 +425,7 @@ function Classes({ m }: { m: MetricsSummary }) {
       {m.by_class_per_day && (
         <>
           <h3 style={{ marginTop: 14 }}>By day, last 7 days (UTC)</h3>
-          <Heatmap rows={m.by_class_per_day} />
+          <Heatmap rows={m.by_class_per_day} anomaly={m.anomaly_per_day} />
           <p className="muted small-text">
             “Anomaly”: alerts the Isolation Forest also flags as unusual; they count under their class too.
             Flows the classifier calls benign aren't sent to the SOC, so unusual benign-looking traffic isn't in this row.

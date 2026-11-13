@@ -30,7 +30,9 @@ def post(client, headers, body):
     return client.post("/sensor/status", headers=headers, json=body)
 
 
-def test_a_sensor_can_post_status_and_users_can_read_it(client, sensor_headers, analyst_headers):
+def test_a_sensor_can_post_status_and_admins_can_read_all_of_it(client, sensor_headers,
+                                                                admin_headers):
+    analyst_headers = admin_headers  # admins see everything; analysts: see the redaction tests
     r = post(client, sensor_headers, report())
     assert r.status_code == 200 and "last_seen_at" in r.json()
     got = client.get("/sensors/status", headers=analyst_headers)
@@ -43,8 +45,9 @@ def test_a_sensor_can_post_status_and_users_can_read_it(client, sensor_headers, 
     assert set(s) == {"sensor_id", "name", "revoked", "last_seen_at", "online", "status"}
 
 
-def test_the_get_includes_the_socs_own_allowlist(client, analyst_headers):
-    body = client.get("/sensors/status", headers=analyst_headers).json()
+def test_the_get_includes_the_socs_own_allowlist_for_admins(client, admin_headers):
+    body = client.get("/sensors/status", headers=admin_headers).json()
+    assert body["redacted"] is False
     assert body["soc_allowlist"] == ["10.10.1.1/32", "10.10.2.1/32", "10.10.1.2/32", "10.10.2.2/32"]
     assert body["sensors"] == []
 
@@ -177,7 +180,7 @@ def test_nan_is_refused(client, sensor_headers):
 
 
 def test_boundary_values_are_accepted(client, sensor_headers):
-    ok = report(allowlist=["a" * 64] * 100, interface=None, shap_p95_ms=None,
+    ok = report(allowlist=["10.0.0.0/8"] * 100, allowlist_total=100, interface=None, shap_p95_ms=None,
                 sensor_version=None, sent_at=None)
     assert post(client, sensor_headers, ok).status_code == 200
 
@@ -187,7 +190,8 @@ def test_posting_status_does_not_fill_the_audit_log(client, sensor_headers, admi
         post(client, sensor_headers, report())
     entries = client.get("/admin/audit", headers=admin_headers).json()
     items = entries["items"] if isinstance(entries, dict) else entries
-    assert not [e for e in items if "status" in e["action"]]
+    status = [e["action"] for e in items if "status" in e["action"]]
+    assert status == ["sensor_status_first"]  # one row for the first report, none for the repeats
 
 
 def test_allowlist_total_is_optional_and_bounded(client, sensor_headers, analyst_headers):
@@ -340,3 +344,310 @@ def test_null_and_negative_ratios_and_model_check_are_accepted(client, sensor_he
     assert f["methods"]["lime"]["ratio_to_random"] == -4.2
     assert post(client, sensor_headers, report(faithfulness=faith(model_check="name"))
                 ).status_code == 200
+
+
+# --- redaction for analysts (L3) ------------------------------------------------------------
+
+def test_analysts_get_a_redacted_listing(client, sensor_headers, analyst_headers):
+    post(client, sensor_headers, report(faithfulness=faith()))
+    body = client.get("/sensors/status", headers=analyst_headers).json()
+    assert body["redacted"] is True and body["soc_allowlist"] is None
+    (s,) = body["sensors"]
+    st = s["status"]
+    assert st["allowlist"] is None and st["policy"] is None
+    # everything else the dashboard needs is still there
+    assert st["allowlist_total"] == 2 and st["mode"] == "live" and st["dry_run"] is True
+    assert st["blocking_enabled"] is False and st["model"] == {"name": "xgboost",
+                                                               "checksum_ok": True}
+    assert st["heartbeat"] == {"enabled": True, "ok": True} and st["outbox_pending"] == 3
+    assert st["counters"]["would_block"] == 2 and st["faithfulness"]["model"] == "xgboost"
+    text = client.get("/sensors/status", headers=analyst_headers).text
+    assert "10.10.1.1" not in text and "confidence_threshold" not in text
+
+
+def test_admins_get_the_full_listing(client, sensor_headers, admin_headers):
+    post(client, sensor_headers, report())
+    body = client.get("/sensors/status", headers=admin_headers).json()
+    assert body["redacted"] is False and body["soc_allowlist"]
+    st = body["sensors"][0]["status"]
+    assert st["allowlist"] == ["10.10.1.1/32", "10.10.2.0/24"]
+    assert st["policy"]["min_flows"] == 5
+
+
+def test_a_revoked_sensors_status_is_hidden_from_analysts_only(
+        client, soc_app, sensor_headers, analyst_headers, admin_headers):
+    post(client, sensor_headers, report())
+    with soc_app.state.session_factory() as db:
+        db.query(SensorToken).update({"revoked": True})
+        db.commit()
+    (a,) = client.get("/sensors/status", headers=analyst_headers).json()["sensors"]
+    assert a["revoked"] is True and a["status"] is None and a["online"] is False
+    (adm,) = client.get("/sensors/status", headers=admin_headers).json()["sensors"]
+    assert adm["status"] is not None
+
+
+# --- audit of status changes (L4) -----------------------------------------------------------
+
+def status_audit(client, admin_headers):
+    r = client.get("/admin/audit?limit=200", headers=admin_headers).json()
+    items = r["items"] if isinstance(r, dict) else r
+    return [e for e in items if e["action"].startswith("sensor_status")][::-1]  # oldest first
+
+
+def test_the_first_report_is_audited_and_unchanged_reports_are_not(client, sensor_headers,
+                                                                   admin_headers):
+    for _ in range(3):
+        post(client, sensor_headers, report())
+    (first,) = status_audit(client, admin_headers)
+    assert first["action"] == "sensor_status_first" and first["actor_name"] == "sensor-1"
+    assert first["details"] == {"mode": "live", "dry_run": True, "blocking_enabled": False}
+
+
+@pytest.mark.parametrize("change, expected", [
+    ({"dry_run": False}, {"dry_run": [True, False]}),
+    ({"blocking_enabled": True}, {"blocking_enabled": [False, True]}),
+    ({"mode": "replay", "interface": None}, {"mode": ["live", "replay"]}),
+    ({"model": {"name": "rf", "checksum_ok": True}},
+     {"model": [{"name": "xgboost", "checksum_ok": True}, {"name": "rf", "checksum_ok": True}]}),
+])
+def test_a_change_of_a_watched_field_is_audited(client, sensor_headers, admin_headers, change,
+                                                expected):
+    post(client, sensor_headers, report())
+    post(client, sensor_headers, report(**change))
+    _, changed = status_audit(client, admin_headers)
+    assert changed["action"] == "sensor_status_changed"
+    assert changed["details"] == {"changed": expected}
+
+
+def test_a_policy_change_names_the_fields(client, sensor_headers, admin_headers):
+    post(client, sensor_headers, report())
+    policy = report()["policy"] | {"confidence_threshold": 0.6, "min_flows": 1}
+    post(client, sensor_headers, report(policy=policy))
+    _, changed = status_audit(client, admin_headers)
+    assert changed["details"]["changed"]["policy"] == {
+        "confidence_threshold": [0.9, 0.6], "min_flows": [5, 1]}
+
+
+@pytest.fixture
+def audit_clock(monkeypatch):
+    """The throttle's clock (seconds), so a test can step past or stay inside the window."""
+    from soc.api.routes import sensors
+
+    now = [1000.0]
+    monkeypatch.setattr(sensors, "_clock", lambda: now[0])
+    return now
+
+
+def test_an_allowlist_change_logs_counts_and_entries_capped(client, sensor_headers, admin_headers,
+                                                            audit_clock):
+    post(client, sensor_headers, report())
+    many = [f"10.{i // 250}.{i % 250}.0/24" for i in range(60)]
+    post(client, sensor_headers, report(allowlist=["10.10.1.1/32", *many], allowlist_total=61))
+    _, changed = status_audit(client, admin_headers)
+    al = changed["details"]["changed"]["allowlist"]
+    assert al["count"] == [2, 61] and al["total"] == [2, 61]
+    assert len(al["added"]) == 20 and al["removed"] == ["10.10.2.0/24"] and al["more"] == 40
+    audit_clock[0] += 601  # past the throttle window
+    post(client, sensor_headers, report(allowlist=["10.10.1.1/32", *many], allowlist_total=70))
+    third = status_audit(client, admin_headers)[-1]  # only allowlist_total changed
+    assert third["details"]["changed"]["allowlist"]["total"] == [61, 70]
+    assert third["details"]["changed"]["allowlist"]["added"] == []
+
+
+def test_faithfulness_model_match_changes_are_audited_but_other_numbers_are_not(
+        client, sensor_headers, admin_headers):
+    post(client, sensor_headers, report(faithfulness=faith(model_matches=True)))
+    post(client, sensor_headers, report(faithfulness=faith(model_matches=True, flows=999)))
+    assert len(status_audit(client, admin_headers)) == 1  # flows changed: not audited
+    post(client, sensor_headers, report(faithfulness=faith(model_matches=False)))
+    changed = status_audit(client, admin_headers)[-1]
+    assert changed["details"]["changed"] == {"faithfulness.model_matches": [True, False]}
+
+
+def test_counters_outbox_and_time_never_cause_an_audit_row(client, sensor_headers, admin_headers):
+    post(client, sensor_headers, report())
+    post(client, sensor_headers, report(
+        outbox_pending=99, shap_p95_ms=1.0, sent_at="2030-01-01T00:00:00+00:00",
+        counters={"flows": 5, "alerts": 5, "blocked": 5, "would_block": 5},
+        heartbeat={"enabled": False, "ok": False}))
+    assert len(status_audit(client, admin_headers)) == 1
+
+
+# --- semantic validation (L5) ---------------------------------------------------------------
+
+def test_allowlist_entries_are_normalised_and_garbage_is_refused(client, sensor_headers,
+                                                                 admin_headers):
+    ok = report(allowlist=["10.10.1.1", "10.10.2.5/24", "2001:DB8::1"], allowlist_total=3)
+    assert post(client, sensor_headers, ok).status_code == 200
+    (s,) = client.get("/sensors/status", headers=admin_headers).json()["sensors"]
+    assert s["status"]["allowlist"] == ["10.10.1.1/32", "10.10.2.0/24", "2001:db8::1/128"]
+    for bad in ("not-an-ip", "10.0.0.256", "fe80::1%eth0", "10.0.0.0/33", "", "1.2.3.4; drop"):
+        assert post(client, sensor_headers, report(allowlist=[bad], allowlist_total=1)
+                    ).status_code == 422, bad
+
+
+def test_allowlist_total_must_cover_the_list(client, sensor_headers):
+    assert post(client, sensor_headers, report(allowlist_total=1)).status_code == 422  # 2 entries
+    assert post(client, sensor_headers, report(allowlist_total=2)).status_code == 200
+    body = report()
+    del body["allowlist_total"]
+    assert post(client, sensor_headers, body).status_code == 200  # older sensors
+
+
+@pytest.mark.parametrize("change", [
+    {"dry_run": "yes"}, {"dry_run": 1}, {"blocking_enabled": "false"},
+    {"heartbeat": {"enabled": 1, "ok": True}},
+    {"model": {"name": "x", "checksum_ok": "true"}},
+    {"outbox_pending": "3"}, {"outbox_pending": 3.0}, {"outbox_pending": True},
+    {"counters": {"flows": "1", "alerts": 0, "blocked": 0, "would_block": 0}},
+    {"counters": {"flows": 1.5, "alerts": 0, "blocked": 0, "would_block": 0}},
+    {"allowlist_total": "2"},
+])
+def test_booleans_and_integers_are_strict(client, sensor_headers, change):
+    assert post(client, sensor_headers, report(**change)).status_code == 422
+
+
+def test_policy_integers_are_strict(client, sensor_headers):
+    for key in ("min_flows", "block_ttl_seconds", "unblock_grace_seconds", "max_analyst_blocks"):
+        policy = report()["policy"] | {key: str(report()["policy"][key])}
+        assert post(client, sensor_headers, report(policy=policy)).status_code == 422, key
+    assert post(client, sensor_headers, report(faithfulness=faith(flows="100"))).status_code == 422
+    assert post(client, sensor_headers, report(faithfulness=faith(model_matches=1))
+                ).status_code == 422
+
+
+UNSAFE = ["eth\x00", "eth\n1", "eth\u202e1", "eth\u200b1", "eth\x1b[31m", "eth\u2028"]
+
+
+@pytest.mark.parametrize("bad", UNSAFE)
+def test_control_and_direction_override_characters_are_refused(client, sensor_headers, bad):
+    assert post(client, sensor_headers, report(interface=bad)).status_code == 422
+    assert post(client, sensor_headers, report(model={"name": bad, "checksum_ok": True})
+                ).status_code == 422
+    assert post(client, sensor_headers, report(faithfulness=faith(model=bad))).status_code == 422
+    assert post(client, sensor_headers, report(sensor_version=bad)).status_code == 422
+
+
+def test_ordinary_unicode_names_are_fine(client, sensor_headers):
+    assert post(client, sensor_headers, report(interface="enp0s3", model={
+        "name": "xgboost-é", "checksum_ok": True})).status_code == 200
+
+
+def test_a_lone_surrogate_escape_is_refused(client, sensor_headers):
+    text = json.dumps(report()).replace('"interface": "eth1"', '"interface": "a\\ud800"')
+    assert "\\ud800" in text
+    r = client.post("/sensor/status", content=text,
+                    headers={**sensor_headers, "Content-Type": "application/json"})
+    assert r.status_code == 422
+
+
+# --- throttled audit (flapping) ---------------------------------------------------------------
+
+def test_a_flapping_setting_cannot_flood_the_audit_log(client, sensor_headers, admin_headers,
+                                                       audit_clock):
+    post(client, sensor_headers, report())
+    for i in range(40):  # dry_run toggles on every 30 s post
+        audit_clock[0] += 30
+        post(client, sensor_headers, report(dry_run=bool(i % 2)))
+    rows = status_audit(client, admin_headers)
+    # 1 first + the rows the 10 minute window allows in 20 minutes of flapping (a few), not 41
+    assert 2 <= len(rows) <= 4
+    assert rows[0]["action"] == "sensor_status_first"
+
+
+def test_changes_inside_the_window_are_folded_into_the_next_row(client, sensor_headers,
+                                                                 admin_headers, audit_clock):
+    post(client, sensor_headers, report(dry_run=True))
+    audit_clock[0] += 30
+    post(client, sensor_headers, report(dry_run=False))           # logged now: [True, False]
+    for value in (True, False, True):                             # three changes, all folded
+        audit_clock[0] += 30
+        post(client, sensor_headers, report(dry_run=value))
+    assert len(status_audit(client, admin_headers)) == 2
+    audit_clock[0] += 600
+    post(client, sensor_headers, report(dry_run=True))            # window over: one summary row
+    rows = status_audit(client, admin_headers)
+    assert len(rows) == 3
+    last = rows[-1]
+    assert last["details"]["changed"]["dry_run"] == [False, True]  # first audited old -> latest
+    assert last["details"]["folded"]["dry_run"] == 3
+
+
+def test_the_final_state_is_logged_after_the_window_even_if_nothing_else_changes(
+        client, sensor_headers, admin_headers, audit_clock):
+    post(client, sensor_headers, report(dry_run=True))
+    audit_clock[0] += 30
+    post(client, sensor_headers, report(dry_run=False))           # logged
+    audit_clock[0] += 30
+    post(client, sensor_headers, report(dry_run=True))            # throttled (back to the first)
+    audit_clock[0] += 30
+    post(client, sensor_headers, report(dry_run=False))           # throttled
+    audit_clock[0] += 700
+    post(client, sensor_headers, report(dry_run=False))
+    rows = status_audit(client, admin_headers)
+    # the audited baseline is dry_run=False and the sensor is at False: nothing to add
+    assert [r["action"] for r in rows] == ["sensor_status_first", "sensor_status_changed"]
+    audit_clock[0] += 30
+    post(client, sensor_headers, report(dry_run=True))            # a real new change, window over
+    assert status_audit(client, admin_headers)[-1]["details"]["changed"]["dry_run"] == [False, True]
+
+
+def test_the_throttle_is_per_field(client, sensor_headers, admin_headers, audit_clock):
+    post(client, sensor_headers, report())
+    audit_clock[0] += 30
+    post(client, sensor_headers, report(dry_run=False))
+    audit_clock[0] += 30
+    post(client, sensor_headers, report(dry_run=False, blocking_enabled=True))  # other field: logged
+    rows = status_audit(client, admin_headers)
+    assert [list(r["details"].get("changed", {})) for r in rows[1:]] == [
+        ["dry_run"], ["blocking_enabled"]]
+
+
+def test_the_throttle_is_per_sensor(client, soc_app, sensor_headers, admin_headers, audit_clock):
+    with soc_app.state.session_factory() as db:
+        other = {"Authorization": f"Bearer {auth.create_sensor_token(db, 'sensor-2')}"}
+    for headers in (sensor_headers, other):
+        post(client, headers, report())
+        audit_clock[0] += 30
+        post(client, headers, report(dry_run=False))
+    changed = [r for r in status_audit(client, admin_headers) if r["action"].endswith("changed")]
+    assert sorted(r["actor_name"] for r in changed) == ["sensor-1", "sensor-2"]
+
+
+def test_after_a_restart_the_stored_status_is_the_baseline(client, soc_app, sensor_headers,
+                                                          admin_headers, audit_clock):
+    from soc.api.routes.sensors import SensorAuditState
+
+    post(client, sensor_headers, report(dry_run=True))
+    soc_app.state.sensor_audit = SensorAuditState()  # a new process
+    post(client, sensor_headers, report(dry_run=False))
+    assert status_audit(client, admin_headers)[-1]["details"]["changed"]["dry_run"] == [True, False]
+
+
+# --- upgrade: old unnormalised allowlist rows -------------------------------------------------
+
+def test_an_old_unnormalised_allowlist_is_not_a_change(client, soc_app, sensor_headers,
+                                                       admin_headers):
+    post(client, sensor_headers, report(allowlist=["10.10.1.1/32", "10.10.2.0/24"],
+                                        allowlist_total=2))
+    with soc_app.state.session_factory() as db:  # the row as an older SOC stored it
+        row = db.query(SensorStatus).one()
+        row.payload = {**row.payload, "allowlist": ["10.10.1.1", "10.10.2.0/24"]}
+        db.commit()
+    from soc.api.routes.sensors import SensorAuditState
+
+    soc_app.state.sensor_audit = SensorAuditState()
+    post(client, sensor_headers, report(allowlist=["10.10.1.1/32", "10.10.2.0/24"],
+                                        allowlist_total=2))
+    assert [r["action"] for r in status_audit(client, admin_headers)] == ["sensor_status_first"]
+
+
+def test_status_changes_normalises_the_old_side():
+    from soc.api.routes.sensors import status_changes
+
+    old = {"allowlist": ["10.10.1.1", "2001:DB8::1"], "allowlist_total": 2}
+    new = {"allowlist": ["10.10.1.1/32", "2001:db8::1/128"], "allowlist_total": 2}
+    assert status_changes(old, new) == {}
+    new = {"allowlist": ["10.10.1.1/32", "10.9.0.0/16"], "allowlist_total": 2}
+    al = status_changes(old, new)["allowlist"]
+    assert al["added"] == ["10.9.0.0/16"] and al["removed"] == ["2001:db8::1/128"]
