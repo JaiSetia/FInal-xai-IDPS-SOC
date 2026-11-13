@@ -365,3 +365,23 @@ def test_make_valid_pairs_unanswered_tool_calls():
     out = make_valid(new)
     assert [m["role"] for m in out] == ["assistant", "user"]
     assert out[1]["content"][0]["tool_use_id"] == "a"
+
+
+def test_get_playbook_accepts_aliases(soc_app):
+    with soc_app.state.session_factory() as db:
+        user = db.query(User).filter_by(username="analyst").one()
+        settings = soc_app.state.settings
+
+        def playbook(name):
+            out, err, _ = run_tool("get_playbook", {"attack_class": name}, db=db, user=user,
+                                   settings=settings)
+            assert not err, name
+            return out
+
+        def heading(file):
+            return (PLAYBOOK_DIR / file).read_text().splitlines()[0]  # "# Playbook: ..."
+
+        # The reply echoes the class asked for, so compare the playbook text, not the whole reply.
+        for asked, file in [("port scan", "portscan.md"), ("PortScan", "portscan.md"),
+                            ("web attacks", "web-attack.md"), ("Web Attack", "web-attack.md")]:
+            assert heading(file) in playbook(asked), asked

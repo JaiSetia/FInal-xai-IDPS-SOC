@@ -1,74 +1,158 @@
-import { useState } from "react";
-import { api, query } from "../api/client";
+import { useRef, useState, type FormEvent } from "react";
+import { api } from "../api/client";
 import type { AdminUser, AuditEntry, Page, Role, Sensor } from "../api/types";
 import { useAuth } from "../auth";
-import { Card, ErrorText, useAction, useLoad } from "../components/common";
-import { dateTime } from "../format";
+import { Card, ErrorText, PageHead, Pill, useAction, useLoad } from "../components/common";
+import { dateTime, label } from "../format";
 
-function Users() {
+/** Admin: users, sensors and the audit log (wireframe screen 7). Only admins get this route. */
+
+function Users({ onChanged }: { onChanged: () => void }) {
   const { me } = useAuth();
   const { data, error, reload } = useLoad(() => api<AdminUser[]>("/admin/users"), []);
   const act = useAction();
   const [form, setForm] = useState({ username: "", password: "", role: "analyst" as Role });
   const [notice, setNotice] = useState<string | null>(null);
+  const [resetFor, setResetFor] = useState<AdminUser | null>(null);
+  const [newPassword, setNewPassword] = useState("");
 
-  async function create() {
-    const u = await act.run(() => api<AdminUser>("/admin/users", { method: "POST", json: form }));
+  async function create(e: FormEvent) {
+    e.preventDefault();
+    setNotice(null);
+    const u = await act.run(() => api<AdminUser>("/admin/users", {
+      method: "POST", json: { ...form, username: form.username.trim() } }));
     if (u) {
       setForm({ username: "", password: "", role: "analyst" });
       setNotice(`Created ${u.role} ${u.username}.`);
       void reload();
+      onChanged();
     }
   }
 
-  async function call(path: string, json?: unknown) {
-    const r = await act.run(() => api<AdminUser>(path, { method: json ? "PATCH" : "POST", json }));
-    if (r) void reload();
+  async function setRole(u: AdminUser, role: Role) {
+    if (role === u.role) return;
+    if (!window.confirm(`Make ${u.username} ${role === "admin" ? "an admin" : "an analyst"}?`)) return;
+    setNotice(null);
+    const r = await act.run(() => api<AdminUser>(`/admin/users/${u.id}/role`, { method: "PATCH", json: { role } }));
+    if (r) {
+      setNotice(`${r.username} is now ${r.role === "admin" ? "an admin" : "an analyst"}.`);
+      void reload();
+      onChanged();
+    }
   }
 
-  async function resetPassword(u: AdminUser) {
-    const password = window.prompt(`New password for ${u.username} (at least 12 characters):`);
-    if (!password) return;
-    const r = await act.run(() => api<AdminUser>(`/admin/users/${u.id}/reset-password`, { method: "POST", json: { password } }));
-    if (r) setNotice(`Password reset for ${u.username}; their existing sessions were signed out.`);
+  async function toggle(u: AdminUser) {
+    const verb = u.disabled ? "Enable" : "Disable";
+    if (!u.disabled && !window.confirm(`Disable ${u.username}? They are signed out and can't sign in.`)) return;
+    setNotice(null);
+    const r = await act.run(() => api<AdminUser>(`/admin/users/${u.id}/${u.disabled ? "enable" : "disable"}`, { method: "POST" }));
+    if (r) {
+      setNotice(`${verb}d ${r.username}.`);
+      void reload();
+      onChanged();
+    }
+  }
+
+  async function resetPassword(e: FormEvent) {
+    e.preventDefault();
+    if (!resetFor) return;
+    setNotice(null);
+    const r = await act.run(() => api<AdminUser>(`/admin/users/${resetFor.id}/reset-password`, {
+      method: "POST", json: { password: newPassword } }));
+    if (r) {
+      setNotice(`Password reset for ${r.username}; their existing sessions were signed out.`);
+      closeReset();
+      onChanged();
+    }
+  }
+
+  // Focus goes back to the row's "Reset password" button when the form closes.
+  const resetButtons = useRef(new Map<number, HTMLButtonElement>());
+  function closeReset() {
+    const id = resetFor?.id;
+    setResetFor(null);
+    setNewPassword("");
+    if (id !== undefined) requestAnimationFrame(() => resetButtons.current.get(id)?.focus());
   }
 
   return (
     <Card title="Users">
       <ErrorText error={error ?? act.error} />
-      {notice && <div className="notice">{notice}</div>}
+      <div className="notice" role="status" aria-live="polite">{notice}</div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>User</th><th>Role</th><th>State</th><th>Created</th><th /></tr></thead>
+          <thead><tr><th>User</th><th>Role</th><th>Status</th><th><span className="sr-only">Actions</span></th></tr></thead>
           <tbody>
-            {(data ?? []).map((u) => (
-              <tr key={u.id}>
-                <td>{u.username}{u.id === me?.id && <span className="muted"> (you)</span>}</td>
-                <td>
-                  <select value={u.role} disabled={act.busy}
-                    onChange={(e) => call(`/admin/users/${u.id}/role`, { role: e.target.value })}>
-                    <option value="analyst">analyst</option>
-                    <option value="admin">admin</option>
-                  </select>
-                </td>
-                <td>{u.disabled ? "disabled" : "active"}</td>
-                <td>{dateTime(u.created_at)}</td>
-                <td className="row-actions">
-                  <button disabled={act.busy} onClick={() => call(`/admin/users/${u.id}/${u.disabled ? "enable" : "disable"}`)}>
-                    {u.disabled ? "Enable" : "Disable"}
-                  </button>
-                  <button disabled={act.busy} onClick={() => resetPassword(u)}>Reset password</button>
-                </td>
-              </tr>
-            ))}
+            {(data ?? []).map((u) => {
+              const self = u.id === me?.id;
+              return (
+                <tr key={u.id}>
+                  <td>
+                    <b className="wrap-anywhere">{u.username}</b>
+                    <div className="muted small-text">since {dateTime(u.created_at)}</div>
+                  </td>
+                  <td>
+                    {/* Your own role can't be changed here: it could lock you out of this page. */}
+                    <select value={u.role} disabled={act.busy || self} aria-label={`Role of ${u.username}`}
+                      onChange={(e) => void setRole(u, e.target.value as Role)}>
+                      <option value="analyst">analyst</option>
+                      <option value="admin">admin</option>
+                    </select>
+                  </td>
+                  <td><Pill tone={u.disabled ? "danger" : "ok"}>{u.disabled ? "disabled" : "active"}</Pill></td>
+                  <td style={{ textAlign: "right" }}>
+                    <div className="row-actions" style={{ justifyContent: "flex-end", alignItems: "center" }}>
+                      {/* The only way to change a password in the app, so it stays on your own row too. */}
+                      <button className="small" disabled={act.busy}
+                        ref={(el) => { if (el) resetButtons.current.set(u.id, el); else resetButtons.current.delete(u.id); }}
+                        onClick={() => { setResetFor(u); setNewPassword(""); }}
+                        aria-label={`${self ? "Change your password" : `Reset password of ${u.username}`}`}>
+                        {self ? "Change password" : "Reset password"}
+                      </button>
+                      {/* Disabling or demoting yourself would lock you out of this page. */}
+                      {self ? <span className="muted">you</span> : (
+                        <button className={`small${u.disabled ? "" : " danger-soft"}`} disabled={act.busy}
+                          onClick={() => void toggle(u)}
+                          aria-label={`${u.disabled ? "Enable" : "Disable"} ${u.username}`}>
+                          {u.disabled ? "Enable" : "Disable"}
+                        </button>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
-      <form className="toolbar" style={{ marginTop: 12 }} onSubmit={(e) => { e.preventDefault(); void create(); }}>
-        <label className="field">Username
-          <input value={form.username} maxLength={64} required onChange={(e) => setForm({ ...form, username: e.target.value })} />
+
+      {resetFor && (
+        <form key={resetFor.id} className="inline-panel" onSubmit={resetPassword}
+          aria-label={`Reset password of ${resetFor.username}`}>
+          {/* Tells password managers whose password this is, so they don't file it under the admin's own login. */}
+          <label className="field" style={{ flex: "0 1 160px" }}>User
+            <input type="text" autoComplete="username" value={resetFor.username} readOnly />
+          </label>
+          <label className="field" style={{ flex: "1 1 200px" }}>New password for {resetFor.username} (12+ characters)
+            <input type="password" autoComplete="new-password" value={newPassword} minLength={12} required autoFocus
+              onChange={(e) => setNewPassword(e.target.value)} />
+          </label>
+          <button className="primary" type="submit" disabled={act.busy || newPassword.length < 12}>Set password</button>
+          <button type="button" onClick={closeReset}>Cancel</button>
+          {resetFor.id === me?.id && (
+            <p className="small-text" style={{ margin: 0, flexBasis: "100%" }}>
+              This signs you out everywhere, this browser included; sign in again with the new password.
+            </p>
+          )}
+        </form>
+      )}
+
+      <form className="row-actions" style={{ marginTop: 14, alignItems: "flex-end" }} onSubmit={create}>
+        <label className="field" style={{ flex: "1 1 140px" }}>Username
+          <input value={form.username} maxLength={64} required autoComplete="off"
+            onChange={(e) => setForm({ ...form, username: e.target.value })} />
         </label>
-        <label className="field">Password (12+ characters)
+        <label className="field" style={{ flex: "1 1 160px" }}>Password (12+ characters)
           <input type="password" autoComplete="new-password" value={form.password} minLength={12} required
             onChange={(e) => setForm({ ...form, password: e.target.value })} />
         </label>
@@ -78,105 +162,246 @@ function Users() {
             <option value="admin">admin</option>
           </select>
         </label>
-        <button className="primary" disabled={act.busy}>Add user</button>
+        <button className="primary" type="submit" disabled={act.busy}>Add user</button>
       </form>
+      <p className="muted small-text" style={{ margin: "10px 0 0" }}>
+        Passwords are stored as argon2id hashes; sign-ins are throttled after repeated failures.
+      </p>
     </Card>
   );
 }
 
-function Sensors() {
+function Sensors({ onChanged }: { onChanged: () => void }) {
   const { data, error, reload } = useLoad(() => api<Sensor[]>("/admin/sensors"), []);
   const act = useAction();
   const [name, setName] = useState("");
   const [token, setToken] = useState<{ name: string; token: string } | null>(null);
 
-  async function create() {
+  async function create(e: FormEvent) {
+    e.preventDefault();
+    if (!name.trim()) return;
     const s = await act.run(() => api<Sensor & { token: string }>("/admin/sensors", { method: "POST", json: { name: name.trim() } }));
     if (s) {
       setToken({ name: s.name, token: s.token });
       setName("");
+      setCopied("no");
       void reload();
+      onChanged();
     }
   }
 
   async function revoke(s: Sensor) {
-    if (!window.confirm(`Revoke sensor ${s.name}? It can no longer send alerts.`)) return;
+    if (!window.confirm(`Revoke sensor ${s.name}? It can no longer send alerts or pick up actions.`)) return;
     const r = await act.run(() => api<Sensor>(`/admin/sensors/${s.id}/revoke`, { method: "POST" }));
-    if (r) void reload();
+    if (r) {
+      void reload();
+      onChanged();
+    }
+  }
+
+  const [copied, setCopied] = useState<"no" | "yes" | "failed">("no");
+  // The clipboard API exists only on HTTPS or localhost; a lab SOC on plain http has none.
+  const canCopy = typeof window !== "undefined" && window.isSecureContext && !!navigator.clipboard;
+  async function copy() {
+    if (!token) return;
+    try {
+      await navigator.clipboard.writeText(token.token);
+      setCopied("yes");
+    } catch {
+      setCopied("failed");
+    }
   }
 
   return (
     <Card title="Sensors">
       <ErrorText error={error ?? act.error} />
+      {/* Always present, so screen readers announce it when a sensor is added. */}
+      <p className="sr-only" role="status">{token ? `Sensor ${token.name} added. Its token is shown below, once.` : ""}</p>
       {token && (
-        <div className="card" style={{ background: "var(--surface-2)" }}>
-          <b>Token for {token.name}</b>. Copy it now: it is shown only once.
-          <pre className="mono" style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{token.token}</pre>
-          <button onClick={() => setToken(null)}>I've stored it</button>
+        <div className="token-box">
+          <p style={{ margin: 0 }}><b>Sensor {token.name} added.</b> Copy its token now: it is shown only once.</p>
+          <p style={{ margin: "8px 0 0" }} id="sensor-token-label">Token for {token.name}:</p>
+          <pre className="mono" aria-labelledby="sensor-token-label">{token.token}</pre>
+          <div className="row-actions" style={{ alignItems: "center" }}>
+            {canCopy && (
+              <button type="button" onClick={() => void copy()}>{copied === "yes" ? "Copied" : "Copy token"}</button>
+            )}
+            <button type="button" onClick={() => setToken(null)}>I've stored it</button>
+            {(copied === "failed" || !canCopy) && (
+              <span className="muted small-text">
+                {copied === "failed" ? "Couldn't copy. " : ""}Select the token and copy it.
+              </span>
+            )}
+          </div>
         </div>
       )}
-      <table>
-        <thead><tr><th>#</th><th>Name</th><th>State</th><th>Created</th><th /></tr></thead>
-        <tbody>
-          {(data ?? []).map((s) => (
-            <tr key={s.id}>
-              <td>{s.id}</td><td>{s.name}</td><td>{s.revoked ? "revoked" : "active"}</td>
-              <td>{dateTime(s.created_at)}</td>
-              <td>{!s.revoked && <button disabled={act.busy} onClick={() => revoke(s)}>Revoke</button>}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <form className="toolbar" style={{ marginTop: 12 }} onSubmit={(e) => { e.preventDefault(); if (name.trim()) void create(); }}>
-        <label className="field">New sensor name
-          <input value={name} maxLength={64} onChange={(e) => setName(e.target.value)} placeholder="lab-sensor" />
+      <ul className="queue-list">
+        {(data ?? []).map((s) => (
+          <li key={s.id}>
+            <span>
+              <b>#{s.id} {s.name}</b>
+              <span className="muted small-text" style={{ display: "block" }}>created {dateTime(s.created_at)}</span>
+            </span>
+            <span className="row-actions" style={{ alignItems: "center" }}>
+              <Pill tone={s.revoked ? "neutral" : "ok"}>{s.revoked ? "revoked" : "active"}</Pill>
+              {!s.revoked && (
+                <button className="small danger-soft" disabled={act.busy} onClick={() => void revoke(s)}
+                  aria-label={`Revoke sensor ${s.name}`}>Revoke</button>
+              )}
+            </span>
+          </li>
+        ))}
+        {data?.length === 0 && <li className="muted">No sensors yet.</li>}
+      </ul>
+      <form className="row-actions" style={{ marginTop: 14, alignItems: "flex-end" }} onSubmit={create}>
+        <label className="field" style={{ flex: "1 1 180px" }}>New sensor name
+          <input value={name} maxLength={64} onChange={(e) => setName(e.target.value)} placeholder="e.g. office-gateway" />
         </label>
-        <button className="primary" disabled={!name.trim() || act.busy}>Add sensor</button>
+        <button className="primary" type="submit" disabled={!name.trim() || act.busy}>Add sensor</button>
       </form>
+      <p className="muted small-text" style={{ margin: "10px 0 0" }}>
+        Adding a sensor issues its token. The token is shown <b>once</b>, then only its hash is kept: put it in the
+        sensor's <code>IDPS_SOC_SENSOR_TOKEN</code>. A lost token can't be shown again: revoke the sensor and add a new one.
+        When each sensor was last seen appears here once sensors report their status.
+      </p>
     </Card>
   );
 }
 
-function Audit() {
-  const [actor, setActor] = useState("");
-  const { data, error } = useLoad(() => api<Page<AuditEntry>>(`/admin/audit${query({ actor, limit: 200 })}`), [actor]);
+export type AuditGroup = "all" | "actions" | "blocks" | "alerts" | "cases" | "users" | "assistant";
+
+/** The audit action names in each group: the API filters by exact names, so the server pages
+ *  through matching entries only (ingest rows from busy sensors don't push them out of view). */
+export const AUDIT_GROUPS: Record<Exclude<AuditGroup, "all">, string[]> = {
+  actions: ["action_request", "action_confirmed", "action_rejected", "action_refused", "action_result"],
+  assistant: ["assistant_message", "assistant_propose_block"],
+  blocks: ["ingest_blocks"],
+  alerts: ["ingest_alerts", "alert_status"],
+  cases: ["case_create", "case_update", "case_delete", "case_note", "case_attach", "case_detach"],
+  users: ["user_create", "user_role", "user_disable", "user_enable", "user_reset_password", "sensor_create", "sensor_revoke"],
+};
+
+/** Which group an audit action belongs to. */
+export function auditGroup(action: string): Exclude<AuditGroup, "all"> | "other" {
+  for (const [g, names] of Object.entries(AUDIT_GROUPS)) {
+    if (names.includes(action)) return g as Exclude<AuditGroup, "all">;
+  }
+  return "other";
+}
+
+/** /admin/audit query string: actor, one `action` per name of the group, limit and cursor. */
+export function auditQuery(group: AuditGroup, actor: string, cursor?: string | null): string {
+  const p = new URLSearchParams();
+  if (actor.trim()) p.set("actor", actor.trim());
+  if (group !== "all") AUDIT_GROUPS[group].forEach((a) => p.append("action", a));
+  p.set("limit", "100");
+  if (cursor) p.set("cursor", cursor);
+  return `?${p.toString()}`;
+}
+
+/** The details as separate "key: value" pairs, string values quoted, so one value can't pass
+ *  itself off as several pairs. */
+export function DetailPairs({ details }: { details: Record<string, unknown> }) {
+  const pairs = Object.entries(details ?? {});
+  if (pairs.length === 0) return null;
   return (
-    <Card title="Audit log">
-      <div className="toolbar">
-        <label className="field">Actor
-          <input value={actor} onChange={(e) => setActor(e.target.value)} placeholder="any" />
+    <ul className="detail-pairs">
+      {pairs.map(([k, v]) => (
+        <li key={k}><span className="muted">{k}:</span> {typeof v === "string" ? `“${v}”` : JSON.stringify(v)}</li>
+      ))}
+    </ul>
+  );
+}
+
+function Audit({ refresh }: { refresh: number }) {
+  const [group, setGroup] = useState<AuditGroup>("all");
+  const [actor, setActor] = useState("");
+  const [actorInput, setActorInput] = useState("");
+  const first = useLoad(() => api<Page<AuditEntry>>(`/admin/audit${auditQuery(group, actor)}`), [group, actor, refresh]);
+  // Older pages, tagged with the filter they belong to, so a late answer never mixes filters.
+  const key = `${group}|${actor}|${refresh}`;
+  const [olderState, setOlder] = useState<{ key: string; items: AuditEntry[]; cursor: string | null } | null>(null);
+  const older = olderState?.key === key ? olderState : null;
+  const act = useAction();
+
+  const rows = [...(first.data?.items ?? []), ...(older?.items ?? [])];
+  const cursor = older ? older.cursor : first.data?.next_cursor ?? null;
+
+  async function loadOlder() {
+    if (!cursor) return;
+    const k = key;
+    const page = await act.run(() => api<Page<AuditEntry>>(`/admin/audit${auditQuery(group, actor, cursor)}`));
+    if (page) {
+      setOlder((o) => ({ key: k, items: [...(o?.key === k ? o.items : []), ...page.items], cursor: page.next_cursor }));
+    }
+  }
+
+  return (
+    <Card title="Audit log" actions={
+      <div className="row-actions" style={{ alignItems: "center" }}>
+        <form className="row-actions" style={{ alignItems: "center" }}
+          onSubmit={(e) => { e.preventDefault(); setActor(actorInput); }}>
+          <label className="field inline">Who
+            <input value={actorInput} maxLength={64} placeholder="any" style={{ width: 140 }}
+              onChange={(e) => setActorInput(e.target.value)} />
+          </label>
+          <button type="submit" className="small">Filter</button>
+          {actor && <button type="button" className="small" onClick={() => { setActor(""); setActorInput(""); }}>Clear</button>}
+        </form>
+        <label className="field inline">Event
+          <select value={group} onChange={(e) => setGroup(e.target.value as AuditGroup)}>
+            <option value="all">all</option>
+            <option value="actions">analyst actions</option>
+            <option value="blocks">blocks</option>
+            <option value="alerts">alerts</option>
+            <option value="cases">cases</option>
+            <option value="users">users and sensors</option>
+            <option value="assistant">assistant, including proposals</option>
+          </select>
         </label>
       </div>
-      <ErrorText error={error} />
+    }>
+      <ErrorText error={first.error ?? act.error} />
       <div className="table-wrap">
         <table>
-          <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th></tr></thead>
+          <thead><tr><th>Time</th><th>Who</th><th>Event</th><th>Target</th><th>Details</th></tr></thead>
           <tbody>
-            {(data?.items ?? []).map((e) => (
+            {rows.map((e) => (
               <tr key={e.id}>
-                <td>{dateTime(e.at)}</td>
-                <td>{e.actor_type}: {e.actor_name}</td>
-                <td>{e.action}</td>
-                <td className="mono">{e.target}</td>
-                <td className="mono muted" style={{ maxWidth: 360, overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {JSON.stringify(e.details)}
-                </td>
+                <td style={{ whiteSpace: "nowrap" }}>{dateTime(e.at)}</td>
+                <td className="wrap-anywhere">{e.actor_type === "user" ? e.actor_name : `${e.actor_type}:${e.actor_name}`}</td>
+                <td>{label(e.action)}</td>
+                <td className="mono wrap-anywhere">{e.target}</td>
+                <td className="wrap-anywhere" style={{ maxWidth: 420 }}><DetailPairs details={e.details} /></td>
               </tr>
             ))}
+            {first.data && rows.length === 0 && (
+              <tr><td colSpan={5} className="muted">No matching events.</td></tr>
+            )}
           </tbody>
         </table>
+      </div>
+      <div className="row-actions" style={{ marginTop: 10, alignItems: "center" }}>
+        {/* Not while the first page reloads: its cursor may still be the previous filter's. */}
+        {cursor && !first.loading && <button className="small" disabled={act.busy} onClick={loadOlder}>{act.busy ? "Loading…" : "Load older entries"}</button>}
+        <span className="muted small-text">{rows.length} entr{rows.length === 1 ? "y" : "ies"} shown{cursor ? "; more are older" : ""}.</span>
       </div>
     </Card>
   );
 }
 
 export default function Admin() {
+  // Changes made on this page add audit entries: reload the log after each one.
+  const [refresh, setRefresh] = useState(0);
+  const changed = () => setRefresh((n) => n + 1);
   return (
     <>
-      <h1>Admin</h1>
-      <Users />
-      <Sensors />
-      <Audit />
+      <PageHead title="Admin"><span className="muted small-text">Only the admin role sees this page.</span></PageHead>
+      <div className="grid cols-2">
+        <Users onChanged={changed} />
+        <Sensors onChanged={changed} />
+      </div>
+      <Audit refresh={refresh} />
     </>
   );
 }

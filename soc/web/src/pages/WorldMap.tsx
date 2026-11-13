@@ -1,6 +1,7 @@
 import { geoEqualEarth, geoGraticule10, geoInterpolate, geoPath } from "d3-geo";
 import type { Feature, FeatureCollection, Geometry } from "geojson";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { feature } from "topojson-client";
 import type { GeometryCollection, Topology } from "topojson-specification";
 import countriesTopo from "world-atlas/countries-110m.json";
@@ -35,19 +36,26 @@ const HEIGHT = 500;
 const topo = countriesTopo as unknown as Topology<{ countries: GeometryCollection }>;
 const COUNTRIES = feature(topo, topo.objects.countries) as FeatureCollection<Geometry>;
 
-export default function WorldMap() {
-  const [hours, setHours] = useState(24);
+/** World attack map for the Maps page; the page owns the time window. `compact` (the Threat
+ *  Center) draws only the map card, with the setup notices as one line under it. */
+export default function WorldMap({ hours, compact = false }: { hours: number; compact?: boolean }) {
   const [hot, setHot] = useState<Set<string>>(new Set());
   const { data, error, reload } = useLoad(() => api<GeoAttacks>(`/geo/attacks${query({ hours })}`), [hours]);
 
-  const live = useLiveRefresh(reload, (a) => {
+  const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
+  useEffect(() => () => { timers.current.forEach(clearTimeout); }, []);
+  useLiveRefresh(reload, (a) => {
     // briefly highlight the arc from this alert's source
     setHot((s) => new Set(s).add(a.src_ip));
-    setTimeout(() => setHot((s) => {
-      const next = new Set(s);
-      next.delete(a.src_ip);
-      return next;
-    }), 4000);
+    const t = setTimeout(() => {
+      timers.current.delete(t);
+      setHot((s) => {
+        const next = new Set(s);
+        next.delete(a.src_ip);
+        return next;
+      });
+    }, 4000);
+    timers.current.add(t);
   });
 
   const projection = useMemo(() => geoEqualEarth().fitExtent([[8, 8], [WIDTH - 8, HEIGHT - 8]], { type: "Sphere" }), []);
@@ -69,39 +77,39 @@ export default function WorldMap() {
 
   const homeXY = home ? projection([home.lon, home.lat]) : null;
 
+  // Compact (Threat Center grid): always one card, so the grid cell never empties or splits.
+  if (compact && !data) {
+    return (
+      <Card title="Live attack map">
+        <ErrorText error={error} />
+        {!error && <p className="muted">Loading map…</p>}
+      </Card>
+    );
+  }
+
   return (
     <>
-      <h1>Attack map</h1>
-      <div className="toolbar">
-        <label className="field">Window
-          <select value={hours} onChange={(e) => setHours(Number(e.target.value))}>
-            {[1, 6, 24, 72, 168].map((h) => <option key={h} value={h}>last {h} h</option>)}
-          </select>
-        </label>
-        <span className="muted" style={{ marginLeft: "auto" }}>
-          <span className={`live-dot ${live ? "on" : "off"}`} />{live ? "Live" : "Live feed offline"}
-        </span>
-      </div>
       <ErrorText error={error} />
       {data && (
         <>
-          {data.geoip_status !== "ok" && (
+          {!compact && data.geoip_status !== "ok" && (
             <div className="card notice-box">
               Public addresses can't be placed on the map: {data.geoip_status}. See docs/soc.md.
             </div>
           )}
-          {data.demo && (
+          {!compact && data.demo && (
             <div className="card notice-box">
               <b>Demo locations.</b> Lab (private) addresses are shown at made-up places marked
               “Demo:”. They are not real attacker locations.
             </div>
           )}
-          {!home && (
+          {!compact && !home && (
             <div className="card notice-box">
               Set IDPS_SOC_HOME_LAT and IDPS_SOC_HOME_LON to draw attack lines to the protected site.
             </div>
           )}
-          <Card>
+          <Card title={compact ? "Live attack map" : "Where attacks come from"}
+            actions={compact ? <Link to={`/maps${query({ view: "world", hours: hours === 1 ? undefined : hours })}`}>Open maps →</Link> : undefined}>
             <svg className="map-svg" viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img"
               aria-label={`World map of ${points.length} attack sources`}>
               <path d={path({ type: "Sphere" }) ?? ""} className="map-sphere" />
@@ -135,13 +143,20 @@ export default function WorldMap() {
               Dot size: number of alerts. Colour: highest severity.
               {data.demo && " Dashed outline: demo location, not real."}
             </p>
+            {compact && (data.geoip_status !== "ok" || data.demo || !home) && (
+              <p className="muted small-text" style={{ marginBottom: 0 }}>
+                {data.demo && "Lab addresses are shown at made-up demo locations. "}
+                {data.geoip_status !== "ok" && `Public addresses can't be placed: ${data.geoip_status}. `}
+                {!home && "No protected site set (IDPS_SOC_HOME_LAT / IDPS_SOC_HOME_LON), so no attack lines."}
+              </p>
+            )}
             {data.geoip_status === "ok" && (
               <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
                 This product includes GeoLite2 data created by MaxMind, available from https://www.maxmind.com.
               </p>
             )}
           </Card>
-          <Card title="Sources on the map">
+          {!compact && <Card title="Sources on the map">
             <div className="table-wrap">
               <table>
                 <thead><tr><th>Source IP</th><th>Alerts</th><th>Highest severity</th><th>Location</th></tr></thead>
@@ -159,7 +174,7 @@ export default function WorldMap() {
                 </tbody>
               </table>
             </div>
-          </Card>
+          </Card>}
         </>
       )}
     </>

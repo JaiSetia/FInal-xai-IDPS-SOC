@@ -196,13 +196,16 @@ def revoke_sensor(sensor_id: int, admin: AdminUser, db: Annotated[Session, Depen
 @router.get("/audit", response_model=Page[AuditOut])
 def list_audit(admin: AdminUser, db: Annotated[Session, Depends(get_db)],
                actor: Annotated[str | None, Query(max_length=64)] = None,
-               action: Annotated[str | None, Query(max_length=64)] = None,
+               action: Annotated[list[Annotated[str, Field(max_length=64)]] | None,
+                                 Query(max_length=20, description="repeat for several")] = None,
                limit: Limit = 100, cursor: Cursor = None):
     query = select(AuditEntry).order_by(AuditEntry.id.desc()).limit(limit + 1)
     if actor:
         query = query.where(AuditEntry.actor_name == actor)
-    if action:
-        query = query.where(AuditEntry.action == action)
+    # Blank values are ignored, so a bare "?action=" still means "no filter", as it always did.
+    names = [a for a in action or [] if a]
+    if names:
+        query = query.where(AuditEntry.action.in_(names))
     if cursor:
         query = query.where(AuditEntry.id < cursor)
     rows, next_cursor = paginate(list(db.scalars(query)), limit)

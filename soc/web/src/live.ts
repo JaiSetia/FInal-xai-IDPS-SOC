@@ -1,54 +1,142 @@
 import { useEffect, useRef, useState } from "react";
-import { getToken, wsUrl } from "./api/client";
+import { getToken, onTokenChange, setToken, wsUrl } from "./api/client";
 import type { Alert } from "./api/types";
 
-/** Subscribe to /ws/alerts. The token goes in the first message (never the URL).
- *  Reconnects with back-off; stops if the server says the token is no longer valid. */
-export function useLiveAlerts(onAlert: (a: Alert) => void): boolean {
-  const [connected, setConnected] = useState(false);
-  const handler = useRef(onAlert);
-  handler.current = onAlert;
+/** One /ws/alerts connection shared by every subscriber (the top bar's Live badge and the page),
+ *  so a page never opens a second socket. Opened by the first subscriber, closed with the last.
+ *  The token goes in the first message (never the URL). Reconnects with back-off. If the server
+ *  rejects the token (4401) the session is over: the token is cleared, which signs the user out.
+ *  A token change (logout, another login) closes the socket and reconnects with the new token. */
+type AlertListener = (a: Alert) => void;
+type StateListener = (connected: boolean) => void;
 
-  useEffect(() => {
-    let ws: WebSocket | null = null;
-    let stopped = false;
-    let retry = 1000;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+const alertListeners = new Set<AlertListener>();
+const stateListeners = new Set<StateListener>();
+let ws: WebSocket | null = null;
+let timer: ReturnType<typeof setTimeout> | undefined;
+let retry = 1000;
+let connected = false;
+let refused = false; // 4401: don't retry until the token changes or everyone unsubscribes
+let readyAt = 0;
+const STABLE_MS = 10_000; // back-off resets only after a connection has lasted this long
 
-    const connect = () => {
-      const token = getToken();
-      if (!token || stopped) return;
-      ws = new WebSocket(wsUrl("/ws/alerts"));
-      ws.onopen = () => ws?.send(JSON.stringify({ token }));
-      ws.onmessage = (ev) => {
-        let msg: unknown;
+function setConnected(value: boolean) {
+  if (connected === value) return;
+  connected = value;
+  stateListeners.forEach((fn) => fn(value));
+}
+
+function active(): boolean {
+  return alertListeners.size + stateListeners.size > 0;
+}
+
+function connect() {
+  timer = undefined;
+  const token = getToken();
+  if (!token || refused || !active()) return;
+  const socket = new WebSocket(wsUrl("/ws/alerts"));
+  ws = socket;
+  socket.onopen = () => socket.send(JSON.stringify({ token }));
+  socket.onmessage = (ev) => {
+    let msg: unknown;
+    try {
+      msg = JSON.parse(String(ev.data));
+    } catch {
+      return;
+    }
+    if (msg && typeof msg === "object" && "type" in msg && (msg as { type: string }).type === "ready") {
+      setConnected(true);
+      readyAt = Date.now();
+      return;
+    }
+    if (msg && typeof msg === "object" && "id" in msg) {
+      for (const fn of [...alertListeners]) {
         try {
-          msg = JSON.parse(String(ev.data));
-        } catch {
-          return;
+          fn(msg as Alert);
+        } catch (err) {
+          console.error("live alert listener failed", err); // one bad listener must not starve the rest
         }
-        if (msg && typeof msg === "object" && "type" in msg && (msg as { type: string }).type === "ready") {
-          setConnected(true);
-          retry = 1000;
-          return;
-        }
-        if (msg && typeof msg === "object" && "id" in msg) handler.current(msg as Alert);
-      };
-      ws.onclose = (ev) => {
-        setConnected(false);
-        if (stopped || ev.code === 4401) return; // not authorised: don't hammer the server
-        timer = setTimeout(connect, retry);
-        retry = Math.min(retry * 2, 30_000);
-      };
-    };
+      }
+    }
+  };
+  socket.onclose = (ev) => {
+    if (ws !== socket) return; // an older socket closing after a reconnect
+    ws = null;
+    setConnected(false);
+    if (ev.code === 4401) {
+      refused = true;
+      setToken(null); // same as an HTTP 401: back to the login page
+      return;
+    }
+    if (!active()) return;
+    if (readyAt && Date.now() - readyAt >= STABLE_MS) retry = 1000;
+    readyAt = 0;
+    timer = setTimeout(connect, retry);
+    retry = Math.min(retry * 2, 30_000);
+  };
+}
 
-    connect();
+function ensureOpen() {
+  if (!ws && !timer) connect();
+}
+
+function maybeClose() {
+  if (active()) return;
+  closeNow();
+  retry = 1000;
+  refused = false;
+}
+
+function closeNow() {
+  if (timer) clearTimeout(timer);
+  timer = undefined;
+  const socket = ws;
+  ws = null;
+  readyAt = 0;
+  setConnected(false);
+  socket?.close();
+}
+
+// A different token means a different user (or none): never keep a socket opened for the old one.
+let lastToken = getToken();
+onTokenChange(() => {
+  const token = getToken();
+  if (token === lastToken) return;
+  lastToken = token;
+  closeNow();
+  retry = 1000;
+  refused = false;
+  if (token && active()) connect();
+});
+
+/** Whether the shared live feed is connected (opens it while mounted). */
+export function useLiveStatus(): boolean {
+  const [state, setState] = useState(connected);
+  useEffect(() => {
+    stateListeners.add(setState);
+    setState(connected);
+    ensureOpen();
     return () => {
-      stopped = true;
-      if (timer) clearTimeout(timer);
-      ws?.close();
+      stateListeners.delete(setState);
+      maybeClose();
     };
   }, []);
+  return state;
+}
 
-  return connected;
+/** Call `onAlert` for every live alert. Returns whether the feed is connected. */
+export function useLiveAlerts(onAlert: AlertListener): boolean {
+  const handler = useRef(onAlert);
+  handler.current = onAlert;
+  const state = useLiveStatus();
+  useEffect(() => {
+    const fn: AlertListener = (a) => handler.current(a);
+    alertListeners.add(fn);
+    ensureOpen();
+    return () => {
+      alertListeners.delete(fn);
+      maybeClose();
+    };
+  }, []);
+  return state;
 }

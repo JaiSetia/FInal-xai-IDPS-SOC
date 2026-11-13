@@ -218,6 +218,47 @@ def test_audit_filters_and_pagination(client, admin_headers, analyst_headers, se
     assert client.get("/admin/audit?limit=501", headers=admin_headers).status_code == 422
 
 
+def test_audit_filters_by_several_actions(client, admin_headers, analyst_headers, sensor_headers):
+    (a,) = ingest(client, sensor_headers, alert_payload())
+    client.patch(f"/alerts/{a}", json={"status": "acknowledged"}, headers=analyst_headers)
+    everything = client.get("/admin/audit?limit=500", headers=admin_headers).json()["items"]
+    assert {"ingest_alerts", "alert_status"} <= {e["action"] for e in everything}
+
+    both = client.get("/admin/audit?action=ingest_alerts&action=alert_status&limit=500",
+                      headers=admin_headers).json()["items"]
+    assert {e["action"] for e in both} == {"ingest_alerts", "alert_status"}
+    assert len(both) == sum(e["action"] in ("ingest_alerts", "alert_status") for e in everything)
+
+    single = client.get("/admin/audit?action=alert_status", headers=admin_headers).json()["items"]
+    assert single and {e["action"] for e in single} == {"alert_status"}
+
+    other = client.get("/admin/audit?action=ingest_alerts&action=no_such_action",
+                       headers=admin_headers).json()["items"]
+    assert {e["action"] for e in other} == {"ingest_alerts"}
+
+
+def test_audit_blank_action_values_are_ignored(client, admin_headers, analyst_headers, sensor_headers):
+    (a,) = ingest(client, sensor_headers, alert_payload())
+    client.patch(f"/alerts/{a}", json={"status": "acknowledged"}, headers=analyst_headers)
+    plain = client.get("/admin/audit?limit=500", headers=admin_headers).json()["items"]
+    blank = client.get("/admin/audit?limit=500&action=", headers=admin_headers)
+    assert blank.status_code == 200
+    assert [e["id"] for e in blank.json()["items"]] == [e["id"] for e in plain]
+    assert {e["action"] for e in plain} > {"ingest_alerts"}  # the log really holds other kinds
+
+    mixed = client.get("/admin/audit?limit=500&action=&action=ingest_alerts", headers=admin_headers)
+    assert mixed.status_code == 200
+    items = mixed.json()["items"]
+    assert items and {e["action"] for e in items} == {"ingest_alerts"}
+
+
+def test_audit_action_filter_is_capped_at_20_values(client, admin_headers):
+    twenty = "&".join(f"action=a{i}" for i in range(20))
+    assert client.get(f"/admin/audit?{twenty}", headers=admin_headers).status_code == 200
+    twenty_one = "&".join(f"action=a{i}" for i in range(21))
+    assert client.get(f"/admin/audit?{twenty_one}", headers=admin_headers).status_code == 422
+
+
 def test_password_hash_column_is_never_exposed(client, admin_headers, soc_app):
     with soc_app.state.session_factory() as db:
         hashes = [u.password_hash for u in db.query(User)]

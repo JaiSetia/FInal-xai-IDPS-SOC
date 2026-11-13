@@ -28,7 +28,7 @@ function rows(explanation: unknown): Row[] {
 }
 
 /** Horizontal bars of the top feature contributions (SHAP or LIME), centred on zero.
- *  Red pushes toward the predicted class, blue away from it. */
+ *  Orange pushes toward the predicted class, blue away from it. */
 export default function ExplanationChart({ explanation }: { explanation: Explanation | unknown }) {
   const features = rows(explanation);
   if (features.length === 0) return <p className="muted">No explanation was sent with this alert.</p>;
@@ -36,14 +36,19 @@ export default function ExplanationChart({ explanation }: { explanation: Explana
   const method = str(e.method);
   const cls = str(e.predicted_class);
   const space = str(e.output_space);
+  const base = finite(e.base_value);
+  const confidence = finite(e.confidence);
   const max = Math.max(...features.map((f) => Math.abs(f.contribution)), 1e-9);
 
   return (
     <div>
       <p className="muted" style={{ marginTop: 0 }}>
-        {method ? method.toUpperCase() : "Explanation"}{cls ? ` of “${cls}”` : ""}
-        {space ? ` (contributions in ${space.replace(/_/g, " ")})` : ""}.
-        Red pushes toward this class, blue away from it.
+        {method ? `${method.toUpperCase()}: top` : "Top"} {features.length} feature{features.length === 1 ? "" : "s"} behind
+        the decision{cls ? <> for <b style={{ color: "var(--text)" }}>{cls}</b></> : null}.
+        {space && <> Contributions in {space.replace(/_/g, " ")}.</>}
+        {base !== null && <> Base value {num(base, 3)}</>}
+        {base !== null && confidence !== null && <> → confidence {(confidence * 100).toFixed(2)}%</>}
+        {base !== null && "."}
       </p>
       {features.map((f, i) => {
         const c = f.contribution;
@@ -57,10 +62,14 @@ export default function ExplanationChart({ explanation }: { explanation: Explana
               <div className="shap-axis" />
               <div className={`shap-bar ${c >= 0 ? "pos" : "neg"}`} style={{ width }} />
             </div>
-            <span className="mono" style={{ textAlign: "right" }}>{c >= 0 ? "+" : ""}{num(c, 3)}</span>
+            <span className="mono" style={{ textAlign: "right", fontWeight: 600 }}>{c >= 0 ? "+" : ""}{num(c, 3)}</span>
           </div>
         );
       })}
+      <div className="row-actions muted small-text" style={{ gap: 16, marginTop: 10 }}>
+        <span><span aria-hidden="true" style={{ color: "var(--pos)" }}>■</span> pushes towards {cls ?? "this class"}</span>
+        <span><span aria-hidden="true" style={{ color: "var(--neg)" }}>■</span> pushes away</span>
+      </div>
     </div>
   );
 }

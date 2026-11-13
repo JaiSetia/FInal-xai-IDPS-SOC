@@ -1,70 +1,101 @@
 import { lazy, Suspense } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth } from "./auth";
+import { Pill } from "./components/common";
 import ErrorBoundary from "./components/ErrorBoundary";
-import Actions from "./pages/Actions";
+import { useLiveStatus } from "./live";
 import Assistant from "./pages/Assistant";
 import Admin from "./pages/Admin";
 import AlertDetail from "./pages/AlertDetail";
 import Alerts from "./pages/Alerts";
-import Blocks from "./pages/Blocks";
-import CaseDetail from "./pages/CaseDetail";
 import Cases from "./pages/Cases";
 import Login from "./pages/Login";
+import Response from "./pages/Response";
 
-// The charting library is large, so the metrics page loads on demand.
-const Metrics = lazy(() => import("./pages/Metrics"));
-// Map libraries are large too.
-const WorldMap = lazy(() => import("./pages/WorldMap"));
-const TopologyMap = lazy(() => import("./pages/TopologyMap"));
+// The map libraries are large, so those pages load on demand.
+const ThreatCenter = lazy(() => import("./pages/ThreatCenter"));
+const Maps = lazy(() => import("./pages/Maps"));
+
+function Shield() {
+  return (
+    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+      strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6l8-3z" />
+      <path d="M9 12l2 2 4-4" />
+    </svg>
+  );
+}
+
+function LiveBadge() {
+  const live = useLiveStatus();
+  return live
+    ? <Pill tone="ok" round dot>Live feed</Pill>
+    : <Pill tone="neutral" round dot>Live feed offline</Pill>;
+}
+
+const loading = <p className="muted">Loading…</p>;
+
+/** Redirect an old address, keeping its query string (e.g. /blocks?ip=… → /response?ip=…). */
+function Redirect({ to, add = {} }: { to: string; add?: Record<string, string> }) {
+  const { search } = useLocation();
+  const params = new URLSearchParams(search);
+  for (const [k, v] of Object.entries(add)) params.set(k, v);
+  const qs = params.toString();
+  return <Navigate to={qs ? `${to}?${qs}` : to} replace />;
+}
 
 export default function App() {
-  const { me, loading, logout } = useAuth();
+  const { me, loading: authLoading, logout } = useAuth();
   const location = useLocation();
 
-  if (loading) return <p className="muted" style={{ padding: 24 }}>Loading…</p>;
+  if (authLoading) return <p className="muted" style={{ padding: 24 }}>Loading…</p>;
   if (!me) return <Login />;
 
   return (
     <div className="app">
-      <aside className="sidebar">
-        <div className="brand">IDPS SOC<small>XAI intrusion detection</small></div>
-        <nav className="nav" aria-label="Main">
-          <NavLink to="/alerts">Alerts</NavLink>
-          <NavLink to="/assistant">Assistant</NavLink>
-          <NavLink to="/actions">Actions</NavLink>
-          <NavLink to="/blocks">Blocks</NavLink>
-          <NavLink to="/cases">Cases</NavLink>
-          <NavLink to="/metrics">Metrics</NavLink>
-          <NavLink to="/map">Attack map</NavLink>
-          <NavLink to="/topology">Topology</NavLink>
-          {me.role === "admin" && <NavLink to="/admin">Admin</NavLink>}
-        </nav>
-        <div className="spacer" />
-        <div className="userbox">
-          Signed in as <b>{me.username}</b> ({me.role})
-          <div><button style={{ marginTop: 6 }} onClick={logout}>Sign out</button></div>
-        </div>
-      </aside>
-      <main>
-        <ErrorBoundary resetKey={location.pathname}>
-        <Routes>
-          <Route path="/" element={<Navigate to="/alerts" replace />} />
-          <Route path="/alerts" element={<Alerts />} />
-          <Route path="/alerts/:id" element={<AlertDetail />} />
-          <Route path="/actions" element={<Actions />} />
-          <Route path="/assistant" element={<Assistant />} />
-          <Route path="/blocks" element={<Blocks />} />
-          <Route path="/cases" element={<Cases />} />
-          <Route path="/cases/:id" element={<CaseDetail />} />
-          <Route path="/metrics" element={<Suspense fallback={<p className="muted">Loading…</p>}><Metrics /></Suspense>} />
-          <Route path="/map" element={<Suspense fallback={<p className="muted">Loading…</p>}><WorldMap /></Suspense>} />
-          <Route path="/topology" element={<Suspense fallback={<p className="muted">Loading…</p>}><TopologyMap /></Suspense>} />
-          {me.role === "admin" && <Route path="/admin" element={<Admin />} />}
-          <Route path="*" element={<p className="muted">Page not found.</p>} />
-        </Routes>
-        </ErrorBoundary>
-      </main>
+      <div className="shell">
+        <header className="topbar">
+          <div className="brand"><Shield />IDPS SOC</div>
+          <nav className="nav" aria-label="Main">
+            <NavLink to="/" end>Dashboard</NavLink>
+            <NavLink to="/alerts">Alerts</NavLink>
+            <NavLink to="/response">Response</NavLink>
+            <NavLink to="/cases">Cases</NavLink>
+            <NavLink to="/maps">Maps</NavLink>
+            <NavLink to="/assistant">Assistant</NavLink>
+            {me.role === "admin" && <NavLink to="/admin">Admin</NavLink>}
+          </nav>
+          <div className="topbar-status">
+            <LiveBadge />
+            <div className="userbox">
+              <span><b>{me.username}</b> ({me.role})</span>
+              <button type="button" onClick={logout}>Sign out</button>
+            </div>
+          </div>
+        </header>
+        <main>
+          <ErrorBoundary resetKey={location.pathname + location.search}>
+            <Routes>
+              <Route path="/" element={<Suspense fallback={loading}><ThreatCenter /></Suspense>} />
+              <Route path="/alerts" element={<Alerts />} />
+              <Route path="/alerts/:id" element={<AlertDetail />} />
+              <Route path="/response" element={<Response />} />
+              <Route path="/assistant" element={<Assistant />} />
+              <Route path="/cases" element={<Cases />} />
+              <Route path="/cases/:id" element={<Cases />} />
+              <Route path="/maps" element={<Suspense fallback={loading}><Maps /></Suspense>} />
+              {/* Old addresses, kept so bookmarks and links in docs still work. */}
+              <Route path="/metrics" element={<Redirect to="/" />} />
+              <Route path="/blocks" element={<Redirect to="/response" />} />
+              <Route path="/actions" element={<Redirect to="/response" />} />
+              <Route path="/map" element={<Redirect to="/maps" add={{ view: "world" }} />} />
+              <Route path="/topology" element={<Redirect to="/maps" />} />
+              {me.role === "admin" && <Route path="/admin" element={<Admin />} />}
+              <Route path="*" element={<p className="muted">Page not found.</p>} />
+            </Routes>
+          </ErrorBoundary>
+        </main>
+      </div>
     </div>
   );
 }

@@ -27,7 +27,7 @@ function matches(a: Alert, f: Filters): boolean {
 export default function Alerts() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const initial: Filters = { ...EMPTY, ip: params.get("ip") ?? "" };
+  const initial: Filters = { ...EMPTY, ip: params.get("ip") ?? "", predicted_class: params.get("class") ?? "" };
   const [draft, setDraft] = useState<Filters>(initial);
   const [filters, setFilters] = useState<Filters>(initial);
   const [fresh, setFresh] = useState<Set<number>>(new Set());

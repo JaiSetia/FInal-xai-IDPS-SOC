@@ -2,7 +2,8 @@
 tool and fills in validated arguments, it never writes SQL or reaches anything else.
 
 Read-only tools return SOC data. The only tool that changes anything, propose_block, creates a
-PENDING action that does nothing until an analyst confirms it on the Actions page.
+PENDING action that does nothing until an analyst confirms it in the action queue on the
+Response page.
 """
 
 import json
@@ -35,11 +36,11 @@ MAX_RESULT_CHARS = 20_000
 
 # Each playbook covers one attack family; the model asks by the predicted class name.
 PLAYBOOKS = {
-    "portscan": "portscan.md",
+    "portscan": "portscan.md", "port scan": "portscan.md",
     "ddos": "dos.md", "dos": "dos.md", "dos hulk": "dos.md", "dos goldeneye": "dos.md",
     "dos slowloris": "dos.md", "dos slowhttptest": "dos.md",
     "ftp-patator": "brute-force.md", "ssh-patator": "brute-force.md", "brute force": "brute-force.md",
-    "web attack": "web-attack.md", "web attack - brute force": "web-attack.md",
+    "web attack": "web-attack.md", "web attacks": "web-attack.md", "web attack - brute force": "web-attack.md",
     "web attack - xss": "web-attack.md", "web attack - sql injection": "web-attack.md",
     "bot": "bot.md", "infiltration": "infiltration.md", "heartbleed": "heartbleed.md",
 }
@@ -123,8 +124,9 @@ TOOL_SPECS: list[tuple[str, str, type[_Args]]] = [
      "'SSH-Patator', 'Web Attack - XSS'): what it is, MITRE ATT&CK mapping, how to confirm it, "
      "containment and remediation steps. Use it when recommending fixes."), PlaybookArgs),
     ("propose_block", ("Propose blocking an IP address. This only creates a PENDING request; "
-     "nothing is blocked until an analyst confirms it on the Actions page. Give the alert_id it "
-     "came from when there is one (the sensor is taken from it), and a short reason."),
+     "nothing is blocked until an analyst confirms it in the action queue on the Response page. "
+     "Give the alert_id it came from when there is one (the sensor is taken from it), "
+     "and a short reason."),
      ProposeBlockArgs),
 ]
 
@@ -270,8 +272,8 @@ def _propose_block(db: Session, a: ProposeBlockArgs, user: User, settings: SocSe
           {"ip": a.ip, "alert_id": a.alert_id, "sensor_id": sensor_id})
     db.commit()
     return {"action_id": action.id, "status": "pending", "ip": a.ip, "sensor_id": sensor_id,
-            "note": "Created as PENDING. Nothing is blocked until an analyst confirms it on the "
-                    "Actions page."}
+            "note": "Created as PENDING. Nothing is blocked until an analyst confirms it in the "
+                    "action queue on the Response page."}
 
 
 _HANDLERS = {
