@@ -50,6 +50,7 @@ services:
       dockerfile: lab/sensor/Dockerfile
     container_name: idps-sensor
     hostname: sensor
+    init: true   # reap exited children (start.sh ends in `sleep infinity`, which doesn't)
     cap_add: [NET_ADMIN, NET_RAW]
     sysctls:
       net.ipv4.ip_forward: "1"

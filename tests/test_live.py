@@ -771,6 +771,44 @@ def test_header_errors_do_not_quote_the_token(monkeypatch):
     assert "SECRET1" not in str(caught.value) and "SECRET1" not in repr(caught.value.__cause__)
 
 
+def _ignores_sigterm(ready):  # top level, so the spawn start method can import it
+    import signal as _signal
+    import time as _time
+
+    _signal.signal(_signal.SIGTERM, _signal.SIG_IGN)
+    ready.set()
+    while True:
+        _time.sleep(0.1)
+
+
+def test_stop_capture_processes_kills_a_child_that_ignores_sigterm():
+    import multiprocessing as mp
+
+    from idps.live.__main__ import stop_capture_processes
+
+    ctx = mp.get_context("spawn")
+    ready = ctx.Event()
+    proc = ctx.Process(target=_ignores_sigterm, args=(ready,), daemon=True)
+    proc.start()
+    assert ready.wait(30), "child did not start"
+    started = time.monotonic()
+    assert stop_capture_processes(timeout=0.5) == 1
+    assert not proc.is_alive()
+    assert time.monotonic() - started < 5  # terminate, wait 0.5 s, kill: not forever
+
+
+def test_live_mode_stops_capture_processes_on_the_way_out(model_file, tmp_path, monkeypatch):
+    import idps.live.__main__ as cli
+
+    calls = []
+    monkeypatch.setattr(cli, "stop_capture_processes", lambda *a, **k: calls.append(1) or 0)
+    monkeypatch.setattr("idps.capture.flows_from_interface", lambda *a, **k: iter(()))
+    out = tmp_path / "alerts.jsonl"
+    assert cli.main(["--interface", "lab0", "--no-heartbeat", "--model", str(model_file),
+                     "--alerts-file", str(out)]) == 0
+    assert calls == [1]
+
+
 def test_startup_errors_of_the_capture_exit_2_and_close_the_sink(model_file, tmp_path, monkeypatch, capsys):
     import idps.live.__main__ as cli
 

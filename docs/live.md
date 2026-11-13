@@ -280,8 +280,10 @@ deterministic.
   flow arrives, so it can be a single row.
 * **Collector log text:** in the cloud collector, `CollectorError` is now an alias of `SocError`,
   so S3 failures are logged as `SocError`. Its behaviour is unchanged.
-* **The reader thread can outlive shutdown** in live capture, because it is blocked inside
-  NFStream. Flows NFStream is still tracking at that moment are never scored.
+* **Flows NFStream is still tracking at shutdown are never scored.** On the way out the loop
+  stops NFStream's capture process itself (SIGTERM, then SIGKILL after 2 s), because that process
+  ignores SIGTERM and Python would otherwise wait for it forever at exit. Before this fix a live
+  run with `--duration` stopped detecting on time but never exited (found in the lab, 12 Nov).
 * **Redirects from the SOC URL are retried forever** as "SOC unavailable" instead of being
   reported as a configuration error. Fix the URL.
 * **`live_alerts.jsonl` is not rotated.** Rotate it with logrotate or a similar tool on long runs.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import multiprocessing
 import os
 import signal
 import sys
@@ -20,6 +21,27 @@ SOC_SEND_TIMEOUT = 5.0  # seconds; the sender thread waits this long per POST, d
 
 
 ACTION_STOP_TIMEOUT = 15.0  # a round in progress finishes its current request, then stops
+CAPTURE_STOP_TIMEOUT = 2.0  # per capture process: SIGTERM, then SIGKILL after this long
+
+
+def stop_capture_processes(timeout: float = CAPTURE_STOP_TIMEOUT) -> int:
+    """Stop the capture's child processes (NFStream's meters) and return how many there were.
+
+    NFStream's meter survives SIGTERM while it waits on the interface, and at exit Python's
+    multiprocessing terminates its daemon children and then waits for them, forever. A live run
+    with --duration (or a signal) therefore stopped detecting on time but never exited. So the
+    loop stops them itself: terminate, wait `timeout`, then kill. Nothing else in the loop starts
+    child processes."""
+    children = multiprocessing.active_children()
+    for proc in children:
+        proc.terminate()
+    for proc in children:
+        proc.join(timeout)
+        if proc.is_alive():
+            log.warning("capture process %s ignored SIGTERM; killing it", proc.pid)
+            proc.kill()
+            proc.join(timeout)
+    return len(children)
 
 
 def _fail(message: str, code: int = 2) -> int:
@@ -197,6 +219,8 @@ def run(args: argparse.Namespace) -> int:
         if poller is not None:
             poller.stop(timeout=ACTION_STOP_TIMEOUT)  # before the sink closes: it queues block events
         sink.close()
+        if args.interface:
+            stop_capture_processes()  # or the process never exits (see the function)
         for s, handler in previous.items():
             signal.signal(s, handler)
     return code
