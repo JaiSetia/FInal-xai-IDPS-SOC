@@ -5,6 +5,7 @@
     "random_repeats": 20,
     "seed": 0,
     "model": "xgboost",
+    "model_sha256": "1b4dcb8ced56041b67440a68bc573e01aeb011523e3a8a8a8eab72f409881696",
     "baseline": "median of background sample",
     "background_rows": 200,
     "lime_samples": 1000,

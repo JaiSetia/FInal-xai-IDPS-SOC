@@ -51,9 +51,20 @@ Things decided along the way:
 - "Can I trust it?" (Alert detail): model-level SHAP/LIME deletion-test numbers, sent in the sensor
   status from `IDPS_FAITHFULNESS_REPORT`, with a verdict per method (≥2× better than random = ok).
   Bad results (null or negative ratios) are shown, not dropped. The model match is by file checksum
-  (`model_check: "digest"`) for reports written after 14 Nov 2026; the existing
-  `reports/friday_xgboost_faithfulness.json` predates that and only matches by algorithm name, so
-  re-run `python -m idps.explain faithfulness` to get the checksum.
+  (`model_check: "digest"`); `reports/friday_xgboost_faithfulness.json` was re-run on 14 Nov 2026
+  (same numbers, now with `model_sha256`).
+- Lab check (14 Nov 2026, rebuilt sensor + SOC, isolation checks passed; port scan from the
+  attacker, `models/friday_xgboost.joblib`):
+  - Dry-run: 1,024 flows → 1,024 PortScan alerts accepted by the SOC, 1 would-block sent, status
+    every 30 s, no errors; SHAP p50 0.20 ms / p95 0.57 ms; flow end → alert ≈ 121 s.
+  - Blocking (60 s and 300 s TTL): 1 real block, no would-block events; the attacker's port 22
+    showed "filtered" during the block and "open" after it expired.
+  - Dashboard against the lab SOC: "Blocking ON" badge, sensor health (online, model, heartbeat,
+    allowlist), policy and both allowlists on Response, Admin last seen, firewall card with the
+    countdown, "blocked · auto" in live alerts, the timeline's block and its end, the trust card
+    matched by checksum with SHAP marked "used for this alert". All matched what the sensor did.
+  - Known: about 200 alerts per 1,024-flow scan go out without SHAP (cap of 50 explanations per
+    batch), so their trust card highlights no method.
 - The old Metrics page's "by severity" table and alerts-over-time chart are gone with it;
   `recharts` is now unused but kept for the Phase 4 traffic chart.
 
