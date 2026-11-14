@@ -99,6 +99,9 @@ services:
       IDPS_SOC_BLOCK_ALLOWLIST: 10.10.1.1,10.10.1.2,10.10.2.0/24,10.10.3.0/24
       # Made-up, clearly labelled map locations for the lab's private addresses.
       IDPS_SOC_GEO_DEMO: ${LAB_SOC_GEO_DEMO:-false}
+      # Real locations for public addresses: the MaxMind GeoLite2 City file, copied into the
+      # SOC's volume (it can't be mounted from ~/Desktop and must not go in the image or git).
+      IDPS_SOC_GEOIP_DB: ${LAB_SOC_GEOIP_DB:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import ssl,urllib.request; urllib.request.urlopen('https://127.0.0.1:8443/health', context=ssl.create_default_context(cafile='/run/idps-soc/ca.pem'), timeout=2)"]
       interval: 3s

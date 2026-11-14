@@ -36,3 +36,7 @@ crash.log
 crash.*.log
 # Cloud collector local state (checkpoint, block state, unsent alerts)
 cloud_state/
+
+# MaxMind GeoLite2 database (licence forbids redistribution)
+data/geoip/
+*.mmdb

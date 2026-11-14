@@ -68,6 +68,20 @@ docker compose exec sensor cat /run/idps-soc/ca.pem > /tmp/lab-soc-ca.pem
 cd ../soc/web && NODE_EXTRA_CA_CERTS=/tmp/lab-soc-ca.pem IDPS_SOC_API=https://127.0.0.1:8443 npm run dev
 ```
 
+### Real map locations (optional)
+
+Lab addresses are private, so the map places them only with `LAB_SOC_GEO_DEMO=true` (made-up,
+labelled "Demo" locations). Public addresses (a replayed CIC-IDS2017 capture, for example) are
+placed with MaxMind's free GeoLite2 City database. Put `MAXMIND_ACCOUNT_ID` and
+`MAXMIND_LICENSE_KEY` in `.env`, download the file into `../data/geoip/` (git-ignored; the licence
+forbids redistributing it), then copy it into the SOC's volume:
+
+```sh
+docker compose cp ../data/geoip/GeoLite2-City.mmdb soc:/var/lib/idps-soc/GeoLite2-City.mmdb
+echo 'LAB_SOC_GEOIP_DB=/var/lib/idps-soc/GeoLite2-City.mmdb' >> .env
+docker compose up -d soc && ./check_isolation.sh
+```
+
 ## Running detection on the sensor
 
 `live.sh` runs `python -m idps.live` with the SOC's address, CA and token, so alerts and
