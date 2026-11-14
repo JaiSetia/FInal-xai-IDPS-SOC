@@ -232,3 +232,32 @@ export interface WouldBlock {
   at: string;
   ttl_seconds: number | null;
 }
+
+// --- Live map: extra fields and messages on /ws/alerts ------------------------------------
+
+export interface GeoLocation {
+  lat: number;
+  lon: number;
+  country: string | null;
+  city: string | null;
+  /** "demo": a made-up location for a private (lab) address, never a real one. */
+  source: "geoip" | "demo";
+}
+
+/** An alert as the live feed sends it: the stored alert plus its source's map location. */
+export interface LiveAlert extends Alert {
+  src_geo?: GeoLocation | null;
+}
+
+export interface LiveBlockEvent {
+  type: "block";
+  event: "blocked" | "unblocked" | "would_block";
+  sensor_id: number;
+  ip: string;
+  source: "auto" | "analyst";
+  at: string;
+  expires_at: string | null;
+  ttl_seconds: number | null;
+  reason: string;
+  geo: GeoLocation | null;
+}

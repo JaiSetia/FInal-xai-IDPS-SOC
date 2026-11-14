@@ -13,7 +13,7 @@ vi.mock("../sensors", async (orig) => ({
   ...(await orig<typeof import("../sensors")>()),
   useSensors: () => ({ data: sens.data, error: null }),
 }));
-vi.mock("../live", () => ({ useLiveStatus: () => false, useLiveAlerts: () => false }));
+vi.mock("../live", () => ({ useLiveStatus: () => false, useLiveAlerts: () => false, useLiveBlocks: () => false }));
 vi.mock("../pages/ThreatCenter", () => ({ default: () => <div>threat-center-stub</div> }));
 vi.mock("../pages/Maps", () => ({ default: () => {
   const l = useLocation();

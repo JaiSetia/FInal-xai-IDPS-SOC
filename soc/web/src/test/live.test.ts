@@ -1,7 +1,7 @@
 import { StrictMode, createElement } from "react";
 import { act, render, renderHook } from "@testing-library/react";
 import { getToken, setToken } from "../api/client";
-import { useLiveAlerts, useLiveStatus } from "../live";
+import { useLiveAlerts, useLiveBlocks, useLiveStatus } from "../live";
 
 class FakeWS {
   static all: FakeWS[] = [];
@@ -204,5 +204,92 @@ describe("shared live socket", () => {
     a.unmount();
     act(() => { vi.advanceTimersByTime(60_000); });
     expect(FakeWS.all).toHaveLength(1);
+  });
+});
+
+describe("live block events", () => {
+  const ev = (o: Record<string, unknown> = {}) => ({
+    type: "block", event: "blocked", sensor_id: 1, ip: "1.2.3.4", source: "auto", at: "2026-01-01T00:00:00Z",
+    expires_at: null, ttl_seconds: 900, reason: "scan", geo: null, ...o,
+  });
+
+  it("goes to block listeners only, not alert listeners", () => {
+    const onAlert = vi.fn(), onBlock = vi.fn();
+    const a = renderHook(() => useLiveAlerts(onAlert));
+    const b = renderHook(() => useLiveBlocks(onBlock));
+    act(() => { FakeWS.all[0].msg(ev()); });
+    expect(onBlock).toHaveBeenCalledTimes(1);
+    expect(onBlock).toHaveBeenCalledWith(ev());
+    expect(onAlert).not.toHaveBeenCalled();
+    a.unmount(); b.unmount();
+  });
+
+  it.each(["blocked", "unblocked", "would_block"])("delivers %s events", (event) => {
+    const onBlock = vi.fn();
+    const b = renderHook(() => useLiveBlocks(onBlock));
+    act(() => { FakeWS.all[0].msg(ev({ event })); });
+    expect(onBlock.mock.calls[0][0].event).toBe(event);
+    b.unmount();
+  });
+
+  it("alerts do not reach block listeners and are unchanged", () => {
+    const onAlert = vi.fn(), onBlock = vi.fn();
+    const a = renderHook(() => useLiveAlerts(onAlert));
+    const b = renderHook(() => useLiveBlocks(onBlock));
+    act(() => { FakeWS.all[0].msg({ id: 9, src_ip: "1.1.1.1" }); });
+    expect(onAlert).toHaveBeenCalledWith({ id: 9, src_ip: "1.1.1.1" });
+    expect(onBlock).not.toHaveBeenCalled();
+    a.unmount(); b.unmount();
+  });
+
+  it("a message with type block is not treated as an alert even if it has an id", () => {
+    const onAlert = vi.fn(), onBlock = vi.fn();
+    const a = renderHook(() => useLiveAlerts(onAlert));
+    const b = renderHook(() => useLiveBlocks(onBlock));
+    act(() => { FakeWS.all[0].msg(ev({ id: 5 })); });
+    expect(onAlert).not.toHaveBeenCalled();
+    expect(onBlock).toHaveBeenCalledTimes(1);
+    a.unmount(); b.unmount();
+  });
+
+  it("a throwing block listener does not stop the others", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const bad = vi.fn(() => { throw new Error("boom"); }), good = vi.fn();
+    const a = renderHook(() => useLiveBlocks(bad));
+    const b = renderHook(() => useLiveBlocks(good));
+    act(() => { FakeWS.all[0].msg(ev()); });
+    expect(bad).toHaveBeenCalled();
+    expect(good).toHaveBeenCalledTimes(1);
+    expect(err).toHaveBeenCalled();
+    a.unmount(); b.unmount();
+    err.mockRestore();
+  });
+
+  it("a block listener alone keeps the socket open and closes it on unmount", () => {
+    const b = renderHook(() => useLiveBlocks(() => {}));
+    expect(FakeWS.all).toHaveLength(1);
+    expect(FakeWS.all[0].closed).toBe(false);
+    b.unmount();
+    expect(FakeWS.all[0].closed).toBe(true);
+  });
+
+  it("the socket stays open while only the block listener remains", () => {
+    const a = renderHook(() => useLiveAlerts(() => {}));
+    const b = renderHook(() => useLiveBlocks(() => {}));
+    a.unmount();
+    expect(FakeWS.all[0].closed).toBe(false);
+    b.unmount();
+    expect(FakeWS.all[0].closed).toBe(true);
+  });
+
+  it("uses the latest callback without resubscribing", () => {
+    const first = vi.fn(), second = vi.fn();
+    const b = renderHook(({ fn }) => useLiveBlocks(fn), { initialProps: { fn: first } });
+    b.rerender({ fn: second });
+    act(() => { FakeWS.all[0].msg(ev()); });
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(FakeWS.all).toHaveLength(1);
+    b.unmount();
   });
 });

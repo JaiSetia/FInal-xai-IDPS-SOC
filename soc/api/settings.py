@@ -100,6 +100,21 @@ class SocSettings(BaseSettings):
             raise ValueError(f"default_severity must be one of {SEVERITIES}")
         return value
 
+    @field_validator("geoip_db", "home_lat", "home_lon", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        # docker compose passes "" for an unset ${VAR:-}: that means "not configured".
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("home_label", mode="before")
+    @classmethod
+    def _blank_label_is_default(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return "Protected site"
+        return value
+
     @field_validator("block_allowlist", mode="before")
     @classmethod
     def _split_allowlist(cls, value: object) -> object:

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { Alert } from "./api/types";
-import { useLiveAlerts } from "./live";
+import { useLiveAlerts, useLiveBlocks } from "./live";
 
 const MAX_WAIT_MS = 5000;
 
@@ -13,9 +13,8 @@ export function useLiveRefresh(reload: () => void, onAlert?: (a: Alert) => void,
   const alertRef = useRef(onAlert);
   alertRef.current = onAlert;
 
-  const firstAt = useRef(0); // when the oldest not-yet-reloaded alert arrived
-  const live = useLiveAlerts(useCallback((a: Alert) => {
-    alertRef.current?.(a);
+  const firstAt = useRef(0); // when the oldest not-yet-reloaded event arrived
+  const schedule = useCallback(() => {
     if (timer.current) clearTimeout(timer.current);
     const now = Date.now();
     if (!firstAt.current) firstAt.current = now;
@@ -27,7 +26,13 @@ export function useLiveRefresh(reload: () => void, onAlert?: (a: Alert) => void,
       firstAt.current = 0;
       reloadRef.current();
     }, wait);
-  }, []));
+  }, []);
+  const live = useLiveAlerts(useCallback((a: Alert) => {
+    alertRef.current?.(a);
+    schedule();
+  }, [schedule]));
+  // A block, unblock or dry-run decision changes what the page shows too.
+  useLiveBlocks(schedule);
 
   useEffect(() => {
     const id = setInterval(() => reloadRef.current(), everyMs);

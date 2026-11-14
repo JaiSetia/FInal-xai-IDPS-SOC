@@ -23,6 +23,7 @@ from soc.api.common import (
     plain_text,
 )
 from soc.api.db import get_db
+from soc.api.geo import geo_out
 from soc.api.models import Alert, AlertStatus, Severity
 
 router = APIRouter(tags=["alerts"])
@@ -161,8 +162,11 @@ def ingest_alerts(batch: AlertBatch, sensor: Sensor, request: Request,
     audit(db, sensor, "ingest_alerts", f"sensor:{sensor.name}",
           {"received": len(batch.alerts), "stored": len(rows), "skipped_benign": skipped})
     db.commit()
+    locator = request.app.state.geo
+    # `src_geo` is only in the live message (not stored, not in GET /alerts): where the source is.
     request.app.state.broadcaster.publish_many(
-        [AlertOut.model_validate(r).model_dump(mode="json") for r in rows])
+        [AlertOut.model_validate(r).model_dump(mode="json") | {"src_geo": geo_out(locator, r.src_ip)}
+         for r in rows])
     return IngestResult(accepted=len(rows), skipped_benign=skipped, ids=[r.id for r in rows])
 
 

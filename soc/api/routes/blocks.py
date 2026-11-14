@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from soc.api.auth import AnyUser, Sensor
 from soc.api.common import Cursor, IPAddress, Limit, Page, audit, paginate, strip_unsafe
 from soc.api.db import get_db
+from soc.api.geo import GeoOut, geo_out
 from soc.api.models import Alert, Block, BlockSource, WouldBlock
 
 log = logging.getLogger("soc.api")
@@ -131,6 +132,22 @@ class BlockEvent(BaseModel):
         return self
 
 
+class BlockMessage(BaseModel):
+    """One block event on the live feed (`/ws/alerts`). It has no `id`, so clients written for
+    alert-only messages ignore it."""
+
+    type: Literal["block"] = "block"
+    event: Literal["blocked", "unblocked", "would_block"]
+    sensor_id: int
+    ip: str
+    source: BlockSource
+    at: datetime
+    expires_at: datetime | None
+    ttl_seconds: int | None
+    reason: str
+    geo: GeoOut | None
+
+
 class BlockBatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -179,6 +196,22 @@ def decision_time(decided_at: datetime | None, now: datetime) -> datetime:
     return min(decided_at, now)
 
 
+def _message(request: Request, sensor, ev: BlockEvent, at: datetime,
+             expires_at: datetime | None, ttl_seconds: int | None) -> BlockMessage:
+    return BlockMessage(event=ev.event, sensor_id=sensor.id, ip=ev.ip, source=ev.source, at=at,
+                        expires_at=expires_at, ttl_seconds=ttl_seconds, reason=ev.reason,
+                        geo=geo_out(request.app.state.geo, ev.ip))
+
+
+def _publish(request: Request, messages: list[BlockMessage]) -> None:
+    """Hand the messages to the live feed; a failure here never fails the committed ingest."""
+    try:
+        request.app.state.broadcaster.publish_many(
+            [m.model_dump(mode="json") for m in messages])
+    except Exception:
+        log.exception("could not publish block events to the live feed")
+
+
 @router.post("/ingest/blocks", response_model=BlockIngestResult, status_code=201)
 def ingest_blocks(batch: BlockBatch, sensor: Sensor, request: Request,
                   background: BackgroundTasks, db: Annotated[Session, Depends(get_db)]):
@@ -189,12 +222,15 @@ def ingest_blocks(batch: BlockBatch, sensor: Sensor, request: Request,
         if alert_ids - found:
             raise HTTPException(422, f"unknown alert_id(s): {sorted(alert_ids - found)}")
     blocked = unblocked = would = 0
+    messages: list[BlockMessage] = []
     for ev in batch.events:
         if ev.event == "would_block":  # never touches `blocks`: nothing is in the firewall
             db.add(WouldBlock(sensor_id=sensor.id, ip=ev.ip, reason=ev.reason, source=ev.source,
                               alert_id=ev.alert_id, at=decision_time(ev.decided_at, now),
                               ttl_seconds=ev.ttl_seconds))
             would += 1
+            at = decision_time(ev.decided_at, now)
+            messages.append(_message(request, sensor, ev, at, None, ev.ttl_seconds))
             continue
         active = list(db.scalars(select(Block).where(
             Block.sensor_id == sensor.id, Block.ip == ev.ip, active_clause(now))))
@@ -209,14 +245,20 @@ def ingest_blocks(batch: BlockBatch, sensor: Sensor, request: Request,
                 db.add(Block(sensor_id=sensor.id, ip=ev.ip, reason=ev.reason, source=ev.source,
                              alert_id=ev.alert_id, blocked_at=now, expires_at=expires))
             blocked += 1
+            ttl = ev.ttl_seconds or (max(round((expires - now).total_seconds()), 1)
+                                     if expires else None)
+            messages.append(_message(request, sensor, ev, now, expires, ttl))
         else:
             for b in active:
                 b.unblocked_at = now
             unblocked += len(active)
+            if active:  # an unblock that closed nothing changes nothing on the map
+                messages.append(_message(request, sensor, ev, now, None, None))
     audit(db, sensor, "ingest_blocks", f"sensor:{sensor.name}",
           {"events": len(batch.events), "blocked": blocked, "unblocked": unblocked,
            "would_block": would})
     db.commit()
+    _publish(request, messages)  # only after the commit, never for a refused batch
     background.add_task(prune_in_background, request.app, now)  # after the response
     return BlockIngestResult(blocked=blocked, unblocked=unblocked, would_block=would)
 

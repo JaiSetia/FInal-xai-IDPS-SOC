@@ -4,7 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import TopologyMap, { edgeWidth, limitGraph, roleOf } from "../pages/TopologyMap";
 
 const h = vi.hoisted(() => ({
-  api: vi.fn(), sim: vi.fn(), live: [] as { fn: () => void; ms: number | undefined }[],
+  api: vi.fn(), sim: vi.fn(), live: [] as { fn: () => void; ms: number | undefined; onAlert?: (a: unknown) => void }[],
   flow: null as null | Record<string, unknown>,
   nodes: [] as { id: string; selected?: boolean }[],
 }));
@@ -14,7 +14,7 @@ vi.mock("d3-force", async (orig) => {
 });
 vi.mock("../api/client", async (orig) => ({ ...(await orig<typeof import("../api/client")>()), api: h.api }));
 vi.mock("../useLiveRefresh", () => ({
-  useLiveRefresh: (fn: () => void, _a: unknown, ms?: number) => { h.live.push({ fn, ms }); return true; },
+  useLiveRefresh: (fn: () => void, onAlert?: (a: unknown) => void, ms?: number) => { h.live.push({ fn, ms, onAlert }); return true; },
 }));
 vi.mock("@xyflow/react", () => ({
   ReactFlow: ({ nodes, onNodeClick, onPaneClick, children, ...rest }: {
@@ -65,6 +65,8 @@ let topology: unknown;
 let blocks: unknown[];
 let blocksError: Error | null;
 let alertItems: unknown[];
+let markBlocks: unknown[];
+let markWould: unknown[];
 const calls = (prefix: string) => h.api.mock.calls.filter(([p]) => String(p).startsWith(prefix));
 
 beforeEach(() => {
@@ -72,6 +74,8 @@ beforeEach(() => {
   blocks = [];
   blocksError = null;
   alertItems = [{ id: 1, sensor_id: 4 }];
+  markBlocks = [];
+  markWould = [];
   h.sim.mockClear();
   h.live = [];
   h.flow = null;
@@ -79,6 +83,8 @@ beforeEach(() => {
   h.api.mockImplementation(async (path: string) => {
     if (path.startsWith("/topology")) return topology;
     if (path.startsWith("/alerts?ip=")) return { items: alertItems, total: alertItems.length };
+    if (path.startsWith("/blocks/would")) return { items: markWould, total: markWould.length, next_cursor: null };
+    if (path.startsWith("/blocks?active=true")) return { items: markBlocks, total: markBlocks.length, next_cursor: null };
     if (path.startsWith("/blocks?ip=")) {
       if (blocksError) throw blocksError;
       return { items: blocks, total: blocks.length };
@@ -546,5 +552,118 @@ describe("TopologyMap", () => {
     show();
     fireEvent.click(screen.getByRole("button", { name: "Open the world map" }));
     expect(onShowWorld).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("TopologyMap live pulses and block marks", () => {
+  const edgesOf = () => (h.flow!.edges as { id: string; className: string }[]);
+  const nodeOf = (ip: string) => h.nodes.find((n) => n.id === ip) as unknown as { className: string; ariaLabel: string };
+  const emit = (a: unknown) => act(() => { h.live.filter((l) => l.onAlert).at(-1)!.onAlert!(a); });
+  const iso = (ms: number) => new Date(Date.now() + ms).toISOString();
+  const blockRow = (ip: string, o: Record<string, unknown> = {}) => ({
+    id: 1, ip, sensor_id: 1, source: "auto", reason: "", alert_id: null, active: true,
+    blocked_at: iso(-1000), expires_at: iso(600_000), unblocked_at: null, ...o,
+  });
+  const wouldRow = (ip: string) => ({ id: 1, sensor_id: 1, ip, reason: "", source: "auto", alert_id: null, at: iso(-1000), ttl_seconds: 600 });
+  afterEach(() => vi.useRealTimers());
+
+  it("a live alert pulses its edge and both hosts for 3 s", async () => {
+    show();
+    await screen.findByLabelText(/^10\.0\.0\.1,/);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    emit({ id: 1, src_ip: "10.0.0.1", dst_ip: "10.0.0.2" });
+    expect(edgesOf().find((e) => e.id === "10.0.0.1->10.0.0.2")!.className).toContain("pulse");
+    expect(edgesOf().filter((e) => e.className.includes("pulse"))).toHaveLength(1);
+    expect(nodeOf("10.0.0.1").className).toContain("pulse");
+    expect(nodeOf("10.0.0.2").className).toContain("pulse");
+    expect(nodeOf("10.0.0.3").className).not.toContain("pulse");
+    expect(nodeOf("10.0.0.9").className).not.toContain("pulse");
+    act(() => { vi.advanceTimersByTime(2900); });
+    expect(nodeOf("10.0.0.1").className).toContain("pulse");
+    act(() => { vi.advanceTimersByTime(200); });
+    expect(nodeOf("10.0.0.1").className).not.toContain("pulse");
+    expect(nodeOf("10.0.0.2").className).not.toContain("pulse");
+    expect(edgesOf().some((e) => e.className.includes("pulse"))).toBe(false);
+  });
+
+  it("an alert between hosts that are not on the graph changes nothing", async () => {
+    show();
+    await screen.findByLabelText(/^10\.0\.0\.1,/);
+    emit({ id: 1, src_ip: "1.2.3.4", dst_ip: "5.6.7.8" });
+    expect(edgesOf().some((e) => e.className.includes("pulse"))).toBe(false);
+    expect(h.nodes.some((n) => (n as unknown as { className: string }).className.includes("pulse"))).toBe(false);
+  });
+
+  it("two alerts on the same host: the pulse stays until the last timer ends", async () => {
+    show();
+    await screen.findByLabelText(/^10\.0\.0\.1,/);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    emit({ id: 1, src_ip: "10.0.0.1", dst_ip: "10.0.0.2" });
+    act(() => { vi.advanceTimersByTime(2000); });
+    emit({ id: 2, src_ip: "10.0.0.1", dst_ip: "10.0.0.3" });
+    act(() => { vi.advanceTimersByTime(1500); }); // first timer done
+    expect(nodeOf("10.0.0.2").className).not.toContain("pulse");
+    expect(edgesOf().find((e) => e.id === "10.0.0.1->10.0.0.3")!.className).toContain("pulse");
+  });
+
+  it("pulse timers are cleared on unmount", async () => {
+    const { unmount } = show();
+    await screen.findByLabelText(/^10\.0\.0\.1,/);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    emit({ id: 1, src_ip: "10.0.0.1", dst_ip: "10.0.0.2" });
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("blocked and would-block hosts get classes and aria-label suffixes", async () => {
+    markBlocks = [blockRow("10.0.0.1")];
+    markWould = [wouldRow("10.0.0.2")];
+    show();
+    await waitFor(() => expect(nodeOf("10.0.0.1").className).toContain("blocked"));
+    expect(nodeOf("10.0.0.1").ariaLabel).toMatch(/, blocked$/);
+    await waitFor(() => expect(nodeOf("10.0.0.2").className).toContain("would-block"));
+    expect(nodeOf("10.0.0.2").ariaLabel).toMatch(/, a dry-run sensor would block it$/);
+    expect(nodeOf("10.0.0.3").className).not.toMatch(/blocked|would-block/);
+    expect(nodeOf("10.0.0.3").ariaLabel).not.toMatch(/blocked|would block/);
+    expect(await screen.findByLabelText(/^10\.0\.0\.1, .*, blocked$/)).toBeInTheDocument();
+  });
+
+  it("edges whose source is blocked get the blocked class", async () => {
+    markBlocks = [blockRow("10.0.0.1")];
+    show();
+    await waitFor(() => expect(edgesOf().some((e) => e.className.includes("blocked"))).toBe(true));
+    const blocked = edgesOf().filter((e) => e.className.includes("blocked")).map((e) => e.id).sort();
+    expect(blocked).toEqual(["10.0.0.1->10.0.0.2", "10.0.0.1->10.0.0.3"]);
+    expect(edgesOf().find((e) => e.id === "10.0.0.9->10.0.0.1")!.className).not.toContain("blocked");
+  });
+
+  it("a would-block host does not mark its edges", async () => {
+    markWould = [wouldRow("10.0.0.1")];
+    show();
+    await waitFor(() => expect(nodeOf("10.0.0.1").className).toContain("would-block"));
+    expect(edgesOf().some((e) => e.className.includes("blocked"))).toBe(false);
+  });
+
+  it("blocked wins over would for one host", async () => {
+    markBlocks = [blockRow("10.0.0.1")];
+    markWould = [wouldRow("10.0.0.1")];
+    show();
+    await waitFor(() => expect(nodeOf("10.0.0.1").className).toContain("blocked"));
+    expect(nodeOf("10.0.0.1").className).not.toContain("would-block");
+  });
+
+  it("an expired block is not marked", async () => {
+    markBlocks = [blockRow("10.0.0.1", { expires_at: iso(-5000) })];
+    show();
+    await screen.findByLabelText(/^10\.0\.0\.1,/);
+    await waitFor(() => expect(calls("/blocks?active=true").length).toBeGreaterThan(0));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(nodeOf("10.0.0.1").className).not.toContain("blocked");
+  });
+
+  it("the intro text mentions the rings", async () => {
+    show();
+    expect(await screen.findByText(/Red ring: blocked; dashed ring: a dry-run sensor would block it\./)).toBeInTheDocument();
   });
 });

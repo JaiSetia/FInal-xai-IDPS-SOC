@@ -14,24 +14,43 @@ can't slow ingest or grow memory.
 import asyncio
 import threading
 
+# Block events (type "block") may use at most this share of a subscriber's queue; the rest is
+# kept for alerts, so a burst of block reports can never push alerts out or overflow the client.
+BLOCK_SHARE = 0.5
+
 
 class Subscriber:
     def __init__(self, loop: asyncio.AbstractEventLoop, size: int):
         self.loop = loop
         self.queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=size)
         self.overflowed = False
+        self.block_limit = max(1, int(size * BLOCK_SHARE))
+        self.blocks_queued = 0
+        self.blocks_dropped = 0  # block messages not queued because their share was used up
         self.wakeup = asyncio.Event()  # set when the subscriber should stop (overflow)
 
     def offer(self, message: dict) -> bool:  # runs on self.loop
         if self.overflowed:
             return False
+        is_block = message.get("type") == "block"
+        if is_block and self.blocks_queued >= self.block_limit:
+            self.blocks_dropped += 1  # shed the block message; the client stays connected
+            return True
         try:
             self.queue.put_nowait(message)
         except asyncio.QueueFull:
             self.overflowed = True
             self.wakeup.set()
             return False
+        if is_block:
+            self.blocks_queued += 1
         return True
+
+    async def next(self) -> dict:  # runs on self.loop
+        message = await self.queue.get()
+        if message.get("type") == "block":  # no await after the get: cancel-safe
+            self.blocks_queued -= 1
+        return message
 
 
 class AlertBroadcaster:

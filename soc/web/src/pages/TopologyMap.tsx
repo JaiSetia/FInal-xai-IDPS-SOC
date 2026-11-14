@@ -1,13 +1,16 @@
 import "@xyflow/react/dist/style.css";
 import { Background, Controls, MarkerType, ReactFlow, type Edge, type Node } from "@xyflow/react";
 import { forceCenter, forceCollide, forceLink, forceManyBody, forceSimulation, type SimulationLinkDatum, type SimulationNodeDatum } from "d3-force";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, query } from "../api/client";
 import type { Alert, Block, Page, Severity } from "../api/types";
 import { Card, ErrorText, SeverityBadge, useLoad } from "../components/common";
 import { dateTime } from "../format";
+import { useBlockMarks } from "../liveBlocks";
 import { useLiveRefresh } from "../useLiveRefresh";
+
+const PULSE_MS = 3000;
 
 export interface TopoNode { ip: string; alert_count: number; max_severity: Severity }
 export interface TopoEdge { src: string; dst: string; count: number; max_severity: Severity }
@@ -79,7 +82,23 @@ export function edgeWidth(count: number, max: number): number {
 export default function TopologyMap({ hours, onShowWorld }: { hours: number; onShowWorld: () => void }) {
   const [selected, setSelected] = useState<string | null>(null);
   const { data: raw, error, reload } = useLoad(() => api<Topology>(`/topology${query({ hours })}`), [hours]);
-  useLiveRefresh(reload);
+  const marks = useBlockMarks();
+
+  // Live: the link and both hosts of each new alert pulse for a few seconds. A host that isn't
+  // on the graph yet appears with the next refresh (debounced, at most 5 s later).
+  const [hot, setHot] = useState<Set<string>>(new Set());
+  const pulseTimers = useRef(new Set<ReturnType<typeof setTimeout>>());
+  useEffect(() => () => { pulseTimers.current.forEach(clearTimeout); }, []);
+  const onAlert = useCallback((a: Alert) => {
+    const keys = [`${a.src_ip}->${a.dst_ip}`, a.src_ip, a.dst_ip];
+    setHot((h) => { const next = new Set(h); keys.forEach((k) => next.add(k)); return next; });
+    const t = setTimeout(() => {
+      pulseTimers.current.delete(t);
+      setHot((h) => { const next = new Set(h); keys.forEach((k) => next.delete(k)); return next; });
+    }, PULSE_MS);
+    pulseTimers.current.add(t);
+  }, []);
+  useLiveRefresh(reload, onAlert);
   const { graph: data, hidden } = useMemo(
     () => (raw ? limitGraph(raw) : { graph: null, hidden: 0 }), [raw]);
 
@@ -113,9 +132,12 @@ export default function TopologyMap({ hours, onShowWorld }: { hours: number; onS
             </div>
           ),
         },
-        ariaLabel: `${t.ip}, ${ROLE_TEXT[role]}, ${t.alert_count} alerts, highest severity ${t.max_severity}`,
+        ariaLabel: `${t.ip}, ${ROLE_TEXT[role]}, ${t.alert_count} alerts, highest severity ${t.max_severity}`
+          + (marks.get(t.ip) === "blocked" ? ", blocked" : marks.get(t.ip) === "would" ? ", a dry-run sensor would block it" : ""),
         selected: selected === t.ip,
-        className: `topo-node sev-border-${t.max_severity}${selected === t.ip ? " selected" : ""}`,
+        className: `topo-node sev-border-${t.max_severity}${selected === t.ip ? " selected" : ""}`
+          + (marks.get(t.ip) === "blocked" ? " blocked" : marks.get(t.ip) === "would" ? " would-block" : "")
+          + (hot.has(t.ip) ? " pulse" : ""),
         style: { width: 170 },
       };
     });
@@ -125,14 +147,16 @@ export default function TopologyMap({ hours, onShowWorld }: { hours: number; onS
       target: e.dst,
       label: String(e.count),
       animated: e.max_severity === "high" || e.max_severity === "critical",
-      className: `topo-edge sev-stroke-${e.max_severity}`,
+      className: `topo-edge sev-stroke-${e.max_severity}`
+        + (marks.get(e.src) === "blocked" ? " blocked" : "")
+        + (hot.has(`${e.src}->${e.dst}`) ? " pulse" : ""),
       style: { strokeWidth: edgeWidth(e.count, maxCount) },
       labelStyle: { fill: "var(--text)", fontSize: 11 },
       labelBgStyle: { fill: "var(--surface)" },
       markerEnd: { type: MarkerType.ArrowClosed },
     }));
     return { nodes, edges };
-  }, [data, positions, selected]);
+  }, [data, positions, selected, marks, hot]);
 
   const sel = data?.nodes.find((n) => n.ip === selected) ?? null;
 
@@ -171,6 +195,7 @@ export default function TopologyMap({ hours, onShowWorld }: { hours: number; onS
       <Card title="Who talks to whom" label="Network topology">
         <p className="muted small-text" style={{ marginTop: -4 }}>
           Hosts seen in alerts in the last {hours} h. Arrows point from source to target; moving lines are high or critical.
+          New alerts make their link glow. Red ring: blocked; dashed ring: a dry-run sensor would block it.
         </p>
         <ErrorText error={error} />
         {/* React Flow reports clicks but not keyboard activation: Enter or Space on a focused

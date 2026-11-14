@@ -45,7 +45,7 @@ The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep thei
 | `POST /ingest/alerts` | sensor | Batch of 1 to 500 alerts; stores and broadcasts them |
 | `GET /alerts` | user | Filters: `severity` (repeatable), `predicted_class`, `ip` (source or destination), `status`, `since`, `until` (timezone required) |
 | `GET /alerts/{id}`, `PATCH /alerts/{id}` | user | Detail with explanation; set `status` (new, acknowledged, false_positive, resolved) |
-| `WS /ws/alerts` | user | Live feed |
+| `WS /ws/alerts` | user | Live feed: alerts (as `GET /alerts` plus `src_geo`) and typed block messages; see "Live feed" |
 | `POST /ingest/blocks` | sensor | Up to 100 `blocked` / `unblocked` / `would_block` events (`would_block` = a dry-run decision, stored in its own table, never a block) |
 | `GET /blocks` | user | `active=true/false`, `ip` |
 | `GET /blocks/would` | user | Dry-run `would_block` decisions, newest first: `ip`, `since_hours` (1 to 720, default 24), `limit`, `cursor` |
@@ -206,6 +206,28 @@ Each client has a bounded queue; one that falls behind is disconnected (4408) an
 waits for it. Because it lives in memory, run **one** API process. With several workers, a
 client would only see alerts ingested by its own worker. Scaling out needs a shared bus
 (PostgreSQL LISTEN/NOTIFY or Redis pub/sub) behind the same `publish` interface.
+
+**Messages** (any signed-in user receives all of them; after the auth message the server sends
+`{"type": "ready"}`, unchanged). Older clients ignore messages without an `id`.
+
+- *Alert* (published after `POST /ingest/alerts` commits): the fields of `GET /alerts` (with `id`)
+  plus `src_geo`, only in this message (not stored, not in `/alerts`):
+  `{"lat": float, "lon": float, "country": str|null, "city": str|null, "source": "geoip"|"demo"}`
+  or `null` when the source has no location. It comes from the same `GeoLocator` as
+  `/geo/attacks` (same demo rules; it caches per address, 50,000 at most, so a lookup on the ingest
+  path is a dictionary hit for repeat sources and a lookup failure only gives `null`).
+- *Block event* (one per event of an accepted `POST /ingest/blocks`, published after the commit;
+  nothing for a refused batch):
+  `{"type": "block", "event": "blocked"|"unblocked"|"would_block", "sensor_id": int, "ip": str,
+  "source": "auto"|"analyst", "at": ISO8601, "expires_at": ISO8601|null, "ttl_seconds": int|null,
+  "reason": str, "geo": <as src_geo>|null}`. `at` is the SOC's time (for `would_block` the stored
+  decision time); `expires_at` is set for `blocked` only and `ttl_seconds` is the given one or the
+  remaining seconds; an analyst-confirmed unblock arrives as `unblocked`. An `unblocked` event that
+  closed no active block (already expired or never known) is not published.
+- *Bounds:* block messages may use at most half of a client's queue (`BLOCK_SHARE`); beyond that
+  they are dropped for that client (counted in `Subscriber.blocks_dropped`, the client stays
+  connected), so a burst of block reports cannot push alerts out or get a client disconnected. A
+  client that falls behind on alerts is still disconnected (4408) as before.
 
 ## Database
 

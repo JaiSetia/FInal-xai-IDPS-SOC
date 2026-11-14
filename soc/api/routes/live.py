@@ -4,7 +4,9 @@ Browsers can't set headers on a WebSocket, so the client authenticates with its 
 `{"token": "<access token>"}`, sent within AUTH_TIMEOUT seconds. Every failure closes the
 socket with code 4401, as does the token expiring (or the user being disabled or demoted
 out of the system) while connected. After that the server pushes each new alert as JSON
-(the same fields as GET /alerts; fetch GET /alerts/{id} for the explanation).
+(the same fields as GET /alerts plus an optional `src_geo`; fetch GET /alerts/{id} for the
+explanation) and, as typed messages without an `id`, each block event (`{"type": "block", ...}`,
+see soc/api/routes/blocks.py). Older clients ignore messages without an `id`.
 Anything else the client sends is ignored.
 """
 
@@ -74,7 +76,7 @@ async def alert_feed(ws: WebSocket):
         next_check = time.monotonic() + RECHECK_SECONDS
         try:
             while True:
-                getter = asyncio.create_task(sub.queue.get())
+                getter = asyncio.create_task(sub.next())
                 timeout = max(0.0, min(exp - time.time(), next_check - time.monotonic()))
                 done, _ = await asyncio.wait({getter, reader, overflow}, timeout=timeout,
                                              return_when=asyncio.FIRST_COMPLETED)

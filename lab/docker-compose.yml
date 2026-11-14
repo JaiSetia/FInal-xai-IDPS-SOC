@@ -99,6 +99,10 @@ services:
       IDPS_SOC_BLOCK_ALLOWLIST: 10.10.1.1,10.10.1.2,10.10.2.0/24,10.10.3.0/24
       # Made-up, clearly labelled map locations for the lab's private addresses.
       IDPS_SOC_GEO_DEMO: ${LAB_SOC_GEO_DEMO:-false}
+      # Where the protected site is, for the live attack map (blank: no home marker).
+      IDPS_SOC_HOME_LAT: ${LAB_SOC_HOME_LAT:-}
+      IDPS_SOC_HOME_LON: ${LAB_SOC_HOME_LON:-}
+      IDPS_SOC_HOME_LABEL: ${LAB_SOC_HOME_LABEL:-Lab (demo)}
       # Real locations for public addresses: the MaxMind GeoLite2 City file, copied into the
       # SOC's volume (it can't be mounted from ~/Desktop and must not go in the image or git).
       IDPS_SOC_GEOIP_DB: ${LAB_SOC_GEOIP_DB:-}

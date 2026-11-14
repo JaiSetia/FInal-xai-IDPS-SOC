@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getToken, onTokenChange, setToken, wsUrl } from "./api/client";
-import type { Alert } from "./api/types";
+import type { Alert, LiveBlockEvent } from "./api/types";
 
 /** One /ws/alerts connection shared by every subscriber (the top bar's Live badge and the page),
  *  so a page never opens a second socket. Opened by the first subscriber, closed with the last.
@@ -8,9 +8,11 @@ import type { Alert } from "./api/types";
  *  rejects the token (4401) the session is over: the token is cleared, which signs the user out.
  *  A token change (logout, another login) closes the socket and reconnects with the new token. */
 type AlertListener = (a: Alert) => void;
+type BlockListener = (b: LiveBlockEvent) => void;
 type StateListener = (connected: boolean) => void;
 
 const alertListeners = new Set<AlertListener>();
+const blockListeners = new Set<BlockListener>();
 const stateListeners = new Set<StateListener>();
 let ws: WebSocket | null = null;
 let timer: ReturnType<typeof setTimeout> | undefined;
@@ -27,7 +29,7 @@ function setConnected(value: boolean) {
 }
 
 function active(): boolean {
-  return alertListeners.size + stateListeners.size > 0;
+  return alertListeners.size + blockListeners.size + stateListeners.size > 0;
 }
 
 function connect() {
@@ -47,6 +49,16 @@ function connect() {
     if (msg && typeof msg === "object" && "type" in msg && (msg as { type: string }).type === "ready") {
       setConnected(true);
       readyAt = Date.now();
+      return;
+    }
+    if (msg && typeof msg === "object" && (msg as { type?: unknown }).type === "block") {
+      for (const fn of [...blockListeners]) {
+        try {
+          fn(msg as LiveBlockEvent);
+        } catch (err) {
+          console.error("live block listener failed", err);
+        }
+      }
       return;
     }
     if (msg && typeof msg === "object" && "id" in msg) {
@@ -135,6 +147,23 @@ export function useLiveAlerts(onAlert: AlertListener): boolean {
     ensureOpen();
     return () => {
       alertListeners.delete(fn);
+      maybeClose();
+    };
+  }, []);
+  return state;
+}
+
+/** Call `onBlock` for every block, unblock and dry-run decision a sensor reports. */
+export function useLiveBlocks(onBlock: BlockListener): boolean {
+  const handler = useRef(onBlock);
+  handler.current = onBlock;
+  const state = useLiveStatus();
+  useEffect(() => {
+    const fn: BlockListener = (b) => handler.current(b);
+    blockListeners.add(fn);
+    ensureOpen();
+    return () => {
+      blockListeners.delete(fn);
       maybeClose();
     };
   }, []);

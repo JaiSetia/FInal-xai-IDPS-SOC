@@ -68,6 +68,17 @@ docker compose exec sensor cat /run/idps-soc/ca.pem > /tmp/lab-soc-ca.pem
 cd ../soc/web && NODE_EXTRA_CA_CERTS=/tmp/lab-soc-ca.pem IDPS_SOC_API=https://127.0.0.1:8443 npm run dev
 ```
 
+### Live map: demo locations and the home marker
+
+The dashboard's live attack map listens to the SOC's `/ws/alerts` feed: each alert carries where
+its source is (`src_geo`) and each block event (blocked, unblocked, and dry-run would-block) carries
+where the blocked address is (`geo`). Lab addresses are private, so with `LAB_SOC_GEO_DEMO=true`
+they get made-up locations, stable per address and labelled "Demo: <city>" (`source: "demo"`);
+without it they have none and the map shows nothing for them. Set `LAB_SOC_HOME_LAT`,
+`LAB_SOC_HOME_LON` (and optionally `LAB_SOC_HOME_LABEL`, default "Lab (demo)") in `.env` to draw
+the protected site; left blank, there is no home marker (blank values count as unset). Restart the
+SOC after changing them: `docker compose up -d soc`.
+
 ### Real map locations (optional)
 
 Lab addresses are private, so the map places them only with `LAB_SOC_GEO_DEMO=true` (made-up,

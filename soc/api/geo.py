@@ -12,6 +12,8 @@ import ipaddress
 import threading
 from dataclasses import dataclass
 
+from pydantic import BaseModel
+
 # Well-spread city coordinates used only for demo locations.
 _DEMO_PLACES = [
     ("Demo: São Paulo", -23.55, -46.63), ("Demo: Lagos", 6.52, 3.38),
@@ -34,6 +36,30 @@ class Location:
     country: str | None
     city: str | None
     source: str  # "geoip" or "demo"
+
+
+class GeoOut(BaseModel):
+    """A location as the live feed sends it (alerts: `src_geo`; blocks: `geo`)."""
+
+    lat: float
+    lon: float
+    country: str | None
+    city: str | None
+    source: str  # "geoip" or "demo"
+
+
+def geo_out(locator: "GeoLocator", ip: str) -> dict | None:
+    """`ip`'s location for a live message, or None (private address without demo mode, no
+    database, not found). Never raises: a lookup problem must not fail an ingest that already
+    committed. The locator caches per address (50,000 at most), so repeated sources are O(1)."""
+    try:
+        loc = locator.locate(ip)
+    except Exception:  # noqa: BLE001
+        return None
+    if loc is None:
+        return None
+    return GeoOut(lat=loc.lat, lon=loc.lon, country=loc.country, city=loc.city,
+                  source=loc.source).model_dump()
 
 
 class GeoLocator:

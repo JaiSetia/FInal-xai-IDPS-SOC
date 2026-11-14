@@ -4,7 +4,7 @@ import Alerts from "../pages/Alerts";
 
 const h = vi.hoisted(() => ({ api: vi.fn() }));
 vi.mock("../api/client", async (orig) => ({ ...(await orig<typeof import("../api/client")>()), api: h.api }));
-vi.mock("../live", () => ({ useLiveStatus: () => false, useLiveAlerts: () => false }));
+vi.mock("../live", () => ({ useLiveStatus: () => false, useLiveAlerts: () => false, useLiveBlocks: () => false }));
 
 beforeEach(() => {
   h.api.mockReset();

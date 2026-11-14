@@ -438,3 +438,36 @@ table.heatmap { min-width: 0; border-spacing: 3px; font-size: 12px; }
 .trust-list li.used { background: var(--accent-wash); outline: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
 .trust-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .trust-ratio { margin-left: auto; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* Live attack map */
+.map-wrap { position: relative; }
+.map-shot { stroke: var(--surface); stroke-width: 1.5; filter: drop-shadow(0 0 3px currentColor); }
+.map-ripple { fill: none; stroke: var(--danger); stroke-width: 2; opacity: 0; transform-box: fill-box; transform-origin: center;
+  animation: map-ripple 0.9s ease-out 1.25s 1 forwards; }
+@keyframes map-ripple { 0% { opacity: 0.9; transform: scale(1); } 100% { opacity: 0; transform: scale(4); } }
+.map-mark { fill: none; stroke-width: 2.5; }
+.map-mark.blocked { stroke: var(--danger); }
+.map-mark.would { stroke: var(--warn); stroke-dasharray: 4 3; }
+.map-arc.blocked { stroke: var(--muted); opacity: 0.35; animation: none; }
+.map-overflow { position: absolute; top: 10px; right: 12px; font-size: 12px; font-weight: 600; padding: 4px 10px;
+  border-radius: 999px; background: var(--danger-wash); color: var(--danger-text); }
+.live-feed { align-self: stretch; }
+.feed-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 520px; overflow-y: auto; font-size: 13px; }
+.feed-item { display: grid; grid-template-columns: 64px 1fr; gap: 8px; padding: 8px 10px; border-radius: 12px; background: var(--surface-2);
+  animation: feed-in 0.35s ease-out; }
+.feed-item.block-blocked { background: var(--danger-wash); }
+.feed-item.block-would_block { background: var(--warn-wash); }
+.feed-time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.feed-flow { display: block; margin-top: 2px; overflow-wrap: anywhere; }
+/* Slide only: an item is never invisible, even where the browser pauses animations. */
+@keyframes feed-in { from { transform: translateY(-6px); } }
+.topo-node.blocked { box-shadow: 0 0 0 3px var(--danger); }
+.topo-node.would-block { outline: 2px dashed var(--warn); outline-offset: 3px; }
+.topo-node.pulse { animation: topo-pulse 1s ease-in-out 3; }
+@keyframes topo-pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--danger) 35%, transparent); } }
+.react-flow__edge.pulse path { stroke-width: 4 !important; filter: drop-shadow(0 0 4px var(--danger)); }
+.react-flow__edge.blocked path { stroke: var(--muted) !important; opacity: 0.45; }
+@media (prefers-reduced-motion: reduce) {
+  .map-shot, .map-ripple { display: none; }
+  .feed-item, .topo-node.pulse { animation: none; }
+}
