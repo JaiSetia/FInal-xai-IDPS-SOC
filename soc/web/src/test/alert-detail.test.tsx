@@ -791,3 +791,167 @@ describe("Can I trust it? card", () => {
     });
   });
 });
+
+describe("step 7: model row and learning", () => {
+  const sha = "0123456789abcdef0123";
+  const patches = () => calls("PATCH", "/alerts/7").map(([, o]) => o.json);
+
+  it("Model row: version, else first 12 of sha256, else not reported", async () => {
+    alert = mkAlert({ model_version: "v-2026-11", model_sha256: sha }) as never;
+    const a = show();
+    await loaded();
+    expect(screen.getByText("v-2026-11")).toBeInTheDocument();
+    a.unmount();
+    alert = mkAlert({ model_version: null, model_sha256: sha }) as never;
+    const b = show();
+    await loaded();
+    expect(screen.getByText("sha256 0123456789ab")).toBeInTheDocument();
+    b.unmount();
+    alert = mkAlert({ model_version: null, model_sha256: null }) as never;
+    show();
+    await loaded();
+    expect(screen.getByText("not reported by this sensor")).toBeInTheDocument();
+  });
+
+  it("status control has all five statuses, including confirmed", async () => {
+    show();
+    await loaded();
+    const group = screen.getByRole("group", { name: "Status" });
+    expect(within(group).getAllByRole("button")).toHaveLength(5);
+    expect(ALERT_STATUSES).toContain("confirmed");
+    expect(within(group).getByRole("button", { name: label("confirmed") })).toBeInTheDocument();
+  });
+
+  it("no Real class select unless confirmed", async () => {
+    alert = mkAlert({ has_features: true, status: "new" }) as never;
+    show();
+    await loaded();
+    expect(screen.queryByLabelText("Real class")).toBeNull();
+    expect(screen.getByText("Mark it confirmed or false positive to use it for retraining.")).toBeInTheDocument();
+  });
+
+  it("confirmed: select lists As predicted then other classes, without the predicted one; text names predicted class", async () => {
+    alert = mkAlert({ has_features: true, status: "confirmed", true_class: null }) as never;
+    show();
+    await loaded();
+    const sel = screen.getByLabelText("Real class") as HTMLSelectElement;
+    const opts = within(sel).getAllByRole("option").map((o) => o.textContent);
+    expect(opts[0]).toBe("As predicted (PortScan)");
+    expect(opts).not.toContain("PortScan");
+    expect(opts).toHaveLength(14); // 1 + 14 classes - predicted
+    expect(sel.value).toBe("");
+    expect(screen.getByText(/Used as a training row labelled/).querySelector("b")).toHaveTextContent("PortScan");
+  });
+
+  it("confirmed with a correction: text names true_class; picking one PATCHes confirmed + true_class", async () => {
+    alert = mkAlert({ has_features: true, status: "confirmed", true_class: "Bot" }) as never;
+    show();
+    await loaded();
+    expect(screen.getByText("Bot", { selector: "b" })).toBeInTheDocument();
+    const sel = screen.getByLabelText("Real class") as HTMLSelectElement;
+    expect(sel.value).toBe("Bot");
+    fireEvent.change(sel, { target: { value: "DDoS" } });
+    await waitFor(() => expect(patches()).toEqual([{ status: "confirmed", true_class: "DDoS" }]));
+  });
+
+  it("choosing As predicted sends true_class null", async () => {
+    alert = mkAlert({ has_features: true, status: "confirmed", true_class: "Bot" }) as never;
+    show();
+    await loaded();
+    fireEvent.change(screen.getByLabelText("Real class"), { target: { value: "" } });
+    await waitFor(() => expect(patches()).toEqual([{ status: "confirmed", true_class: null }]));
+  });
+
+  it("false positive trains as BENIGN", async () => {
+    alert = mkAlert({ has_features: true, status: "false_positive" }) as never;
+    show();
+    await loaded();
+    expect(screen.getByText("BENIGN", { selector: "b" })).toBeInTheDocument();
+  });
+
+  it("without features the alert can't be used, even when confirmed", async () => {
+    alert = mkAlert({ has_features: false, status: "confirmed" }) as never;
+    show();
+    await loaded();
+    expect(screen.getByText(/can't be used for retraining/)).toBeInTheDocument();
+  });
+
+  it("leaving confirmed with a correction clears true_class; without one it sends status only", async () => {
+    alert = mkAlert({ has_features: true, status: "confirmed", true_class: "Bot" }) as never;
+    const a = show();
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: label("false_positive") }));
+    await waitFor(() => expect(patches()).toEqual([{ status: "false_positive", true_class: null }]));
+    a.unmount();
+    h.api.mockClear();
+    alert = mkAlert({ has_features: true, status: "confirmed", true_class: null }) as never;
+    show();
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: label("false_positive") }));
+    await waitFor(() => expect(patches()).toEqual([{ status: "false_positive" }]));
+  });
+
+  it("choosing confirmed from new sends status only", async () => {
+    alert = mkAlert({ has_features: true }) as never;
+    show();
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: label("confirmed") }));
+    await waitFor(() => expect(patches()).toEqual([{ status: "confirmed" }]));
+  });
+
+  it("moving to confirmed with a stored BENIGN true_class clears it; other stored classes are kept", async () => {
+    alert = mkAlert({ has_features: true, status: "false_positive", true_class: "BENIGN" }) as never;
+    const a = show();
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: label("confirmed") }));
+    await waitFor(() => expect(patches()).toEqual([{ status: "confirmed", true_class: null }]));
+    a.unmount();
+    h.api.mockClear();
+    alert = mkAlert({ has_features: true, status: "new", true_class: "Bot" }) as never;
+    show();
+    await loaded();
+    fireEvent.click(screen.getByRole("button", { name: label("confirmed") }));
+    await waitFor(() => expect(patches()).toEqual([{ status: "confirmed" }]));
+  });
+
+  it("select shows As predicted when true_class equals predicted_class", async () => {
+    alert = mkAlert({ has_features: true, status: "confirmed", true_class: "PortScan" }) as never;
+    show();
+    await loaded();
+    expect((screen.getByLabelText("Real class") as HTMLSelectElement).value).toBe("");
+  });
+
+  it("a stored class outside the list (BENIGN) is its own first option and selected", async () => {
+    alert = mkAlert({ has_features: true, status: "confirmed", true_class: "BENIGN" }) as never;
+    show();
+    await loaded();
+    const sel = screen.getByLabelText("Real class") as HTMLSelectElement;
+    const opts = within(sel).getAllByRole("option").map((o) => o.textContent);
+    expect(opts.slice(0, 2)).toEqual(["As predicted (PortScan)", "BENIGN"]);
+    expect(opts).toHaveLength(15);
+    expect(sel.value).toBe("BENIGN");
+  });
+
+  it("the training-label text is a polite live region", async () => {
+    alert = mkAlert({ has_features: true, status: "confirmed" }) as never;
+    show();
+    await loaded();
+    expect(screen.getByText(/Used as a training row/).closest("p")).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("a failed select PATCH keeps the previous value and shows the error", async () => {
+    alert = mkAlert({ has_features: true, status: "confirmed", true_class: "Bot" }) as never;
+    show();
+    await loaded();
+    const impl = h.api.getMockImplementation()!;
+    h.api.mockImplementation(async (path: string, opts?: { method?: string }) => {
+      if (opts?.method === "PATCH") throw new Error("save failed");
+      return impl(path, opts);
+    });
+    const sel = screen.getByLabelText("Real class") as HTMLSelectElement;
+    fireEvent.change(sel, { target: { value: "DDoS" } });
+    expect(await screen.findByText(/save failed/)).toBeInTheDocument();
+    expect((screen.getByLabelText("Real class") as HTMLSelectElement).value).toBe("Bot");
+    expect(screen.getByText("Bot", { selector: "b" })).toBeInTheDocument();
+  });
+});

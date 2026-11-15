@@ -93,12 +93,38 @@ def score_frame(bundle, df: pd.DataFrame) -> list[Prediction]:
     ]
 
 
-def alert_payload(row: dict, pred: Prediction, explanation: dict | None = None) -> dict | None:
+MAX_FEATURES_BYTES = 4 * 1024  # soc/api/routes/alerts.py MAX_FEATURES_BYTES (mirrored)
+
+
+def feature_vector(row: dict) -> dict[str, float] | None:
+    """The model features of a flow row as {name: float}, or None if any is missing or not
+    finite (the SOC refuses non-finite numbers; a partial vector is useless for retraining)."""
+    from idps.features import MODEL_FEATURES
+
+    out: dict[str, float] = {}
+    for name in MODEL_FEATURES:
+        try:
+            v = float(row[name])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not math.isfinite(v):
+            return None
+        out[name] = v
+    return out
+
+
+def alert_payload(row: dict, pred: Prediction, explanation: dict | None = None, *,
+                  model_sha256: str | None = None, model_version: str | None = None,
+                  with_features: bool = False) -> dict | None:
     """One entry of the POST /ingest/alerts body (soc.api.routes.alerts.AlertIn), or None if the
     row could not be accepted (one bad alert would make the SOC reject the whole batch).
 
     `explanation` is an idps.explain record; without one the alert carries an explanation with
-    no features, which still names the class and confidence."""
+    no features, which still names the class and confidence.
+
+    `with_features=True` adds the flow's model features (`features`), and `model_sha256` /
+    `model_version` say which model scored it: what the SOC needs to turn an analyst's verdict
+    into a training row (docs/soc.md, "Learning from analysts")."""
     if not (math.isfinite(pred.confidence) and 0.0 <= pred.confidence <= 1.0):
         return None
     if not (0 <= row["start_ms"] <= row["end_ms"] <= MAX_MS):
@@ -116,6 +142,12 @@ def alert_payload(row: dict, pred: Prediction, explanation: dict | None = None) 
     }
     if pred.anomaly_score is not None and math.isfinite(pred.anomaly_score):
         payload["anomaly_score"] = pred.anomaly_score
+    if with_features and (features := feature_vector(row)) is not None:
+        payload["features"] = features
+    if model_sha256:
+        payload["model_sha256"] = model_sha256
+    if version := "".join(c for c in (model_version or "") if c.isprintable()).strip()[:80]:
+        payload["model_version"] = version  # printable only, at most 80: what the SOC accepts
     return payload
 
 

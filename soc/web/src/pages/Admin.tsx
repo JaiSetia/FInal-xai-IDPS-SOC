@@ -1,12 +1,12 @@
 import { useRef, useState, type FormEvent } from "react";
 import { api } from "../api/client";
-import type { AdminUser, AuditEntry, Page, Role, Sensor } from "../api/types";
+import type { AdminUser, AuditEntry, ModelVersion, Page, Role, Sensor } from "../api/types";
 import { useAuth } from "../auth";
 import { Card, ErrorText, PageHead, Pill, useAction, useLoad } from "../components/common";
 import { useSensors } from "../sensors";
 import { dateTime, label } from "../format";
 
-/** Admin: users, sensors and the audit log (wireframe screen 7). Only admins get this route. */
+/** Admin: users, sensors, model versions and the audit log (wireframe screen 7). Only admins get this route. */
 
 function Users({ onChanged }: { onChanged: () => void }) {
   const { me } = useAuth();
@@ -324,6 +324,47 @@ export function DetailPairs({ details }: { details: Record<string, unknown> }) {
   );
 }
 
+/** Which model version each sensor runs, and which ones it ran before (GET /models, newest first). */
+function Models({ refresh }: { refresh: number }) {
+  const { data, error } = useLoad(() => api<{ models: ModelVersion[] }>("/models"), [refresh]);
+  const models = data?.models ?? [];
+  return (
+    <Card title="Model versions">
+      <ErrorText error={error} />
+      {data && models.length === 0 && <p className="muted" style={{ margin: 0 }}>No sensor has reported a model yet.</p>}
+      {models.length > 0 && (
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Version</th><th>Sensors</th><th>Seen</th></tr></thead>
+            <tbody>
+              {models.map((m) => (
+                <tr key={m.sha256}>
+                  <td>
+                    <span className="mono wrap-anywhere">{m.version ?? m.name}</span>{" "}
+                    {m.running_now > 0 && <Pill tone="ok">running</Pill>}
+                    <div className="muted small-text mono">sha256 {m.sha256.slice(0, 12)}</div>
+                  </td>
+                  <td>
+                    {m.sensors.length === 0 ? "—" : m.sensors.map((s) => (
+                      <div key={s.sensor_id}>
+                        {s.name}{" "}
+                        <span className="muted small-text">
+                          {s.running_now ? (s.online ? "now" : "last report, offline") : `until ${dateTime(s.last_seen)}`}
+                        </span>
+                      </div>
+                    ))}
+                  </td>
+                  <td className="small-text">{dateTime(m.first_seen)} → {dateTime(m.last_seen)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function Audit({ refresh }: { refresh: number }) {
   const [group, setGroup] = useState<AuditGroup>("all");
   const [actor, setActor] = useState("");
@@ -412,6 +453,7 @@ export default function Admin() {
         <Users onChanged={changed} />
         <Sensors onChanged={changed} />
       </div>
+      <Models refresh={refresh} />
       <Audit refresh={refresh} />
     </>
   );

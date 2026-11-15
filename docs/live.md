@@ -180,6 +180,32 @@ outbox file, so a crash, or a stop while the SOC is down, loses the unsent block
 itself stays in nftables and in the audit log). Without a SOC, block events are appended to the
 alerts file as lines with `"type": "block"`.
 
+## Model version and drift
+
+Alerts carry the model that scored them (`model_sha256`, `model_version`) and the flow's model
+features, which is what the SOC needs to turn an analyst's verdict into a training row (`docs/soc.md`,
+"Learning from analysts"). The status report's `model` is `{name, sha256, version, checksum_ok}`.
+**Upgrade the SOC before the sensors.** A new SOC accepts older sensors and drops unusable optional
+fields instead of refusing the batch, but an older SOC answers 422 to the new fields. To run a new
+sensor against an old SOC set `IDPS_LIVE_SEND_FEATURES=false`: alerts then carry no `features`,
+`model_sha256` or `model_version`, and the status no model digest/version and no drift. The model
+version in an alert is cleaned (printable characters, at most 80).
+
+A bundle's `version` is `<model>-<UTC yyyymmddHHMM>-<8 hex of its training rows>`; a bundle saved
+before versions existed reports `<model>-<first 8 of its sha256>` and loads unchanged.
+
+**Drift.** `python -m idps.detect train` (and `retrain`) writes `<model>.drift.json`: per model
+feature the decile bin edges and the share of training rows in each bin, plus the model's sha256.
+For an existing model make one with `python -m idps.detect drift-reference --model M --data <the
+labelled parquets it was trained on>` (it rebuilds the model's training split and refuses data that
+does not give the same row count). The sensor keeps the last `IDPS_LIVE_DRIFT_WINDOW` (default
+5000) scored flows, all of them and not only alerts, as bin counts updated per batch, and reports
+the Population Stability Index per feature: `{window, psi_max, top (5), level, reference_sha256}`.
+`level` is `ok` below 0.1, `watch` from 0.1, `drift` above 0.25. Until 200 flows have been seen,
+and when the sidecar is missing, unreadable or made for another model (sha256 mismatch), the level
+is `unknown` with a `reason` (at most 300 characters). A corrupt sidecar (bad numbers, edges not
+increasing, wrong lengths) is also `unknown`, never an error. Drift is advisory: a failure in it is logged and never stops detection.
+
 ## Analyst actions
 
 When a SOC is configured and the sensor captures live (`--interface`; there is no poller in

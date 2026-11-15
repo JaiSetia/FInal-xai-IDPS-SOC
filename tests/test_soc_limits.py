@@ -13,7 +13,7 @@ def test_every_documented_limit_is_above_what_the_schemas_allow():
     from soc.api.routes.alerts import MAX_BATCH, MAX_EXPLANATION_BYTES
 
     assert limit_for("/ingest/alerts") > MAX_BATCH * MAX_EXPLANATION_BYTES
-    assert limit_for("/ingest/alerts") == 10 * MiB
+    assert limit_for("/ingest/alerts") == 12 * MiB
     assert limit_for("/sensor/status") < limit_for("/ingest/alerts")
     assert limit_for("/ingest/blocks") < MiB and limit_for("/auth/login") <= 16 * KiB
     assert limit_for("/sensor/actions/3/result") == limit_for("/actions") == 16 * KiB
@@ -207,5 +207,5 @@ def test_a_real_uvicorn_server_closes_an_oversized_websocket_message(soc_setting
 
 @pytest.mark.parametrize("path", ["/ingest/alerts", "/sensor/status"])
 def test_413_carries_no_secret_and_is_json(client, path):
-    r = client.post(path, content=b"z" * (11 * MiB), headers={"Content-Type": "application/json"})
+    r = client.post(path, content=b"z" * (13 * MiB), headers={"Content-Type": "application/json"})
     assert r.status_code == 413 and r.headers["content-type"] == "application/json"

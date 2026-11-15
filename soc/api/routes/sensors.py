@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 from soc.api.auth import AnyUser, Sensor
 from soc.api.common import audit, plain_text
 from soc.api.db import get_db
-from soc.api.models import Role, SensorStatus, SensorToken
+from soc.api.models import ModelVersion, Role, SensorStatus, SensorToken
 
 log = logging.getLogger("soc.api")
 router = APIRouter(tags=["sensors"])
@@ -64,7 +64,34 @@ class StrictModel(BaseModel):
 
 class ModelInfo(StrictModel):
     name: Text = Field(max_length=64)
+    # Older sensors send neither of these two.
+    sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    version: Text | None = Field(default=None, min_length=1, max_length=80)
     checksum_ok: StrictBool
+
+    @model_validator(mode="after")
+    def _lower_sha(self):
+        if self.sha256:
+            self.sha256 = self.sha256.lower()
+        return self
+
+
+class DriftFeature(StrictModel):
+    feature: Text = Field(min_length=1, max_length=64)
+    psi: float = Field(ge=0, le=1e9)
+
+
+class DriftInfo(StrictModel):
+    """How far live traffic has moved from the model's training data (idps.detect.drift).
+    level: ok (PSI < 0.1), watch (0.1 to 0.25), drift (> 0.25), or unknown (no usable reference
+    for this model, or too few flows yet; `reason` says which)."""
+
+    level: Literal["ok", "watch", "drift", "unknown"]
+    window: StrictInt | None = Field(default=None, ge=0, le=100_000_000)
+    psi_max: float | None = Field(default=None, ge=0, le=1e9)
+    top: list[DriftFeature] = Field(default_factory=list, max_length=5)
+    reference_sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
+    reason: Text | None = Field(default=None, max_length=300)
 
 
 class PolicyInfo(StrictModel):
@@ -131,6 +158,7 @@ class StatusReport(StrictModel):
     heartbeat: HeartbeatInfo
     counters: Counters
     faithfulness: Faithfulness | None = None  # absent from older sensors
+    drift: DriftInfo | None = None  # absent from older sensors
     sensor_version: Text | None = Field(default=None, max_length=32)
     sent_at: datetime | None = None
 
@@ -269,6 +297,22 @@ def audit_details(state: SensorAuditState, sensor_id: int, previous: dict, new: 
     return {"changed": emitted, **({"folded": folded} if folded else {})}
 
 
+def _note_model(db: Session, sensor_id: int, model: dict, now: datetime) -> None:
+    """Record that this sensor runs this model (by sha256), or move its last_seen. Reports from
+    sensors too old to send a digest are not recorded."""
+    sha = model.get("sha256")
+    if not sha:
+        return
+    row = db.scalar(select(ModelVersion).where(ModelVersion.sensor_id == sensor_id,
+                                                ModelVersion.sha256 == sha))
+    version = model.get("version") or f"{model['name']}-{sha[:8]}"
+    if row is None:
+        db.add(ModelVersion(sensor_id=sensor_id, name=model["name"], sha256=sha,
+                            version=version, first_seen=now, last_seen=now))
+    else:
+        row.name, row.version, row.last_seen = model["name"], version, now
+
+
 @router.post("/sensor/status", response_model=StatusAck)
 def post_status(report: StatusReport, sensor: Sensor, request: Request,
                 db: Annotated[Session, Depends(get_db)]):
@@ -278,22 +322,26 @@ def post_status(report: StatusReport, sensor: Sensor, request: Request,
     audit_state: SensorAuditState = request.app.state.sensor_audit
     now = datetime.now(UTC)
     payload = report.model_dump(mode="json")
+    target = f"sensor:{sensor.name}"
     for attempt in (1, 2):
-        row = db.get(SensorStatus, sensor.id)
-        target = f"sensor:{sensor.name}"
-        if row is None:
-            db.add(SensorStatus(sensor_id=sensor.id, payload=payload, last_seen_at=now))
-            with audit_state.lock:  # the first report is the baseline (and is always logged)
-                audit_state.baseline[sensor.id] = copy.deepcopy(payload)
-            audit(db, sensor, "sensor_status_first", target,
-                  {"mode": payload["mode"], "dry_run": payload["dry_run"],
-                   "blocking_enabled": payload["blocking_enabled"]})
-        else:
-            details = audit_details(audit_state, sensor.id, row.payload, payload, _clock())
-            if details:
-                audit(db, sensor, "sensor_status_changed", target, details)
-            row.payload, row.last_seen_at = payload, now
+        # Everything that can hit the database is inside the try: with autoflush a query made
+        # after db.add() flushes it, and a lost first-report race then raises IntegrityError
+        # there, not at commit.
         try:
+            row = db.get(SensorStatus, sensor.id)
+            if row is None:
+                db.add(SensorStatus(sensor_id=sensor.id, payload=payload, last_seen_at=now))
+                with audit_state.lock:  # the first report is the baseline (and is always logged)
+                    audit_state.baseline[sensor.id] = copy.deepcopy(payload)
+                audit(db, sensor, "sensor_status_first", target,
+                      {"mode": payload["mode"], "dry_run": payload["dry_run"],
+                       "blocking_enabled": payload["blocking_enabled"]})
+            else:
+                details = audit_details(audit_state, sensor.id, row.payload, payload, _clock())
+                if details:
+                    audit(db, sensor, "sensor_status_changed", target, details)
+                row.payload, row.last_seen_at = payload, now
+            _note_model(db, sensor.id, payload["model"], now)
             db.commit()
             break
         except IntegrityError:  # two first reports at once: the other won, update its row
@@ -338,3 +386,67 @@ def sensors_status(user: AnyUser, request: Request, db: Annotated[Session, Depen
     allowlist = ([str(net) for net in request.app.state.settings.block_allowlist]
                  if admin else None)
     return SensorsStatus(redacted=not admin, soc_allowlist=allowlist, sensors=out)
+
+
+class ModelSensor(BaseModel):
+    sensor_id: int
+    name: str
+    first_seen: datetime
+    last_seen: datetime
+    running_now: bool  # this sensor's latest status report names this model
+    online: bool
+
+
+class ModelVersionOut(BaseModel):
+    sha256: str
+    version: str
+    name: str
+    first_seen: datetime  # earliest on any sensor
+    last_seen: datetime  # latest on any sensor
+    running_now: int  # how many (non-revoked) sensors run it now
+    sensors: list[ModelSensor]
+
+
+class ModelsOut(BaseModel):
+    models: list[ModelVersionOut]
+
+
+MAX_MODELS = 200
+
+
+@router.get("/models", response_model=ModelsOut)
+def list_models(user: AnyUser, db: Annotated[Session, Depends(get_db)]):
+    """Model versions the sensors have reported, newest first, with which sensors run each one
+    now (by each sensor's latest status report). Never includes tokens. Non-admins do not see revoked sensors, nor models only
+    they ran."""
+    now = datetime.now(UTC)
+    admin = user.role == Role.ADMIN
+    rows = db.execute(
+        select(ModelVersion, SensorToken, SensorStatus)
+        .join(SensorToken, SensorToken.id == ModelVersion.sensor_id)
+        .outerjoin(SensorStatus, SensorStatus.sensor_id == SensorToken.id)
+        .order_by(ModelVersion.last_seen.desc(), ModelVersion.id.desc()).limit(MAX_SENSORS * 4))
+    grouped: dict[str, dict] = {}
+    for mv, token, status in rows:
+        if token.revoked and not admin:  # like /sensors/status: a revoked sensor is withheld
+            continue
+        current = ((status.payload.get("model") or {}).get("sha256") if status else None)
+        seen = status.last_seen_at if status else None
+        online = bool(seen and not token.revoked
+                      and now - seen <= timedelta(seconds=ONLINE_SECONDS))
+        g = grouped.get(mv.sha256)
+        if g is None:
+            if len(grouped) >= MAX_MODELS:
+                continue
+            g = grouped[mv.sha256] = {"sha256": mv.sha256, "version": mv.version, "name": mv.name,
+                                      "first_seen": mv.first_seen, "last_seen": mv.last_seen,
+                                      "running_now": 0, "sensors": []}
+        g["first_seen"] = min(g["first_seen"], mv.first_seen)
+        g["last_seen"] = max(g["last_seen"], mv.last_seen)
+        running = current == mv.sha256 and not token.revoked
+        g["running_now"] += int(running)
+        g["sensors"].append(ModelSensor(
+            sensor_id=token.id, name=token.name, first_seen=mv.first_seen,
+            last_seen=mv.last_seen, running_now=running, online=online))
+    out = sorted(grouped.values(), key=lambda g: g["last_seen"], reverse=True)
+    return ModelsOut(models=[ModelVersionOut(**g) for g in out])

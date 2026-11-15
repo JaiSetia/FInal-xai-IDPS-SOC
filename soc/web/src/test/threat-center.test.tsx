@@ -944,3 +944,82 @@ describe("untrusted reasons are one line, capped at 300", () => {
     expect(screen.getByText(/^“y+…”$/).textContent!.length).toBe(302);
   });
 });
+
+describe("model version and drift", () => {
+  const drift = (o: Record<string, unknown> = {}) => ({
+    level: "ok", window: 5000, psi_max: 0.05, top: [], reference_sha256: "abc", reason: null, ...o,
+  });
+  const withDrift = (name: string, id: number, dr: unknown, st: Record<string, unknown> = {}) =>
+    sensorState({ sensor_id: id, name, status: report({ drift: dr, ...st }) });
+  const drifts = () => cardOf("Model drift");
+
+  it("sensor health shows the model version when reported", async () => {
+    d.sensors = sensorsStatus([sensorState({ status: report({ model: { name: "rf-v3", checksum_ok: true, sha256: "x", version: "v-2026-11" } }) })]);
+    show();
+    expect(await within(await screen.findByText("Sensor health").then((e) => e.closest(".card") as HTMLElement)).findByText("v-2026-11")).toBeInTheDocument();
+  });
+
+  it("no online sensor", async () => {
+    show();
+    expect(await within(await screen.findByText("Model drift").then(() => drifts())).findByText("No sensor is online.")).toBeInTheDocument();
+  });
+
+  it("shows PSI, window and the top 3 features of a sensor", async () => {
+    d.sensors = sensorsStatus([withDrift("gw", 1, drift({
+      level: "watch", psi_max: 0.18, window: 4000,
+      top: [{ feature: "f1", psi: 0.18 }, { feature: "f2", psi: 0.12 }, { feature: "f3", psi: 0.11 }, { feature: "f4", psi: 0.1 }],
+    }))]);
+    show();
+    await within(await screen.findByText("Model drift").then(() => drifts())).findByText(/Largest shift PSI 0\.18/);
+    const c = within(drifts());
+    expect(c.getByText(/over the last 4,000 flows/)).toBeInTheDocument();
+    expect(c.getAllByText("watch")).toHaveLength(2); // header + sensor
+    expect(c.getByText("f3")).toBeInTheDocument();
+    expect(c.queryByText("f4")).toBeNull();
+  });
+
+  it("header pill is the worst level; unknown ranks lowest", async () => {
+    d.sensors = sensorsStatus([
+      withDrift("a", 1, drift()), withDrift("b", 2, drift({ level: "drift", psi_max: 0.4 })),
+      withDrift("c", 3, drift({ level: "unknown", psi_max: null, reason: "x" })),
+    ]);
+    show();
+    await within(await screen.findByText("Model drift").then(() => drifts())).findByText("a");
+    const c = within(drifts());
+    expect(c.getByText("drifting · 1 unknown")).toBeInTheDocument(); // header
+    expect(c.getAllByText("drifting")).toHaveLength(1); // sensor b
+    expect(c.getAllByText("stable")).toHaveLength(1);
+    expect(c.getAllByText("unknown")).toHaveLength(1); // sensor c
+  });
+
+  it("psi_max null shows the reason; missing drift says older version and counts as unknown", async () => {
+    d.sensors = sensorsStatus([
+      withDrift("a", 1, drift({ level: "unknown", psi_max: null, reason: "too few flows" })),
+      withDrift("b", 2, undefined),
+    ]);
+    show();
+    await within(await screen.findByText("Model drift").then(() => drifts())).findByText("too few flows");
+    const c = within(drifts());
+    expect(c.getByText(/older version/)).toBeInTheDocument();
+    expect(c.getAllByText("unknown")).toHaveLength(3); // header + two sensors
+  });
+
+  it("lists at most 3 sensors and says how many more", async () => {
+    d.sensors = sensorsStatus([1, 2, 3, 4, 5].map((i) => withDrift(`s${i}`, i, drift())));
+    show();
+    await within(await screen.findByText("Model drift").then(() => drifts())).findByText("and 2 more online.");
+    expect(within(drifts()).queryByText("s4")).toBeNull();
+  });
+
+  it("header has no unknown suffix when all sensors are known, or when the worst is unknown", async () => {
+    d.sensors = sensorsStatus([withDrift("a", 1, drift()), withDrift("b", 2, drift({ level: "watch", psi_max: 0.2 }))]);
+    const a = show();
+    await within(await screen.findByText("Model drift").then(() => drifts())).findByText("a");
+    expect(within(drifts()).queryByText(/unknown/)).toBeNull();
+    a.unmount();
+    d.sensors = sensorsStatus([withDrift("a", 1, undefined), withDrift("b", 2, drift({ level: "unknown", psi_max: null }))]);
+    show();
+    await within(await screen.findByText("Model drift").then(() => drifts())).findByText("a");
+    expect(within(drifts()).queryByText(/· \d+ unknown/)).toBeNull();
+  });
+});

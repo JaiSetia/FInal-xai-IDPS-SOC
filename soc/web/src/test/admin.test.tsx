@@ -20,6 +20,7 @@ const entry = (o: Record<string, unknown> = {}) => ({
 let users: Record<string, unknown>[];
 let sensors: Record<string, unknown>[];
 let status: unknown;
+let models: Record<string, unknown>[];
 let auditAll: Record<string, unknown>[];
 let auditCursor: string | null;
 let auditOlder: Record<string, { items: unknown[]; next_cursor?: string | null }>;
@@ -33,6 +34,7 @@ beforeEach(() => {
   users = [user({ id: 1, username: "root", role: "admin" }), user(), user({ id: 3, username: "bob", disabled: true })];
   sensors = [sensor(), sensor({ id: 2, name: "old", revoked: true })];
   status = sensorsStatus([sensorState({ sensor_id: 1, name: "gw" })]);
+  models = [];
   auditAll = [];
   auditCursor = null;
   auditOlder = {};
@@ -44,6 +46,7 @@ beforeEach(() => {
     if (m === "GET" && path === "/admin/users") return users;
     if (m === "GET" && path === "/admin/sensors") return sensors;
     if (m === "GET" && path === "/sensors/status") return status;
+    if (m === "GET" && path === "/models") return { models };
     if (m === "GET" && path.startsWith("/admin/audit")) {
       const u = new URL(path, "http://x");
       const c = u.searchParams.get("cursor");
@@ -745,5 +748,43 @@ describe("untrusted text", () => {
     expect(container.querySelector(".detail-pairs li")?.textContent).toBe(`k: “${evil}”`);
     expect(screen.getByText(`sensor:${evil}`)).toBeInTheDocument();
     expect(container.querySelector("td.mono")?.textContent).toBe(evil);
+  });
+});
+
+describe("model versions card", () => {
+  const mv = (o: Record<string, unknown> = {}) => ({
+    sha256: "abcdef0123456789", version: "2026-11-01-rf", name: "rf-v3", first_seen: "2026-11-01T10:00:00Z",
+    last_seen: "2026-11-02T10:00:00Z", running_now: 1,
+    sensors: [{ sensor_id: 1, name: "gw", first_seen: "2026-11-01T10:00:00Z", last_seen: "2026-11-02T10:00:00Z", running_now: true, online: true }],
+    ...o,
+  });
+  it("says so when no sensor has reported a model", async () => {
+    show();
+    expect(await screen.findByText("No sensor has reported a model yet.")).toBeInTheDocument();
+  });
+  it("lists version, sha prefix, running pill and per-sensor state; falls back to the name", async () => {
+    models = [
+      mv(),
+      mv({ sha256: "112233445566778899", version: null, name: "rf-old", running_now: 0,
+        sensors: [{ sensor_id: 1, name: "gw", first_seen: "2026-10-01T10:00:00Z", last_seen: "2026-10-02T10:00:00Z", running_now: false, online: true }] }),
+    ];
+    show();
+    expect(await screen.findByText("2026-11-01-rf")).toBeInTheDocument();
+    expect(screen.getByText("sha256 abcdef012345")).toBeInTheDocument();
+    expect(screen.getAllByText("running")).toHaveLength(1);
+    expect(screen.getByText("now")).toBeInTheDocument();
+    expect(screen.getByText("rf-old")).toBeInTheDocument();
+    expect(screen.getByText(/^until /)).toBeInTheDocument();
+  });
+
+  it("reloads after a sensor is added or revoked", async () => {
+    show();
+    await screen.findByText("#1 gw");
+    await waitFor(() => expect(calls("GET", "/models").length).toBe(1));
+    fireEvent.change(screen.getByLabelText("New sensor name"), { target: { value: "edge-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add sensor" }));
+    await waitFor(() => expect(calls("GET", "/models").length).toBe(2));
+    fireEvent.click(screen.getAllByRole("button", { name: /^Revoke/ })[0]);
+    await waitFor(() => expect(calls("GET", "/models").length).toBe(3));
   });
 });

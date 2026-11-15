@@ -415,3 +415,31 @@ A flow-based ML model and a signature-based IDS are complementary. The model fin
 
 LightGBM was not added (optional; see the roadmap).
 
+## Learning from analysts: one feedback round in the lab (15 November 2026)
+
+The full loop was run once in the lab with the step 7 code: the live sensor (dry-run, `week_xgboost`) watched 15 minutes of normal traffic; an analyst marked its false alerts as false positives in the SOC; `python -m soc.api.export_feedback` turned them into training rows; `python -m idps.detect retrain` trained a new model on the CIC-IDS2017 week plus the feedback and decided whether to keep it; the kept model was loaded on the sensor and the same normal traffic was run again.
+
+**Feedback.** 300 normal flows gave 24 false alerts (21 SSH-Patator on SSH logins and SCP copies, 3 FTP-Patator on pings). All 24 arrived with their feature values and the model version. Marked false positive, they became 24 BENIGN training rows (no duplicates).
+
+**Retrain decision.** The feedback was split by time: the oldest 17 rows were added to training (weight 5), the newest 7 held back. The new model is kept only if its macro-F1 on the original test split drops by no more than 0.005, its accuracy on the held-back feedback is at least the current model's, and at least 5 feedback rows were held back. All three held, so the model was kept (`models/week_xgboost_fb1.joblib`, version `xgboost-202611151051-57954de3`; report `reports/retrain_xgboost-202611151051-57954de3.json`).
+
+| | Current model | Retrained model |
+|---|---|---|
+| CIC-IDS2017 test split (194,543 flows): macro-F1 | 0.6620 | 0.6627 |
+| CIC-IDS2017 test split: BENIGN false-positive rate | 1.14% | 1.13% |
+| Held-back feedback (7 flows): accuracy | 0% | 100% |
+
+**On traffic the retrain never saw.** The lab recordings from the unseen-data test and the Suricata comparison were scored again with both models. They were recorded before the feedback round, so none of their flows were used.
+
+| Recording | Normal flows passed (old → new) | SSH brute-force flows caught (old → new) | Port scan |
+|---|---|---|---|
+| Unseen-data test | 91.7% → **100%** | 98.9% → 95.6% | 100% → 100% |
+| Suricata comparison | 84.8% → **100%** | 100% → 94.4% | 100% → 100% |
+
+**Live, after the switch.** With the retrained model on the sensor, 15 more minutes of normal traffic (239 flows) gave **0 alerts**, against 24 before. The SOC's model list shows the sensor moving from `xgboost-4a59a356` to the new version at the time it was loaded.
+
+**Drift.** The drift card reported "drifting" both before and after (largest PSI about 7, in packet sizes and timings). That is expected: drift compares live traffic with the training data, and the lab's short, fast LAN connections look nothing like CIC-IDS2017's. A few feedback rows fix specific false alarms; they don't make the training data look like the lab. It is the same dataset gap as in the unseen-data test, now visible on the dashboard while the sensor runs.
+
+### Summary for the report
+
+Analyst feedback closes the loop the unseen-data test opened: 24 marked alerts removed every false alarm on normal lab traffic, live and on recordings the retrain never saw, without hurting the CIC-IDS2017 test scores. The cost was a small drop in SSH brute-force recall (about 5% of its flows), because normal SSH and brute-force SSH logins look alike in flow statistics; the blocking policy needs 5 confident flows, so a brute force is still blocked. The keep-or-reject gate means a bad feedback round can't replace a working model. Limitations: one round, one kind of false alarm, and a 7-row holdout.

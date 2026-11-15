@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { useLiveRefresh } from "../useLiveRefresh";
 import { api, query } from "../api/client";
 import {
-  ALERT_STATUSES, type AlertDetail as AlertDetailT, type AlertStatus, type Block, type CaseDetail,
+  ALERT_STATUSES, ATTACK_CLASSES, type AlertDetail as AlertDetailT, type AlertStatus, type Block, type CaseDetail,
   type CaseSummary, type Page,
 } from "../api/types";
 import {
@@ -15,6 +15,39 @@ import { dateTime, endpoint, label, num, percent, protocolName } from "../format
 import { useSensors } from "../sensors";
 
 /** Alert detail with its explanation (wireframe screen 2). */
+
+/** What marking this alert teaches the model at the next retrain. */
+function Learning({ alert, busy, onTrueClass }: {
+  alert: AlertDetailT; busy: boolean; onTrueClass: (value: string) => void;
+}) {
+  const confirmed = alert.status === "confirmed";
+  // A correction equal to the prediction is the same as none; anything else outside the list shows as itself.
+  const current = alert.true_class && alert.true_class !== alert.predicted_class ? alert.true_class : "";
+  const choices = ATTACK_CLASSES.filter((c) => c !== alert.predicted_class) as string[];
+  if (current && !choices.includes(current)) choices.unshift(current);
+  const row = !alert.has_features ? null
+    : confirmed ? (alert.true_class ?? alert.predicted_class)
+    : alert.status === "false_positive" ? "BENIGN" : null;
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      {confirmed && (
+        <label className="field">Real class
+          <select value={current} disabled={busy} onChange={(e) => onTrueClass(e.target.value)}>
+            <option value="">As predicted ({alert.predicted_class})</option>
+            {choices.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </label>
+      )}
+      <p className="muted small-text" style={{ margin: 0 }} aria-live="polite">
+        {!alert.has_features
+          ? "This sensor didn't send the flow's feature values, so this alert can't be used for retraining."
+          : row
+            ? <>Used as a training row labelled <b>{row}</b> at the next retrain.</>
+            : "Mark it confirmed or false positive to use it for retraining."}
+      </p>
+    </div>
+  );
+}
 
 /** Time of day, with the date too when it isn't the same day as `ref`. */
 const time = (v: string | number, ref?: string | number) => {
@@ -124,8 +157,20 @@ function AlertPage({ id }: { id: string }) {
   async function setStatus(status: AlertStatus) {
     if (status === alert!.status) return;
     setNotice(null);
+    // A correction only belongs to a confirmed alert: clear it when the alert stops being one, and
+    // never carry a BENIGN correction (from a false positive) into a confirmed alert.
+    const tc = alert!.true_class;
+    const clear = !!tc && (status !== "confirmed" || tc === "BENIGN");
+    const json = clear ? { status, true_class: null } : { status };
     const updated = await act.run(() =>
-      api<AlertDetailT>(`/alerts/${id}`, { method: "PATCH", json: { status } }));
+      api<AlertDetailT>(`/alerts/${id}`, { method: "PATCH", json }));
+    if (updated) setData(updated);
+  }
+
+  async function setTrueClass(value: string) {
+    setNotice(null);
+    const updated = await act.run(() => api<AlertDetailT>(`/alerts/${id}`, {
+      method: "PATCH", json: { status: "confirmed", true_class: value || null } }));
     if (updated) setData(updated);
   }
 
@@ -187,6 +232,11 @@ function AlertPage({ id }: { id: string }) {
               <dt>Anomaly score</dt>
               <dd>{num(alert.anomaly_score)} {alert.anomaly_score !== null && <span className="muted small-text">Isolation Forest</span>}</dd>
               <dt>Sensor</dt><dd>#{alert.sensor_id}</dd>
+              <dt>Model</dt>
+              <dd>{alert.model_version
+                ? <span className="mono small-text">{alert.model_version}</span>
+                : alert.model_sha256 ? <span className="mono small-text">sha256 {alert.model_sha256.slice(0, 12)}</span>
+                : <span className="muted">not reported by this sensor</span>}</dd>
               <dt>Case</dt><dd>{alert.case_id ? <Link to={`/cases/${alert.case_id}`}>#{alert.case_id}</Link> : "—"}</dd>
             </dl>
           </Card>
@@ -195,6 +245,7 @@ function AlertPage({ id }: { id: string }) {
             <div className="stack" style={{ gap: 14 }}>
               <Segmented<AlertStatus> label="Status" value={alert.status} onChange={(s) => void setStatus(s)} disabled={act.busy}
                 options={ALERT_STATUSES.map((s) => ({ value: s, label: label(s) }))} />
+              <Learning alert={alert} busy={act.busy} onTrueClass={(v) => void setTrueClass(v)} />
               {blocked ? (
                 <p style={{ margin: 0 }}>
                   {alert.src_ip} is blocked on sensor #{alert.sensor_id}

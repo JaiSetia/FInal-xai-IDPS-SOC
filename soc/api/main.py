@@ -28,6 +28,7 @@ from soc.api.routes import (
     live,
     metrics,
     sensors,
+    training,
 )
 from soc.api.routes.sensors import SensorAuditState
 from soc.api.security import LoginThrottle
@@ -78,7 +79,8 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(auth.router)
-    for module in (alerts, live, blocks, actions, cases, metrics, geo, assistant, admin, sensors):
+    for module in (alerts, live, blocks, actions, cases, metrics, geo, assistant, admin, sensors,
+                   training):
         app.include_router(module.router)
     return app
 

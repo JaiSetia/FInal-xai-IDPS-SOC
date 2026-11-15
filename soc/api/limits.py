@@ -7,7 +7,8 @@ with 413 without reading it, and counts the bytes of a streamed body (chunked, o
 Content-Length) and aborts at the limit.
 
 All limits are here. They sit above what the schemas allow, so a valid request always fits:
-500 alerts x 16 KiB explanation = 8 MiB (soc/api/routes/alerts.py) plus the other fields.
+500 alerts x (16 KiB explanation + 4 KiB features) = 10 MiB (soc/api/routes/alerts.py) plus
+the other fields.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ MiB = 1024 * KiB
 # Longest matching prefix wins; (prefix, limit in bytes). Paths are compared exactly or as
 # `prefix/...`, so "/actions" covers "/actions/3/confirm" but not "/actionsx".
 LIMITS: tuple[tuple[str, int], ...] = (
-    ("/ingest/alerts", 10 * MiB),        # 500 alerts x (16 KiB explanation + ~1 KiB), with margin
+    ("/ingest/alerts", 12 * MiB),        # 500 alerts x (16 KiB explanation + 4 KiB features + ~1 KiB)
     ("/ingest/blocks", 128 * KiB),       # 100 events x ~1 KiB
     ("/sensor/status", 64 * KiB),        # 100 allowlist entries + policy + faithfulness ~ 8 KiB
     ("/sensor/actions", 16 * KiB),       # a result is at most 4 KiB (MAX_RESULT_BYTES)

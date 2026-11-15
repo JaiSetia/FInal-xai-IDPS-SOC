@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from idps.detect.bundle import Bundle
+from idps.detect.bundle import Bundle, make_version
 from idps.detect.data import SEED
 from idps.detect.evaluate import evaluate_anomaly, evaluate_classifier
 from idps.detect.models import select_features, train_all
@@ -50,13 +50,33 @@ def _metrics_for(trained, part: pd.DataFrame) -> dict:
     return res
 
 
-def train_bundle(df: pd.DataFrame, meta: dict, model: str = "xgboost",
-                 split: str = "class-time",
-                 drop_features: list[str] | tuple[str, ...] = (), val: float | None = None,
-                 test: float | None = None, seed: int = SEED, *, gap_ms: int = DEFAULT_GAP_MS,
-                 allow_unseen_test_classes: bool = False,
-                 drop_duplicates: bool = True) -> tuple[Bundle, dict]:
-    """Split by time, train on the train split, evaluate on validation and test.
+def resplit(bundle: Bundle, df: pd.DataFrame) -> Split:
+    """The split `bundle` was trained with, rebuilt from the same labelled rows (its description
+    holds the mode and sizes). Gives the training rows (drift reference) and the held-out test
+    rows (retrain comparison) of a model that is already trained."""
+    d = bundle.split
+    mode = d["mode"]
+    if mode == "day":
+        val, test = len(d["validation_days"]), len(d["test_days"])
+    else:
+        val, test = d["val_frac"], d["test_frac"]
+    return make_split(df, mode, val, test, gap_ms=d.get("gap_ms", DEFAULT_GAP_MS),
+                      allow_unseen_test_classes=bool(d.get("allow_unseen_test_classes")),
+                      drop_duplicates=d.get("duplicates_dropped") is not None,
+                      features=list(bundle.features))
+
+
+def train_bundle_with_split(df: pd.DataFrame, meta: dict, model: str = "xgboost",
+                            split: str = "class-time",
+                            drop_features: list[str] | tuple[str, ...] = (),
+                            val: float | None = None, test: float | None = None,
+                            seed: int = SEED, *, gap_ms: int = DEFAULT_GAP_MS,
+                            allow_unseen_test_classes: bool = False,
+                            drop_duplicates: bool = True) -> tuple[Bundle, dict, Split]:
+    """Like train_bundle, but also returns the Split (the CLI needs the training rows for the
+    drift reference).
+
+    Split by time, train on the train split, evaluate on validation and test.
 
     Exact duplicate rows are dropped inside each split (drop_duplicates=False keeps them),
     and each part's metrics carry `train_overlap`: how many of its rows have a feature
@@ -75,8 +95,15 @@ def train_bundle(df: pd.DataFrame, meta: dict, model: str = "xgboost",
         metrics[part]["train_overlap"] = sp.description["identical_to_train"][part]
     bundle = Bundle(model_name=model, model=trained.model, label_encoder=trained.label_encoder,
                     features=features, extraction_meta=meta, split=sp.description,
-                    metrics=metrics, anomaly=trained.anomaly)
+                    metrics=metrics, anomaly=trained.anomaly,
+                    version=make_version(model, sp.train, features))
     report = {"model": model, "features": features, "dropped_features": list(drop_features),
               "seed": seed, "split": sp.description, "metrics": metrics,
-              "versions": bundle.versions}
+              "versions": bundle.versions, "version": bundle.version}
+    return bundle, report, sp
+
+
+def train_bundle(df: pd.DataFrame, meta: dict, *args, **kwargs) -> tuple[Bundle, dict]:
+    """Same arguments as train_bundle_with_split; returns (bundle, report)."""
+    bundle, report, _ = train_bundle_with_split(df, meta, *args, **kwargs)
     return bundle, report

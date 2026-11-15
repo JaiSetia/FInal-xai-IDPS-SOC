@@ -1,14 +1,26 @@
 """Alert ingest (sensors) and alert triage (analysts)."""
 
 import json
+import math
+import re
 from datetime import datetime
 from typing import Annotated, Any, Self
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from idps.features import MODEL_FEATURES
+from idps.features.labels import CIC_CLASSES
 from soc.api.auth import AnyUser, Sensor
 from soc.api.common import (
     Cursor,
@@ -30,6 +42,8 @@ router = APIRouter(tags=["alerts"])
 
 MAX_BATCH = 500
 MAX_EXPLANATION_BYTES = 16 * 1024
+MAX_FEATURES_BYTES = 4 * 1024  # 42 model features are about 1.5 KiB
+KNOWN_CLASSES = frozenset(CIC_CLASSES)  # CIC-IDS2017 labels (the trainer's) incl. BENIGN
 MAX_MS = 4_102_444_800_000  # year 2100; catches seconds/microseconds mix-ups
 
 
@@ -55,6 +69,27 @@ class ExplanationIn(BaseModel):
     top_features: list[FeatureContribution] = Field(default_factory=list, max_length=50)
 
 
+def clean_features(value: object) -> dict[str, float]:
+    """The feature vector as {name: float}, or ValueError. Must hold every MODEL_FEATURES name,
+    exactly, as finite numbers (a partial vector cannot be a training row), within the size cap."""
+    if not isinstance(value, dict) or set(value) != set(MODEL_FEATURES):
+        raise ValueError("features must be an object with exactly the model feature names")
+    out = {}
+    for k, v in value.items():
+        if isinstance(v, bool) or not isinstance(v, int | float):
+            raise ValueError(f"feature {k} must be a number")  # noqa: TRY004
+        try:
+            f = float(v)  # OverflowError for an int beyond float range
+        except OverflowError as exc:
+            raise ValueError(f"feature {k} is out of range") from exc
+        if not math.isfinite(f):
+            raise ValueError(f"feature {k} must be finite")
+        out[k] = f
+    if len(json.dumps(out, separators=(",", ":")).encode()) > MAX_FEATURES_BYTES:
+        raise ValueError(f"features are over {MAX_FEATURES_BYTES} bytes")
+    return out
+
+
 class AlertIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -69,6 +104,40 @@ class AlertIn(BaseModel):
     confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
     anomaly_score: float | None = Field(default=None, allow_inf_nan=False)
     explanation: ExplanationIn = Field(default_factory=ExplanationIn)
+    # Retraining inputs, sent by sensors that know how (all optional). Typed Any on purpose: a
+    # bad value must not fail the whole batch (version skew between sensor and SOC), so the
+    # after-validator below drops it from this alert and counts it (IngestResult).
+    features: Any = None
+    model_sha256: Any = None
+    model_version: Any = None
+    _features_dropped: bool = PrivateAttr(default=False)
+    _model_info_dropped: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="after")
+    def _sanitise_optional(self) -> Self:
+        if self.features is not None:
+            try:
+                self.features = clean_features(self.features)
+            except ValueError:
+                self.features, self._features_dropped = None, True
+        if self.model_sha256 is not None:
+            sha = self.model_sha256
+            if isinstance(sha, str) and re.fullmatch(r"[0-9a-fA-F]{64}", sha):
+                self.model_sha256 = sha.lower()
+            else:
+                self.model_sha256, self._model_info_dropped = None, True
+        if self.model_version is not None:
+            v = self.model_version
+            try:
+                if not isinstance(v, str):
+                    raise ValueError  # noqa: TRY004
+                v = plain_text(v.strip())
+                if not 1 <= len(v) <= 80:
+                    raise ValueError
+                self.model_version = v
+            except ValueError:
+                self.model_version, self._model_info_dropped = None, True
+        return self
 
     @field_validator("predicted_class")
     @classmethod
@@ -110,6 +179,10 @@ class IngestResult(BaseModel):
     accepted: int
     skipped_benign: int
     ids: list[int]
+    # Alerts stored without their optional `features` / model identity because those were
+    # unusable (a newer or odd sensor); the alert itself is kept.
+    features_dropped: int = 0
+    model_info_dropped: int = 0
 
 
 class AlertOut(BaseModel):
@@ -137,12 +210,58 @@ class AlertOut(BaseModel):
 
 class AlertDetail(AlertOut):
     explanation: dict[str, Any]
+    model_sha256: str | None = None
+    model_version: str | None = None
+    true_class: str | None = None  # the analyst's corrected class (PATCH /alerts/{id})
+    has_features: bool = False  # the feature vector itself is only in GET /training/feedback
+
+    @model_validator(mode="before")
+    @classmethod
+    def _has_features(cls, data: Any) -> Any:
+        if isinstance(data, Alert):
+            out = {k: getattr(data, k) for k in cls.model_fields if hasattr(data, k)}
+            out["has_features"] = data.features is not None
+            return out
+        return data
+
+
+def consistent_true_class(status: AlertStatus, true_class: str) -> bool:
+    """A confirmed alert is never BENIGN; a false positive is always BENIGN; other statuses
+    may keep whatever the analyst noted."""
+    if status == AlertStatus.CONFIRMED:
+        return true_class != "BENIGN"
+    if status == AlertStatus.FALSE_POSITIVE:
+        return true_class == "BENIGN"
+    return True
 
 
 class AlertPatch(BaseModel):
+    """`true_class`: the analyst's corrected class (a CIC-IDS2017 class or BENIGN). Sent as null
+    it clears the correction; left out it is kept, unless it contradicts the new status (BENIGN on
+    a confirmed alert, an attack class on a false positive), when the stored value is cleared."""
+
     model_config = ConfigDict(extra="forbid")
 
     status: AlertStatus
+    true_class: str | None = Field(default=None, max_length=64)
+
+    @field_validator("true_class")
+    @classmethod
+    def _known_class(cls, value: str | None) -> str | None:
+        if value is not None and value not in KNOWN_CLASSES:
+            raise ValueError("true_class must be one of the known classes: "
+                             + ", ".join(sorted(KNOWN_CLASSES)))
+        return value
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        if "true_class" in self.model_fields_set and self.true_class is not None:
+            benign = self.true_class == "BENIGN"
+            if self.status == AlertStatus.FALSE_POSITIVE and not benign:
+                raise ValueError("a false positive is BENIGN; true_class must be BENIGN or null")
+            if self.status == AlertStatus.CONFIRMED and benign:
+                raise ValueError("a confirmed (true positive) alert cannot be BENIGN")
+        return self
 
 
 @router.post("/ingest/alerts", response_model=IngestResult, status_code=201)
@@ -150,6 +269,8 @@ def ingest_alerts(batch: AlertBatch, sensor: Sensor, request: Request,
                   db: Annotated[Session, Depends(get_db)]):
     settings = request.app.state.settings
     rows, skipped = [], 0
+    features_dropped = sum(i._features_dropped for i in batch.alerts)
+    model_dropped = sum(i._model_info_dropped for i in batch.alerts)
     for item in batch.alerts:
         if item.predicted_class.casefold() == "benign":
             skipped += 1  # BENIGN is never stored
@@ -160,14 +281,17 @@ def ingest_alerts(batch: AlertBatch, sensor: Sensor, request: Request,
             **item.model_dump()))
     db.add_all(rows)
     audit(db, sensor, "ingest_alerts", f"sensor:{sensor.name}",
-          {"received": len(batch.alerts), "stored": len(rows), "skipped_benign": skipped})
+          {"received": len(batch.alerts), "stored": len(rows), "skipped_benign": skipped,
+           **({"features_dropped": features_dropped} if features_dropped else {}),
+           **({"model_info_dropped": model_dropped} if model_dropped else {})})
     db.commit()
     locator = request.app.state.geo
     # `src_geo` is only in the live message (not stored, not in GET /alerts): where the source is.
     request.app.state.broadcaster.publish_many(
         [AlertOut.model_validate(r).model_dump(mode="json") | {"src_geo": geo_out(locator, r.src_ip)}
          for r in rows])
-    return IngestResult(accepted=len(rows), skipped_benign=skipped, ids=[r.id for r in rows])
+    return IngestResult(accepted=len(rows), skipped_benign=skipped, ids=[r.id for r in rows],
+                        features_dropped=features_dropped, model_info_dropped=model_dropped)
 
 
 @router.get("/alerts", response_model=Page[AlertOut])
@@ -214,7 +338,16 @@ def patch_alert(alert_id: int, body: AlertPatch, user: AnyUser,
     alert = get_or_404(db, Alert, alert_id, "alert")
     old = alert.status
     alert.status = body.status
-    audit(db, user, "alert_status", f"alert:{alert.id}",
-          {"from": old.value, "to": body.status.value})
+    details = {"from": old.value, "to": body.status.value}
+    if "true_class" in body.model_fields_set:
+        new_class = body.true_class  # already checked against the new status (AlertPatch)
+    else:  # keep the stored one unless it contradicts the new status
+        new_class = alert.true_class
+        if new_class is not None and not consistent_true_class(body.status, new_class):
+            new_class = None
+    if new_class != alert.true_class:
+        details["true_class"] = [alert.true_class, new_class]
+        alert.true_class = new_class
+    audit(db, user, "alert_status", f"alert:{alert.id}", details)
     db.commit()
     return AlertDetail.model_validate(alert)

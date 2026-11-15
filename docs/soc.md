@@ -229,6 +229,65 @@ client would only see alerts ingested by its own worker. Scaling out needs a sha
   connected), so a burst of block reports cannot push alerts out or get a client disconnected. A
   client that falls behind on alerts is still disconnected (4408) as before.
 
+## Learning from analysts (roadmap B1)
+
+**What a sensor sends.** Each alert may carry `features` (the flow's model features, a JSON object
+of `MODEL_FEATURES` names to finite numbers, at most 4 KiB; unknown names are refused),
+`model_sha256` (64 hex) and `model_version` (at most 80 characters). All optional: older sensors
+send none and their alerts simply cannot become training rows. **Upgrade the SOC before the
+sensors.** A newer SOC tolerates version skew: an unusable `features` (unknown or missing names,
+not finite, over the cap, too big a number, `{}`) or an odd `model_sha256` / `model_version` is
+dropped from that alert, the alert is stored, and the ingest answer counts them
+(`features_dropped`, `model_info_dropped`; the audit row too). An older SOC refuses unknown
+fields outright (422 for the whole batch), so a new sensor against an old SOC must run with
+`IDPS_LIVE_SEND_FEATURES=false`. `features` must hold every `MODEL_FEATURES` name or be absent. `GET /alerts/{id}` shows
+`model_sha256`, `model_version`, `true_class` and `has_features`; the feature vector itself is only
+in `GET /training/feedback`.
+
+**Verdicts.** `PATCH /alerts/{id}` takes `status` (now also `confirmed`, a true positive) and an
+optional `true_class`: one of the CIC-IDS2017 class names (`idps.features.labels.CIC_CLASSES`,
+exact spelling) or `BENIGN`. Left out it is kept, unless it contradicts the new status (BENIGN on a confirmed alert, an attack
+class on a false positive), in which case it is cleared. A false positive may only carry `BENIGN`;
+a confirmed alert may not be `BENIGN`, and the export labels a confirmed alert with its predicted
+class when it has no other `true_class`. The audit row `alert_status` records
+`{from, to, true_class: [old, new]}`.
+
+**Model versions.** Every `POST /sensor/status` with a model digest upserts a `model_versions` row
+per (sensor, sha256) (`name`, `version`, `first_seen`, `last_seen`). `GET /models` (analyst; revoked sensors, and models only they ran, are hidden from analysts, admins see all) lists
+the versions, newest first, with the sensors that ran each and which of them run it now (that
+sensor's latest status names this sha256). `GET /sensors/status` shows each sensor's
+`model.sha256` / `model.version` and its `drift` object (see `docs/live.md`, "Model version and
+drift").
+
+**Export and retrain.**
+
+```sh
+python -m soc.api.export_feedback --db sqlite:///soc.db --model models/week_xgboost.joblib \
+    -o data/processed/feedback.parquet
+python -m idps.detect retrain --data data/processed/{monday,tuesday,wednesday,thursday,friday}_labelled.parquet \
+    --feedback data/processed/feedback.parquet --current models/week_xgboost.joblib \
+    -o models/week_xgboost_v2.joblib
+```
+
+The export keeps alerts that are `false_positive` (label `BENIGN`) or `confirmed` (label
+`true_class`, else the predicted class), have features, and were scored by exactly this model
+(`alert.model_sha256` equals the model's digest, so rows an earlier round already trained on are
+not used twice). Repeated ingests of one flow (same sensor, 5-tuple, start and end) count once
+(`duplicates`). Others are skipped and counted (`no_features`, `other_model`, `bad_features`). The
+file has the model's extraction metadata, so `read_features` / `check_same_extraction` work on it.
+`retrain` first drops duplicate feedback vectors, then splits each label by time (oldest 70% train,
+newest 30% holdout) and trains the same model type on the base training rows plus the training part
+(weighted `--feedback-weight`, default 5; a class only the feedback has is weighted 1 and named in
+the report as a new class). It refuses data that does not reproduce the current model's split
+(`--allow-different-base` overrides, and the report says so). It never keeps a model when the
+holdout has fewer than `--min-holdout` (5) rows. It writes the new model only if macro-F1 on the
+current model's own base test split is within `--tolerance` (0.005) of the current model's AND
+accuracy on the feedback holdout is at least the current model's. Otherwise it exits 3 and writes
+nothing; it never writes over `--current`. A comparison report goes to
+`reports/retrain_<version>.json` either way. `GET /training/feedback` (admin only, audited as
+`training_feedback_read`; `limit` up to 1000, `after_id`, `model_sha256`) returns the same rows as
+JSON.
+
 ## Database
 
 SQLite (`sqlite:///./soc.db`) for development; PostgreSQL in deployment. Tables are created
@@ -238,7 +297,7 @@ means recreating the development database. Timestamps are stored and returned as
 UTC.
 
 Tables: `users`, `sensor_tokens`, `alerts`, `blocks`, `actions`, `cases`, `case_notes`,
-`audit_log`, `would_blocks`, `sensor_status`.
+`audit_log`, `would_blocks`, `sensor_status`, `model_versions`.
 
 ## Maps
 
@@ -302,8 +361,14 @@ correct block proposals, and response time.
 ## Upgrading an existing database
 
 Tables are created with `create_all`, which adds missing tables but **not** new columns on
-existing tables (proper migrations with Alembic are a later step). After pulling a change that
-adds a column, either start from a fresh database or add the column by hand, for example:
+existing tables (proper migrations with Alembic are a later step, roadmap step 10). As a
+**temporary** stop-gap, `init_db` also runs `soc.api.db.upgrade_schema` at start-up: it issues
+`ALTER TABLE ... ADD COLUMN` for every nullable column the models have and the database lacks
+(SQLite and PostgreSQL), and does nothing when there is nothing to add. It adds plain columns only
+(no defaults or constraints; it also creates the indexes the models declare on those columns),
+tolerates another process adding the same column at the same moment, never drops or retypes anything, and refuses (start-up
+error) a missing column that is not nullable. Older changes that are not covered by it can still be
+added by hand, for example:
 
 ```sh
 sqlite3 soc.db "ALTER TABLE assistant_conversations ADD COLUMN busy_since DATETIME;"

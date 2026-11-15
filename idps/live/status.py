@@ -13,6 +13,7 @@ import threading
 from datetime import UTC, datetime
 from importlib import metadata
 
+from idps.detect.bundle import model_version
 from idps.live.text import clean
 from idps.soc_client import SocError, SocRejectedError
 
@@ -31,11 +32,16 @@ def _version() -> str | None:
 
 def build_status(*, engine, bundle, live_settings, metrics, sink, heartbeat=None,
                  interface: str | None, checksum_ok: bool = True,
-                 faithfulness: dict | None = None) -> dict:
+                 faithfulness: dict | None = None, model_sha256: str | None = None,
+                 drift=None, extended: bool = True) -> dict:
     """The body of POST /sensor/status.
 
     `checksum_ok` is True because load_bundle() refuses to start on a bundle whose sha256 does
-    not match; the live loop never runs with a failed check."""
+    not match; the live loop never runs with a failed check.
+
+    `model_sha256` is the digest load_bundle verified. `drift` is an idps.detect.drift monitor
+    (DriftMonitor or NoDrift); its report goes out as `drift`. `extended=False` leaves out the
+    model digest/version and the drift (an older SOC refuses unknown fields)."""
     policy = engine.policy
     stats = metrics.status()
     payload = {
@@ -63,6 +69,11 @@ def build_status(*, engine, bundle, live_settings, metrics, sink, heartbeat=None
         "sensor_version": _version(),
         "sent_at": datetime.now(UTC).isoformat(),
     }
+    if extended:
+        payload["model"] |= {"sha256": model_sha256,
+                             "version": clean(model_version(bundle, model_sha256))[:80]}
+        if drift is not None:
+            payload["drift"] = drift.report()
     if faithfulness is not None:  # read once at start-up (idps.live.faithfulness)
         payload["faithfulness"] = faithfulness
     return payload

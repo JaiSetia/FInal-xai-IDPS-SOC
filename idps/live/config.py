@@ -39,6 +39,14 @@ class LiveSettings(BaseSettings):
     # start. Only used when a SOC is configured.
     status_seconds: float = Field(default=30.0, ge=5.0, le=3600.0)
 
+    # Drift monitor: how many of the latest scored flows (all of them) are compared with the
+    # training data's distribution (needs `<model>.drift.json`, see idps.detect.drift).
+    # Send each alert's model features and model identity, and the model sha256/version and drift
+    # in the status. Switch off ONLY to run a new sensor against an older SOC, which refuses
+    # unknown fields (upgrade the SOC first, then sensors; see docs/live.md).
+    send_features: bool = True
+    drift_window: int = Field(default=5000, ge=100, le=1_000_000)
+
     metrics_seconds: float = Field(default=10.0, gt=0.0)
 
     soc_url: str | None = Field(default=None, validation_alias=AliasChoices("IDPS_SOC_URL"))

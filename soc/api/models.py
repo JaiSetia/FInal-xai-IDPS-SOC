@@ -14,6 +14,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -71,6 +72,7 @@ class AlertStatus(enum.StrEnum):
     ACKNOWLEDGED = "acknowledged"
     FALSE_POSITIVE = "false_positive"
     RESOLVED = "resolved"
+    CONFIRMED = "confirmed"  # true positive: the analyst agrees with the detection
 
 
 class CaseStatus(enum.StrEnum):
@@ -152,6 +154,13 @@ class Alert(Base):
     status: Mapped[AlertStatus] = mapped_column(_enum(AlertStatus), default=AlertStatus.NEW,
                                                 index=True)
     case_id: Mapped[int | None] = mapped_column(ForeignKey("cases.id"), nullable=True, index=True)
+    # Learning from analysts: the flow's model features and which model scored it (sent by
+    # sensors that know how), and the analyst's corrected class. All nullable: older alerts and
+    # older sensors have none. Existing databases get these columns from db.upgrade_schema.
+    features: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    model_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    model_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    true_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class Block(Base):
@@ -246,3 +255,19 @@ class SensorStatus(Base):
     sensor_id: Mapped[int] = mapped_column(ForeignKey("sensor_tokens.id"), primary_key=True)
     payload: Mapped[dict] = mapped_column(JSON)
     last_seen_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+
+class ModelVersion(Base):
+    """A model (by sha256) that a sensor has reported running. One row per (sensor, sha256);
+    `last_seen` moves on every status report, so the newest row of a sensor is what it runs now."""
+
+    __tablename__ = "model_versions"
+    __table_args__ = (UniqueConstraint("sensor_id", "sha256", name="uq_model_sensor_sha"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sensor_id: Mapped[int] = mapped_column(ForeignKey("sensor_tokens.id"), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    version: Mapped[str] = mapped_column(String(80))
+    first_seen: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    last_seen: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)

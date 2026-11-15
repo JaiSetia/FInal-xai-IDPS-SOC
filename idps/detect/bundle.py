@@ -15,6 +15,7 @@ import os
 import platform
 import stat
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 
 import joblib
@@ -50,6 +51,10 @@ class Bundle:
     anomaly: object | None = None
     versions: dict = field(default_factory=library_versions)
     format: int = BUNDLE_FORMAT
+    # `<model>-<UTC yyyymmddHHMM>-<sha8 of the training rows>`; None in bundles saved before
+    # versions existed (those report model_version() instead). Old pickles lack the attribute,
+    # so reading it falls back to this class default.
+    version: str | None = None
 
     def select(self, df: pd.DataFrame, meta: dict) -> pd.DataFrame:
         """Return df[features] after refusing mismatched extraction metadata or columns."""
@@ -77,6 +82,25 @@ class Bundle:
         if self.anomaly is None:
             raise ValueError("bundle has no anomaly detector")
         return anomaly_flags(self.anomaly, X[self.features])
+
+
+def make_version(model_name: str, train_rows: pd.DataFrame, features: list[str],
+                 now: datetime | None = None) -> str:
+    """`<model>-<UTC yyyymmddHHMM>-<first 8 hex of a hash of the training rows>`."""
+    cols = [*features, "label"]
+    h = hashlib.sha256(pd.util.hash_pandas_object(
+        train_rows[cols].reset_index(drop=True), index=False).to_numpy().tobytes()).hexdigest()
+    stamp = (now or datetime.now(UTC)).strftime("%Y%m%d%H%M")
+    return f"{model_name}-{stamp}-{h[:8]}"
+
+
+def model_version(bundle: Bundle, sha256: str | None = None) -> str:
+    """The bundle's version; for a bundle without one, `<model_name>-<sha256[:8]>` (or
+    `<model_name>-unversioned` when the digest is not known either)."""
+    version = getattr(bundle, "version", None)
+    if version:
+        return str(version)
+    return f"{bundle.model_name}-{sha256[:8] if sha256 else 'unversioned'}"
 
 
 def digest_path(path: str | Path) -> Path:

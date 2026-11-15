@@ -578,11 +578,11 @@ def test_a_failing_batch_is_logged_counted_and_never_handled_twice(bundle, monke
 
     real, calls = module.alert_payload, []
 
-    def flaky(row, pred, explanation=None):
+    def flaky(row, pred, explanation=None, **kwargs):
         calls.append(row["src_port"])
         if len(calls) == 2:
             raise RuntimeError("bug")
-        return real(row, pred, explanation)
+        return real(row, pred, explanation, **kwargs)
 
     monkeypatch.setattr(module, "alert_payload", flaky)
     sink = ListSink()
@@ -1221,7 +1221,8 @@ def test_status_payload_in_dry_run(bundle):
     p, _ = _status(bundle, allowlist=["10.10.1.1", "10.10.2.0/24"])
     assert p["dry_run"] is True and p["blocking_enabled"] is False
     assert p["mode"] == "live" and p["interface"] == "eth1"
-    assert p["model"] == {"name": bundle.model_name, "checksum_ok": True}
+    assert p["model"] == {"name": bundle.model_name, "sha256": None,
+                          "version": f"{bundle.model_name}-unversioned", "checksum_ok": True}
     assert p["policy"] == {"confidence_threshold": 0.9, "min_flows": 5, "window_seconds": 60.0,
                            "min_alert_confidence": 0.5, "block_ttl_seconds": 900,
                            "unblock_grace_seconds": 3600, "max_analyst_blocks": 1000}
@@ -2475,3 +2476,132 @@ def test_the_sensors_status_always_passes_the_socs_strict_schema(bundle):
             payload = build_status(engine=engine, bundle=bundle, live_settings=LiveSettings(),
                                    metrics=Metrics(), sink=ListSink(), interface=interface)
             StatusReport.model_validate(json.loads(json.dumps(payload)))
+
+
+# --- Learning from analysts: what the sensor sends -------------------------------------------------
+
+SHA = "ab" * 32
+
+
+def test_alerts_carry_features_and_the_model_identity(bundle):
+    sink = ListSink()
+    det = LiveDetector(bundle, quiet_engine(), sink, LiveSettings(metrics_seconds=3600.0), META,
+                       live=False, model_sha256=SHA, model_version="tiny-v1")
+    alerts = det.handle_batch([make_flow(80, i) for i in range(3)])
+    assert len(alerts) == 3
+    for a in alerts:
+        assert list(a["features"]) == MODEL_FEATURES
+        assert all(type(v) is float for v in a["features"].values())
+        assert a["features"]["dst_port"] == 80.0 and a["features"]["fwd_packets"] == 20.0
+        assert a["model_sha256"] == SHA and a["model_version"] == "tiny-v1"
+    AlertBatch.model_validate({"alerts": alerts})  # the SOC accepts exactly this
+
+
+def test_alert_payload_features_are_opt_in_and_finite_only():
+    from idps.soc_client import alert_payload
+
+    row = {**dict.fromkeys(FEATURE_COLUMNS, 1.0), "src_ip": "1.1.1.1", "dst_ip": "2.2.2.2",
+           "start_ms": 1, "end_ms": 2}
+    pred = Prediction("DDoS", 0.9)
+    assert "features" not in alert_payload(row, pred)
+    assert "model_sha256" not in alert_payload(row, pred)
+    p = alert_payload(row, pred, model_sha256=SHA, model_version="v", with_features=True)
+    assert p["features"] == dict.fromkeys(MODEL_FEATURES, 1.0)
+    assert p["model_sha256"] == SHA and p["model_version"] == "v"
+    for bad in (float("nan"), float("inf")):
+        p = alert_payload({**row, "fwd_packets": bad}, pred, with_features=True)
+        assert p is not None and "features" not in p  # no partial vector: the alert still goes
+    assert "features" not in alert_payload({k: v for k, v in row.items() if k != "iat_max"},
+                                           pred, with_features=True)
+
+
+def test_the_drift_monitor_sees_every_flow_not_only_alerts(bundle):
+    from idps.detect.drift import DriftMonitor, build_reference
+
+    ref = build_reference(pd.DataFrame([dict.fromkeys(MODEL_FEATURES, 0.0)] * 20), SHA)
+    mon = DriftMonitor(ref, window=100, min_window=1)
+    sink = ListSink()
+    det = LiveDetector(bundle, quiet_engine(), sink, LiveSettings(metrics_seconds=3600.0), META,
+                       live=False, drift=mon)
+    det.handle_batch([make_flow(80, 0), make_flow(443, 1), make_flow(53, 2)])  # 1 alert, 3 flows
+    assert len(sink.alerts) == 1 and mon.report()["window"] == 3
+
+
+def test_a_failing_drift_monitor_never_stops_detection(bundle):
+    class Broken:
+        def update(self, frame):
+            raise RuntimeError("boom")
+
+    sink = ListSink()
+    det = LiveDetector(bundle, quiet_engine(), sink, LiveSettings(metrics_seconds=3600.0), META,
+                       live=False, drift=Broken())
+    assert len(det.handle_batch([make_flow(80, 0)])) == 1
+
+
+def test_status_carries_model_identity_and_drift_and_the_soc_accepts_it(bundle):
+    from idps.detect.drift import DriftMonitor, NoDrift, build_reference
+    from idps.live.status import build_status
+    from soc.api.routes.sensors import StatusReport
+
+    ref = build_reference(pd.DataFrame([dict.fromkeys(MODEL_FEATURES, 0.0)] * 20), SHA)
+    engine = ResponseEngine(Settings(dry_run=True, allowlist=["10.10.1.1"]), blocker=FakeBlocker())
+    for drift in (DriftMonitor(ref, window=50), NoDrift("no drift reference"), None):
+        p = build_status(engine=engine, bundle=bundle, live_settings=LiveSettings(),
+                         metrics=Metrics(), sink=ListSink(), interface="eth1", model_sha256=SHA,
+                         drift=drift)
+        assert p["model"] == {"name": "xgboost", "sha256": SHA, "version": f"xgboost-{SHA[:8]}",
+                              "checksum_ok": True}
+        assert ("drift" in p) == (drift is not None)
+        StatusReport.model_validate(p)
+    p = build_status(engine=engine, bundle=bundle, live_settings=LiveSettings(),
+                     metrics=Metrics(), sink=ListSink(), interface="eth1", model_sha256=SHA,
+                     drift=NoDrift("why"))
+    assert p["drift"] == {"level": "unknown", "reason": "why"}
+
+
+def test_replay_alerts_name_the_model_that_scored_them(model_file, tmp_path):
+    from idps.detect.bundle import model_version, read_digest
+
+    pcap = write_pcap(tmp_path / "attack.pcap", attack_packets(n=2))
+    out = tmp_path / "alerts.jsonl"
+    assert main(["--pcap", str(pcap), "--model", str(model_file), "--alerts-file", str(out)]) == 0
+    sha = read_digest(model_file)
+    alerts = lines(out)
+    assert alerts and all(a["model_sha256"] == sha and set(a["features"]) == set(MODEL_FEATURES)
+                          and a["model_version"] == model_version(load_bundle(model_file), sha)
+                          for a in alerts)
+
+
+def test_send_features_off_sends_nothing_an_older_soc_would_refuse(bundle, model_file, tmp_path,
+                                                                  monkeypatch):
+    from idps.detect.drift import NoDrift
+    from idps.live.status import build_status
+
+    sink = ListSink()
+    det = LiveDetector(bundle, quiet_engine(), sink, LiveSettings(metrics_seconds=3600.0), META,
+                       live=False, send_features=False)
+    (a,) = det.handle_batch([make_flow(80, 0)])
+    assert not {"features", "model_sha256", "model_version"} & set(a)
+    engine = ResponseEngine(Settings(dry_run=True, allowlist=["10.10.1.1"]), blocker=FakeBlocker())
+    p = build_status(engine=engine, bundle=bundle, live_settings=LiveSettings(), metrics=Metrics(),
+                     sink=ListSink(), interface=None, model_sha256=SHA, drift=NoDrift("x"),
+                     extended=False)
+    assert p["model"] == {"name": "xgboost", "checksum_ok": True} and "drift" not in p
+    assert LiveSettings().send_features is True
+    monkeypatch.setenv("IDPS_LIVE_SEND_FEATURES", "false")
+    assert LiveSettings().send_features is False
+    pcap = write_pcap(tmp_path / "a.pcap", attack_packets(n=2))
+    out = tmp_path / "alerts.jsonl"
+    assert main(["--pcap", str(pcap), "--model", str(model_file), "--alerts-file", str(out)]) == 0
+    assert lines(out) and not any("features" in a or "model_sha256" in a for a in lines(out))
+
+
+def test_the_model_version_in_an_alert_is_printable_and_at_most_80_characters():
+    from idps.soc_client import alert_payload
+
+    row = {**dict.fromkeys(FEATURE_COLUMNS, 1.0), "src_ip": "1.1.1.1", "dst_ip": "2.2.2.2",
+           "start_ms": 1, "end_ms": 2}
+    p = alert_payload(row, Prediction("DDoS", 0.9), model_version="v\u202e1\n" + "x" * 200)
+    assert len(p["model_version"]) == 80 and p["model_version"].startswith("v1x")
+    AlertBatch.model_validate({"alerts": [p]})
+    assert "model_version" not in alert_payload(row, Prediction("DDoS", 0.9), model_version="\n")

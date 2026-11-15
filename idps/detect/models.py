@@ -79,8 +79,12 @@ class TrainedModels:
     anomaly: IsolationForest | None
 
 
-def train_classifier(name: str, X: pd.DataFrame, y: pd.Series, seed: int = SEED):
-    """Fit one classifier on the training split; returns (model, fitted LabelEncoder)."""
+def train_classifier(name: str, X: pd.DataFrame, y: pd.Series, seed: int = SEED,
+                     extra_weight: np.ndarray | None = None):
+    """Fit one classifier on the training split; returns (model, fitted LabelEncoder).
+
+    `extra_weight` (one value per row) multiplies the class-balancing weights; retraining uses it
+    to count analyst feedback rows more than one. Without it the fit is exactly as before."""
     encoder = LabelEncoder().fit(y)
     y_enc = encoder.transform(y)
     if len(encoder.classes_) < 2:
@@ -91,11 +95,18 @@ def train_classifier(name: str, X: pd.DataFrame, y: pd.Series, seed: int = SEED)
                          f"and needs at least 2 training rows per class; too few for {rare}")
     model = build_model(name, seed, len(encoder.classes_))
     weights = balanced_sample_weights(y_enc)
+    if extra_weight is not None:
+        extra = np.asarray(extra_weight, dtype=float)
+        if extra.shape != weights.shape or not np.all(np.isfinite(extra)) or (extra <= 0).any():
+            raise ValueError("extra_weight must be positive, finite, one per training row")
+        weights = weights * extra
     if name == "xgboost":
         model.fit(X, y_enc, sample_weight=weights)
     elif name == "mlp":
         model.fit(X, y_enc, mlp__sample_weight=weights)
-    else:  # rf uses class_weight="balanced"
+    elif extra_weight is not None:  # rf: class_weight="balanced" stays; this multiplies it
+        model.fit(X, y_enc, sample_weight=np.asarray(extra_weight, dtype=float))
+    else:
         model.fit(X, y_enc)
     return model, encoder
 
@@ -114,9 +125,9 @@ def train_anomaly(X: pd.DataFrame, y: pd.Series, seed: int = SEED) -> IsolationF
 
 
 def train_all(name: str, train: pd.DataFrame, features: list[str],
-              seed: int = SEED) -> TrainedModels:
+              seed: int = SEED, extra_weight: np.ndarray | None = None) -> TrainedModels:
     X, y = train[features], train["label"]
-    model, encoder = train_classifier(name, X, y, seed)
+    model, encoder = train_classifier(name, X, y, seed, extra_weight)
     return TrainedModels(name, model, encoder, list(features), train_anomaly(X, y, seed))
 
 

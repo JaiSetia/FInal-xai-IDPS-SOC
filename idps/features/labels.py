@@ -18,6 +18,13 @@ import numpy as np
 import pandas as pd
 
 UNMATCHED = "UNMATCHED"
+# Every class of the CIC-IDS2017 label files (what the trainer's data can contain), plus BENIGN.
+# The SOC accepts only these as an analyst's corrected class.
+CIC_CLASSES = (
+    "BENIGN", "Bot", "DDoS", "DoS GoldenEye", "DoS Hulk", "DoS Slowhttptest", "DoS slowloris",
+    "FTP-Patator", "Heartbleed", "Infiltration", "PortScan", "SSH-Patator",
+    "Web Attack - Brute Force", "Web Attack - Sql Injection", "Web Attack - XSS",
+)
 LABEL_COLUMNS = ["src_ip", "src_port", "dst_ip", "dst_port", "protocol", "start_ms", "end_ms", "label"]
 # Optional extra column written by normalize_cic_labels: how coarse the row's timestamp is.
 RESOLUTION_COLUMN = "ts_resolution_ms"

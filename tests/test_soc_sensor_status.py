@@ -357,8 +357,8 @@ def test_analysts_get_a_redacted_listing(client, sensor_headers, analyst_headers
     assert st["allowlist"] is None and st["policy"] is None
     # everything else the dashboard needs is still there
     assert st["allowlist_total"] == 2 and st["mode"] == "live" and st["dry_run"] is True
-    assert st["blocking_enabled"] is False and st["model"] == {"name": "xgboost",
-                                                               "checksum_ok": True}
+    assert st["blocking_enabled"] is False and st["model"] == {
+        "name": "xgboost", "sha256": None, "version": None, "checksum_ok": True}
     assert st["heartbeat"] == {"enabled": True, "ok": True} and st["outbox_pending"] == 3
     assert st["counters"]["would_block"] == 2 and st["faithfulness"]["model"] == "xgboost"
     text = client.get("/sensors/status", headers=analyst_headers).text
@@ -408,7 +408,8 @@ def test_the_first_report_is_audited_and_unchanged_reports_are_not(client, senso
     ({"blocking_enabled": True}, {"blocking_enabled": [False, True]}),
     ({"mode": "replay", "interface": None}, {"mode": ["live", "replay"]}),
     ({"model": {"name": "rf", "checksum_ok": True}},
-     {"model": [{"name": "xgboost", "checksum_ok": True}, {"name": "rf", "checksum_ok": True}]}),
+     {"model": [{"name": "xgboost", "sha256": None, "version": None, "checksum_ok": True},
+                {"name": "rf", "sha256": None, "version": None, "checksum_ok": True}]}),
 ])
 def test_a_change_of_a_watched_field_is_audited(client, sensor_headers, admin_headers, change,
                                                 expected):

@@ -1,14 +1,20 @@
 // Shapes returned by the SOC API (see soc/api/routes/*.py and docs/soc.md).
 
 export type Severity = "low" | "medium" | "high" | "critical";
-export type AlertStatus = "new" | "acknowledged" | "false_positive" | "resolved";
+export type AlertStatus = "new" | "acknowledged" | "confirmed" | "false_positive" | "resolved";
 export type ActionKind = "block_ip" | "unblock_ip";
 export type ActionStatus = "pending" | "confirmed" | "rejected" | "executed" | "failed";
 export type CaseStatus = "open" | "investigating" | "closed";
 export type Role = "analyst" | "admin";
 
 export const SEVERITIES: Severity[] = ["low", "medium", "high", "critical"];
-export const ALERT_STATUSES: AlertStatus[] = ["new", "acknowledged", "false_positive", "resolved"];
+export const ALERT_STATUSES: AlertStatus[] = ["new", "acknowledged", "confirmed", "false_positive", "resolved"];
+/** Classes an analyst can name as an alert's real class (idps/features/labels.py CIC_CLASSES). */
+export const ATTACK_CLASSES = [
+  "Bot", "DDoS", "DoS GoldenEye", "DoS Hulk", "DoS Slowhttptest", "DoS slowloris",
+  "FTP-Patator", "Heartbleed", "Infiltration", "PortScan", "SSH-Patator",
+  "Web Attack - Brute Force", "Web Attack - Sql Injection", "Web Attack - XSS",
+] as const;
 export const CASE_STATUSES: CaseStatus[] = ["open", "investigating", "closed"];
 
 export interface Page<T> {
@@ -52,6 +58,13 @@ export interface Explanation {
 
 export interface AlertDetail extends Alert {
   explanation: Explanation;
+  /** Model that scored the flow; null from older sensors. */
+  model_sha256?: string | null;
+  model_version?: string | null;
+  /** Analyst's correction of the class (confirmed alerts only). */
+  true_class?: string | null;
+  /** The sensor sent the flow's feature values, so the alert can become a training row. */
+  has_features?: boolean;
 }
 
 export interface Block {
@@ -171,7 +184,10 @@ export interface SensorReport {
   blocking_enabled: boolean;
   interface: string | null;
   mode: "live" | "replay";
-  model: { name: string; checksum_ok: boolean };
+  /** sha256 and version are missing or null from older sensors. */
+  model: { name: string; checksum_ok: boolean; sha256?: string | null; version?: string | null };
+  /** Live traffic against the model's training data; missing or null from older sensors. */
+  drift?: Drift | null;
   /** null for analysts: only admins see the policy and allowlists. */
   policy: SensorPolicy | null;
   allowlist: string[] | null;
@@ -185,6 +201,30 @@ export interface SensorReport {
   counters: { flows: number; alerts: number; blocked: number; would_block: number };
   sensor_version: string | null;
   sent_at: string | null;
+}
+
+export type DriftLevel = "ok" | "watch" | "drift" | "unknown";
+
+export interface Drift {
+  level: DriftLevel;
+  /** Flows in the rolling window. */
+  window: number | null;
+  /** Largest population stability index over the features; null while warming up or without a reference. */
+  psi_max: number | null;
+  top: { feature: string; psi: number }[];
+  reference_sha256: string | null;
+  /** Set when level is "unknown". */
+  reason: string | null;
+}
+
+export interface ModelVersion {
+  sha256: string;
+  version: string | null;
+  name: string;
+  first_seen: string;
+  last_seen: string;
+  running_now: number;
+  sensors: { sensor_id: number; name: string; first_seen: string; last_seen: string; running_now: boolean; online: boolean }[];
 }
 
 export interface FaithfulnessMethod {

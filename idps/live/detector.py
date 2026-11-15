@@ -98,9 +98,17 @@ class LiveDetector:
         clock: Callable[[], float] = time.monotonic,
         wall: Callable[[], float] = time.time,
         heartbeat=None,
+        model_sha256: str | None = None,
+        model_version: str | None = None,
+        drift=None,
+        send_features: bool = True,
     ) -> None:
         self.bundle, self.engine, self.sink, self.settings = bundle, engine, sink, settings
         self.meta = meta
+        # Which model scored each alert (sent with it, so the SOC can export retraining rows),
+        # and the drift monitor (idps.detect.drift) that sees every scored flow, or None.
+        self.model_sha256, self.model_version, self.drift = model_sha256, model_version, drift
+        self.send_features = send_features  # False: an older SOC would refuse `features`
         self.metrics = metrics or Metrics()
         self.live = live
         self.outbox_capacity = outbox_capacity
@@ -216,6 +224,11 @@ class LiveDetector:
         X = self.bundle.select(frame, self.meta)  # refuses mismatched extraction or columns
         preds = score_frame(self.bundle, X)
         self.metrics.add("flows", len(flows))
+        if self.drift is not None:
+            try:
+                self.drift.update(frame)  # all flows, not only alerts
+            except Exception:
+                log.exception("drift monitor failed; continuing without it for this batch")
 
         for i, p in enumerate(preds):  # background: the first BENIGN flows seen
             if len(self._background) >= self.settings.background_size:
@@ -253,7 +266,8 @@ class LiveDetector:
             if pred.confidence < floor:
                 self.metrics.add("below_floor")
                 continue
-            payload = alert_payload(row, pred, explanation)
+            payload = alert_payload(row, pred, explanation, model_sha256=self.model_sha256,
+                                    model_version=self.model_version, with_features=self.send_features)
             if payload is None:  # confidence or times the SOC would refuse
                 log.warning("not alerting on a flow with unusable confidence/times: %s", row["src_ip"])
                 self.metrics.add("alerts_dropped")

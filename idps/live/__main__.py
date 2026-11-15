@@ -92,7 +92,8 @@ def run(args: argparse.Namespace) -> int:
         select_backend,
     )
     from idps.config import get_settings
-    from idps.detect.bundle import load_bundle, read_digest
+    from idps.detect.bundle import load_bundle, model_version, read_digest
+    from idps.detect.drift import load_monitor
     from idps.features import FEATURE_COLUMNS, extraction_meta
     from idps.live.actions import ActionPoller
     from idps.live.config import LiveSettings
@@ -154,6 +155,10 @@ def run(args: argparse.Namespace) -> int:
     except (OSError, ValueError):
         digest = None
     faithfulness = load_faithfulness(settings.faithfulness_report, bundle.model_name, digest)
+    version = model_version(bundle, digest)
+    drift = load_monitor(model_path, digest, live.drift_window)
+    log.info("model version %s; drift %s", version,
+             "monitored" if hasattr(drift, "psi_by_feature") else f"off ({drift.reason})")
     metrics = Metrics()
     outbox = None
     client = None
@@ -173,7 +178,9 @@ def run(args: argparse.Namespace) -> int:
 
     try:
         detector = LiveDetector(bundle, engine, sink, live, meta, metrics=metrics,
-                                live=bool(args.interface),
+                                live=bool(args.interface), model_sha256=digest if live.send_features else None,
+                                model_version=version if live.send_features else None,
+                                drift=drift, send_features=live.send_features,
                                 outbox_capacity=live.outbox_max_alerts if outbox else None)
     except (TypeError, ValueError) as exc:
         sink.close()
@@ -227,7 +234,9 @@ def run(args: argparse.Namespace) -> int:
             reporter = StatusReporter(client, lambda: build_status(
                 engine=engine, bundle=bundle, live_settings=live, metrics=metrics, sink=sink,
                 heartbeat=heartbeat, interface=args.interface,
-                faithfulness=faithfulness), interval=live.status_seconds)
+                faithfulness=faithfulness, model_sha256=digest, drift=drift,
+                extended=live.send_features),
+                interval=live.status_seconds)
             reporter.start()
             log.info("reporting status to the SOC every %g s", live.status_seconds)
         try:

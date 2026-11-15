@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api, query } from "../api/client";
 import {
-  SEVERITIES, type Action, type Alert, type Block, type MetricsSummary, type Page, type Severity, type WouldBlock,
+  SEVERITIES, type Action, type Alert, type Block, type DriftLevel, type MetricsSummary, type Page, type Severity, type WouldBlock,
 } from "../api/types";
 import {
   Card, ConfidenceBar, Countdown, ErrorText, PageHead, Pill, SeverityBadge, StatusText, useLoad, useNow,
@@ -286,7 +286,11 @@ function SensorHealth() {
         <dl key={sensor_id} className="kv small-kv">
           <dt>Sensor</dt><dd><b>{name}</b> · {st.mode === "live" ? `live on ${st.interface ?? "?"}` : "replaying a capture"}</dd>
           <dt>Mode</dt><dd>{st.dry_run ? "dry-run (blocks only logged)" : st.blocking_enabled ? "blocking" : "not blocking"}</dd>
-          <dt>Model</dt><dd>{st.model.name} {st.model.checksum_ok ? "· checksum ok" : "· checksum FAILED"}</dd>
+          <dt>Model</dt>
+          <dd>
+            {st.model.name} {st.model.checksum_ok ? "· checksum ok" : "· checksum FAILED"}
+            {st.model.version && <><br /><span className="mono small-text">{st.model.version}</span></>}
+          </dd>
           <dt>Heartbeat</dt><dd>{!st.heartbeat.enabled ? "off" : st.heartbeat.ok ? "1 / s · ok" : "failing"}</dd>
           <dt>Outbox</dt><dd>{st.outbox_pending.toLocaleString()} pending</dd>
           <dt>SHAP p95</dt><dd>{st.shap_p95_ms == null ? "—" : `${st.shap_p95_ms.toFixed(2)} ms`}</dd>
@@ -303,6 +307,66 @@ function SensorHealth() {
           <b>{x.name}</b>: {x.last_seen_at ? `offline, last seen ${ago(x.last_seen_at, now)}` : "has never reported"}
         </p>
       ))}
+    </Card>
+  );
+}
+
+const DRIFT_TONE = { ok: "ok", watch: "warn", drift: "danger", unknown: "neutral" } as const;
+const DRIFT_TEXT: Record<DriftLevel, string> = {
+  ok: "stable", watch: "watch", drift: "drifting", unknown: "unknown",
+};
+const DRIFT_RANK: Record<DriftLevel, number> = { unknown: 0, ok: 1, watch: 2, drift: 3 };
+
+/** Whether live traffic still looks like the model's training data, per online sensor (PSI per
+ *  feature over the sensor's last few thousand flows, against the training deciles). */
+function ModelDrift() {
+  const { data, error } = useSensors();
+  const live = reporting(data);
+  const drifts = live.map((s) => ({ s, d: s.status.drift ?? null }));
+  const worst = drifts.reduce<DriftLevel | null>((w, { d }) => {
+    const level = d?.level ?? "unknown";
+    return w === null || DRIFT_RANK[level] > DRIFT_RANK[w] ? level : w;
+  }, null);
+  // Unknown ranks lowest, so "stable" must still say when some sensors aren't measured.
+  const unknown = drifts.filter(({ d }) => (d?.level ?? "unknown") === "unknown").length;
+  return (
+    <Card title="Model drift" actions={worst && (
+      <Pill tone={DRIFT_TONE[worst]}>
+        {DRIFT_TEXT[worst]}{worst !== "unknown" && unknown > 0 ? ` · ${unknown} unknown` : ""}
+      </Pill>
+    )}>
+      <ErrorText error={error} />
+      {data && live.length === 0 && <p className="muted" style={{ margin: 0 }}>No sensor is online.</p>}
+      {drifts.slice(0, 3).map(({ s, d }) => (
+        <div key={s.sensor_id} className="drift-sensor">
+          <p style={{ margin: 0 }}>
+            <b>{s.name}</b>{" "}
+            <Pill tone={DRIFT_TONE[d?.level ?? "unknown"]}>{DRIFT_TEXT[d?.level ?? "unknown"]}</Pill>
+          </p>
+          {!d ? <p className="muted small-text" style={{ margin: "4px 0 0" }}>This sensor doesn't report drift (older version).</p>
+            : d.psi_max === null ? <p className="muted small-text" style={{ margin: "4px 0 0" }}>{d.reason ?? "Not measured yet."}</p>
+            : (
+              <>
+                <p className="small-text" style={{ margin: "4px 0 0" }}>
+                  Largest shift PSI {d.psi_max.toFixed(2)}
+                  {d.window ? <span className="muted"> over the last {d.window.toLocaleString()} flows</span> : null}
+                </p>
+                {d.top.length > 0 && (
+                  <ul className="small-text drift-top">
+                    {d.top.slice(0, 3).map((f) => (
+                      <li key={f.feature}><span className="mono">{f.feature}</span> <span className="muted">{f.psi.toFixed(2)}</span></li>
+                    ))}
+                  </ul>
+                )}
+              </>
+            )}
+        </div>
+      ))}
+      {live.length > 3 && <p className="muted small-text">and {live.length - 3} more online.</p>}
+      <p className="muted small-text" style={{ margin: "10px 0 0" }}>
+        PSI below 0.1 is stable; 0.1–0.25 is worth watching; above 0.25 the traffic no longer looks like the
+        training data. Mark alerts confirmed or false positive, then retrain.
+      </p>
     </Card>
   );
 }
@@ -523,6 +587,7 @@ export default function ThreatCenter() {
         <Firewall blocks={blocks.data?.items ?? null} more={!!blocks.data?.next_cursor} error={blocks.error} />
         <Decisions />
         <SensorHealth />
+        <ModelDrift />
         <TopologySummary hours={hours} />
       </div>
     </>
