@@ -71,8 +71,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-alert-confidence", type=float,
                         help="alert floor (IDPS_LIVE_MIN_ALERT_CONFIDENCE)")
     parser.add_argument("--no-heartbeat", action="store_true",
-                        help="live mode: do not send the 1 s UDP heartbeat that keeps NFStream's flow "
-                             "clock moving on a quiet link (see idps/live/heartbeat.py)")
+                        help="live mode: do not send the UDP heartbeat that keeps NFStream's flow "
+                             "clock moving on a quiet link (1 s, faster while a burst of finished "
+                             "flows drains; see idps/live/heartbeat.py)")
+    parser.add_argument("--heartbeat-burst-interval", type=float, default=None, metavar="SECONDS",
+                        help="live mode: heartbeat interval while a burst of finished flows drains "
+                             "(default 0.05; 0 keeps the 1 s heartbeat at all times)")
     parser.add_argument("--alerts-file", help="JSON-lines file used when no SOC is configured (IDPS_LIVE_ALERTS_FILE)")
     return parser
 
@@ -194,12 +198,15 @@ def run(args: argparse.Namespace) -> int:
             if args.interface:
                 # Only NFStream needs it: the scapy backend expires flows on a wall-clock timer.
                 if not args.no_heartbeat and backend == "nfstream":
-                    heartbeat = Heartbeat(args.interface)
+                    burst = args.heartbeat_burst_interval
+                    heartbeat = (Heartbeat(args.interface) if burst is None
+                                 else Heartbeat(args.interface, fast_interval=burst or None))
                     try:
                         heartbeat.start()
                         detector.heartbeat = heartbeat
                         log.info("heartbeat: one UDP broadcast per second on %s keeps flows "
-                                 "expiring on a quiet link", args.interface)
+                                 "expiring on a quiet link (faster while a burst of "
+                                 "finished flows drains)", args.interface)
                     except OSError as exc:
                         heartbeat = None
                         log.warning("no heartbeat (%s): on a quiet link, finished flows are only "
@@ -244,7 +251,10 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.heartbeat_burst_interval is not None and args.heartbeat_burst_interval < 0:
+        parser.error("--heartbeat-burst-interval must be 0 or more")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     return run(args)
 

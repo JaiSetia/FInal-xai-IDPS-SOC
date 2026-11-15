@@ -1,5 +1,6 @@
 #!/bin/sh
-# Expected class: Web attack. sqlmap against DVWA (default login admin/password).
+# Expected class: Web attack. sqlmap against DVWA (default login admin/password); --flush-session
+# so every run really attacks instead of replaying the results sqlmap cached last time.
 # Stops with an error if DVWA isn't set up or the login fails, so a failed run
 # never produces traffic that gets labelled as a web attack.
 . "$(dirname "$0")/common.sh"
@@ -29,4 +30,4 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' --cookie "PHPSESSID=$SESSID; secur
 [ "$CODE" = 200 ] || fail "login did not work (target page returned HTTP $CODE)"
 
 sqlmap -u "$BASE/vulnerabilities/sqli/?id=1&Submit=Submit" \
-  --cookie="PHPSESSID=$SESSID; security=low" --batch --level=2 --dbs
+  --cookie="PHPSESSID=$SESSID; security=low" --batch --flush-session --level=2 --dbs

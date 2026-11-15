@@ -194,6 +194,9 @@ class LiveDetector:
         extraction) is logged at error level and counted in `errors.batch`, and detection goes on
         with the next batch. Callers must not retry the same flows: some of them may already have
         reached the response engine."""
+        note = getattr(self.heartbeat, "note_flows", None)
+        if note is not None:
+            note(len(flows))  # lets the heartbeat speed up while a backlog drains
         key = getattr(self.heartbeat, "key", None)
         kept = [f for f in flows if not is_heartbeat(f, key)] if key else flows
         if len(kept) != len(flows):

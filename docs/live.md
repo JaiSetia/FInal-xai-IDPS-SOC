@@ -276,8 +276,138 @@ the loop logs a warning and runs without it; if the interface is only down for a
 retrying every second. The scapy backend expires flows on a wall-clock timer and doesn't need
 it. Turn it off with `--no-heartbeat`.
 
+**Burst mode.** Each packet lets NFStream 6.6 expire at most 1,000 idle flows. After an attack
+burst the heartbeat is often the only packet left, so with one a second, finished flows came out
+at about 1,000 a second, and a 100,000-flow burst took minutes to reach the SOC (lab benchmark,
+docs/results.md). So when the sensor sees at least 900 flows come out in one second (the output
+is capped), the heartbeat sends every 50 ms (20 packets a second) until the output has stayed
+under 250 flows a second for 3 s. Then it goes back to once a second, so a quiet link still
+sees one packet a second. Each switch is logged once. A busy link that really produces 900
+flows a second also switches it on, which costs 20 small broadcasts a second on a link that
+is already that busy. `--heartbeat-burst-interval SECONDS` changes the fast interval, and
+`--heartbeat-burst-interval 0` keeps the 1 s heartbeat at all times.
+
 Replay uses the flows' own timestamps for the response engine's windows, so blocks in a replay are
 deterministic.
+
+## Performance benchmark
+
+`scripts/bench_sensor.py` measures how much traffic the lab sensor keeps up with. It runs on the
+host (standard library only) and needs the lab up (`docker compose up -d --build` in `lab/`) and
+Wireshark's `editcap`/`mergecap`.
+
+```sh
+python scripts/bench_sensor.py                 # 10, 50, 100, 200 Mbit/s, about 30 minutes in all
+python scripts/bench_sensor.py --rates 50      # one rate, for a smoke test
+python scripts/bench_sensor.py --prepare-only  # make the sample and count its flows only
+```
+
+- **Sample.** The first run cuts `data/processed/bench_sample.pcap` (git-ignored, about 230 MB)
+  from `data/raw/pcap/Friday-WorkingHours.pcap`: four minutes of the PortScan burst and sixteen minutes
+  of the DDoS, so there are real alerts. Frames over 1514 bytes (offload artefacts that tcpreplay
+  cannot send) are dropped from it. Cutting scans the 8.8 GB file twice and
+  takes a few minutes; the whole capture is never copied. The sample is reused afterwards
+  (`--rebuild-sample` cuts it again).
+- **Ground truth.** The sample is extracted offline with the project's own NFStream pipeline in the
+  sensor container. `capture_ratio` is live flows / offline flows. It is a proxy for drops, not a
+  proof: live flows are timed by arrival, offline ones by the capture's timestamps, so a ratio a
+  little off 1.0 at 10 Mbit/s is normal; what matters is how it falls as the rate rises.
+- **Per rate.** The script starts the dry-run sensor, waits for two metrics lines, replays the
+  sample with `lab/attacks/replay.sh FILE RATE`, samples the sensor container's CPU and memory
+  every 2 s, then keeps the sensor running until its flow count has stopped rising (steady for
+  about 40 s, and at least 130 s after the replay, at most `--flush-seconds`, default 600). Flows
+  only come out of NFStream when they time out, and a fast replay leaves a backlog (before the
+  heartbeat's burst mode, about 1,000 flows a second came out, so draining took minutes);
+  stopping at a fixed time would under-count. Each rate takes about 6-8 minutes (the replay is 3 minutes at 10 Mbit/s and
+  under 40 s at the others; start-up is about 25 s; the drain is 2-5 minutes), so the full run
+  is about 30 minutes. `tcpreplay-edit` itself tops out near 120-140 Mbit/s in the lab, so the
+  "actual" rate at 200 is lower than the target; the report shows both.
+- **Output.** `reports/perf.json` (one entry per rate plus the sample's size, packets, offline
+  flows and SHA-256) and a markdown table on stdout: actual replay rate, flows, capture ratio,
+  peak flows/s, alerts and alerts sent, dropped alerts, flow-end-to-alert latency p50/p95, SHAP
+  p50/p95, CPU mean/max during the replay (docker's convention: 100 % is one core, 800 % the whole
+  8-CPU VM) and peak memory. These come from `docker stats`; if it reports 0 for the sensor (it
+  does on some Docker Desktop states) the sensor's own cgroup files are used, and `stats_source`
+  says which. Latency percentiles cover the last 2,000 alerts (see Metrics), and `flows_timeline`
+  shows the flow count over time. The file
+  is rewritten after each rate, so a failed run keeps what finished.
+- **Drop counters.** The sensor does not expose NFStream's own packet-drop counter. The report
+  gives the `lab_attack` interface counters (`rx_packets`, `rx_dropped`, `rx_errors` and the
+  kernel's softnet drops) as deltas over the replay, next to tcpreplay's sent and failed packets.
+- **Ctrl-C** stops the sensor inside the container and the replay, then prints what was measured.
+- `lab/attacks/replay.sh` takes the rate as an optional second argument (or `REPLAY_MBPS`);
+  the default stays 10 Mbit/s. Rebuild the attacker after changing it:
+  `docker compose up -d --build attacker`.
+
+## False-positive test
+
+`scripts/bench_benign.py` counts what the sensor raises on purely normal traffic in the lab. It
+runs on the host (standard library only) and needs the lab up, `lab/.env` with
+`LAB_VICTIM_PASSWORD`, `LAB_SOC_CHECK_USER` and `LAB_SOC_CHECK_PASSWORD`, and an attacker image
+with the ssh client. The attack scripts are copied into the image, so rebuild it whenever
+`lab/attacks/` changes: `docker compose build attacker && docker compose up -d --no-deps attacker`.
+
+```sh
+python scripts/bench_benign.py                 # 60 minutes of normal traffic, about 65 minutes in all
+python scripts/bench_benign.py --minutes 4     # a short smoke run
+```
+
+- **Traffic.** `lab/attacks/benign.sh [SECONDS]` runs in the attacker container (the lab's only
+  client) as one busy user, with random think times (1-8 s, sometimes 15-40 s). Web requests are
+  browser-like: a page of 10-50 KB (`/benign/index.html`, `page2.html`, `page3.html`, sometimes
+  nginx's default page) with its assets on one keep-alive connection, or the page and then the assets on up
+  to 6 parallel connections; DVWA pages the same way, with a login now and then; downloads of
+  100 KB - 50 MB; interactive-looking ssh sessions; small scp transfers; bursts of 15-40 requests
+  (an API poller on one connection, or a page with many assets); pings; and, at low weight, a
+  **connection-per-request** activity (`connreq`: a script or health check opening a new connection
+  for each request) so that pattern's rate shows apart. `TERM`/`INT` stop it at once.
+- **Logs.** One line per activity, plus one line per request with its client port
+  (`benign req ACTIVITY LPORT SERVER:PORT STATUS SECONDS PATH`). The run saves them to
+  `reports/lab_benign_activity.log`.
+- **Test files.** The script creates the pages, assets and files in the victim's nginx root
+  (`/var/www/html/benign/`, random data) before the run and deletes them afterwards, even after
+  Ctrl-C. To run `benign.sh` by hand, create them yourself (see the header of
+  `lab/attacks/benign.sh` and `setup_victim_files()` in the script) and pass the password:
+  `docker compose exec -e LAB_VICTIM_PASSWORD attacker /attacks/benign.sh 300`. Without the
+  password ssh and scp are skipped. `BENIGN_SEED=n` repeats the choices (activity, page, file,
+  counts) but not the timings.
+- **DVWA database.** If DVWA redirects the login to `setup.php` (no database), `benign.sh` creates
+  the database once, as `webattack.sh` does. An existing database is never reset.
+- **Sensor.** Dry-run, with the allowlist `10.10.1.1,10.10.1.2,10.10.3.0/24`. The client
+  (10.10.1.10) and the victims (10.10.2.0/24) are **not** allowlisted, so a false alert or
+  would-block on them shows. The script waits for two metrics lines, runs the traffic, keeps the
+  sensor running at least 150 s afterwards (flows are reported when their 120 s idle timeout fires)
+  until the flow count is steady, stops it and waits until it has gone.
+- **Only this run counts.** Before starting, the run aborts if the sensor's outbox file
+  (`/opt/idps/data/processed/live_outbox.json`) holds alerts or the sensor's first metrics line
+  has `outbox_pending` above 0 (old alerts would be re-sent and counted). It logs in to the SOC
+  before the traffic starts. The alerts are then read from the SOC and kept only if they are not
+  duplicates (same source, destination, ports, protocol and start), the flow ended no earlier than
+  10 s before the traffic began, both addresses are in 10.10.0.0/16 and they come from the lab
+  sensor. The rest are counted under `reconciliation.excluded` with their classes.
+- **Valid or not.** The report has `valid` and `invalid_reasons`. A run is invalid if
+  `benign.sh` exits non-zero, logs no activity or ends well before the time asked, the sensor
+  was stopped before draining, Ctrl-C was pressed, `outbox_pending` is not 0 at the end, the
+  sensor's `alerts` differ from `alerts_sent` or from the SOC's count for this run, alerts were
+  dropped, or the SOC could not be read at the end (then the report still has the sensor's counters
+  and a `soc_error`). The exit code is 1 for an invalid run.
+- **Result.** Every alert is a false positive, because nothing but normal traffic ran.
+  `reports/lab_benign.json` has the flows scored, malicious predictions, alerts, would-blocks (and
+  their addresses), false alerts per hour, the false-positive rate (alerts / flows scored), the
+  same by predicted class, source, destination and port, the confidence spread, and
+  **by activity**: requests, connections, false alerts and alerts per connection for each
+  activity type. An alert is matched to an activity by client port, server address:port and
+  time from the request lines (ssh, scp and ping have no known client port and match on address
+  and time); alerts that match nothing are listed as `unmatched`. A markdown table goes to stdout.
+- **Caveats.** The client is the attacker container, the address earlier attack runs used. The
+  model keeps no state between flows, so that history does not change the result. **The lab's
+  round-trip time is about 0.1 ms**, far below a real network's, so timing features (inter-arrival
+  times, flow durations) are unrealistically short and the model may react differently to the same
+  traffic on a real network. The traffic is one synthetic user on two servers, so the numbers say
+  how the model behaves on that mix, not on a real network. Do not run it together with an attack
+  script.
+- **Ctrl-C** (also `SIGTERM` and `SIGHUP`) stops the traffic and the sensor, removes the test
+  files and writes the report, marked `interrupted` and invalid.
 
 ## Known limitations
 
@@ -295,7 +425,8 @@ deterministic.
 * **NFStream starts its worker processes from the reader thread**, which Python 3.12 reports as a
   "multi-threaded fork" warning. It has caused no problem in replay or in the lab.
 * **The heartbeat is visible on the link**: one 1-byte broadcast a second from the sensor's
-  address, so it shows that a sensor is there. A host that listens on UDP 9 receives it.
+  address (20 a second while a burst drains), so it shows that a sensor is there. On a switch
+  with strict broadcast storm control, use `--heartbeat-burst-interval 0`. A host that listens on UDP 9 receives it.
 * **The heartbeat needs an IPv4 address on the capture interface.** On a port without one (a
   SPAN port) Linux may pick another interface's address as the source. Not tested.
 * **Heartbeat flows count towards `--max-flows`**: about one per 120 s, so slightly fewer real
@@ -377,3 +508,13 @@ dashboard buttons send them:
 
 This run used the new code copied into the running sensor container, because Docker's network
 kept timing out while rebuilding the image; the image picks the code up on its next build.
+
+## Every lab attack
+
+`scripts/lab_attacks.py` runs each lab attack (port scan, SSH brute force, rate-limited SYN flood, slow HTTP DoS, sqlmap) against the live sensor, in dry-run and with real 60 s blocks:
+
+- **Ground truth:** tcpdump on the sensor records the attacker's traffic, and the recording is scored offline with the same model, so capture loss and model mistakes can be told apart.
+- **Blocking:** it polls `inet idps blocked4` and checks the attacker's HTTP access to the victim before, during and after each block.
+- **Before each run:** it refuses to start while the sensor's outbox still holds alerts, and drops alerts for flows that ended before the run.
+
+The script needs `models/week_xgboost.joblib` in the sensor: `docker compose cp ../models/week_xgboost.joblib sensor:/opt/idps/models/`, the same for the `.sha256` file, then `chmod 644` them in the container. Results are in docs/results.md, "Every lab attack with the full-week model".

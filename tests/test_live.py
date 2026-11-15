@@ -891,6 +891,21 @@ def test_foreign_broadcasts_are_scored_and_nothing_is_dropped_without_a_heartbea
     assert det.metrics.counts["flows"] == 2
 
 
+def test_the_detector_reports_every_batch_to_the_heartbeat(bundle):
+    class CountingHeartbeat(FakeHeartbeat):
+        def __init__(self):
+            self.noted = []
+
+        def note_flows(self, n):
+            self.noted.append(n)
+
+    det = detector(bundle, ListSink())
+    det.heartbeat = hb = CountingHeartbeat()
+    det.handle_batch([heartbeat_flow(0)] + [make_flow(80, i) for i in range(3)])
+    det.handle_batch([heartbeat_flow(1)])
+    assert hb.noted == [4, 1]  # heartbeat flows count too: they left the capture
+
+
 class FakeSocket:
     def __init__(self, *args, fail=0, error=errno.ENETDOWN):
         self.options, self.sent, self.closed = [], [], False
@@ -979,6 +994,105 @@ def test_heartbeat_interval_must_be_positive():
 
     with pytest.raises(ValueError):
         Heartbeat("lab_attack", interval=0)
+
+
+def test_heartbeat_burst_mode_enters_at_the_cap_and_leaves_after_a_quiet_hold(caplog):
+    """On at >= burst_flows in the last second; off only after staying under burst_exit_flows
+    for BURST_HOLD seconds, so output near the threshold doesn't flip modes every second."""
+    from idps.live.heartbeat import BURST_HOLD, Heartbeat
+
+    now = [100.0]
+    hb = Heartbeat("lab_attack", interval=1.0, fast_interval=0.05, burst_flows=900,
+                   burst_exit_flows=250, clock=lambda: now[0])
+    with caplog.at_level(logging.INFO, logger="idps.live"):
+        assert hb.next_wait() == 1.0 and not hb.fast  # quiet link
+        hb.note_flows(899)
+        assert hb.next_wait() == 1.0  # one short of the cap
+        hb.note_flows(1)
+        assert hb.next_wait() == 0.05 and hb.fast  # exactly at the cap: burst
+        assert hb.next_wait() == 0.05  # stays on, logged once
+        for _ in range(10):  # the output hovers around 300/s: above the exit level, stays on
+            now[0] += 1.0
+            hb.note_flows(300)
+            assert hb.next_wait() == 0.05
+        now[0] += 1.01  # nothing for a second: under the exit level, but the hold isn't over
+        assert hb.next_wait() == 0.05
+        now[0] += BURST_HOLD
+        assert hb.next_wait() == 1.0 and not hb.fast
+        now[0] += 0.5
+        hb.note_flows(400)  # a normal busy second: not a capped output, stays at 1 s
+        assert hb.next_wait() == 1.0
+    assert hb.bursts == 1
+    msgs = [r.getMessage() for r in caplog.records]
+    assert sum("burst mode" in m for m in msgs) == 1
+    assert sum("back to every" in m for m in msgs) == 1
+
+
+def test_heartbeat_window_is_one_second_and_stays_bounded():
+    from idps.live.heartbeat import Heartbeat
+
+    now = [0.0]
+    hb = Heartbeat("lab_attack", burst_flows=1000, clock=lambda: now[0])
+    for _ in range(10_000):  # an hour of tiny batches, nobody calling next_wait
+        now[0] += 0.36
+        hb.note_flows(1)
+    assert len(hb._recent) <= 3  # pruned on every note, not only by the heartbeat thread
+    hb.note_flows(500)
+    now[0] += 1.0
+    hb.note_flows(500)
+    assert hb._recent_flows(now[0]) == 1001  # 1.0 s old still counts; older is gone
+    now[0] += 0.01
+    assert hb._recent_flows(now[0]) == 500
+
+
+def test_heartbeat_burst_mode_can_be_turned_off_and_settings_are_checked():
+    from idps.live.heartbeat import Heartbeat
+
+    off = Heartbeat("lab_attack", fast_interval=None, burst_flows=1, clock=lambda: 0.0)
+    off.note_flows(10_000)
+    assert off.next_wait() == 1.0 and not off.fast and not off._recent
+    assert Heartbeat("lab_attack", fast_interval=0).fast_interval is None
+    assert Heartbeat("lab_attack", interval=0.005, fast_interval=0.05).fast_interval == 0.005
+    hb = Heartbeat("lab_attack", burst_flows=1, clock=lambda: 0.0)
+    hb.note_flows(0)
+    hb.note_flows(-3)
+    assert hb.next_wait() == 1.0
+    for bad in ({"burst_flows": 0}, {"fast_interval": -1}, {"interval": 0}):
+        with pytest.raises(ValueError):
+            Heartbeat("lab_attack", **bad)
+
+
+def test_a_real_heartbeat_speeds_up_from_the_detectors_batches(bundle):
+    from idps.live.heartbeat import Heartbeat
+
+    now = [0.0]
+    hb = Heartbeat("lab_attack", burst_flows=5, clock=lambda: now[0])
+    hb.key = HB_KEY
+    det = detector(bundle, ListSink())
+    det.heartbeat = hb
+    det.handle_batch([make_flow(80, i) for i in range(3)])
+    assert hb.next_wait() == 1.0
+    det.handle_batch([heartbeat_flow(0)] + [make_flow(80, i) for i in range(1)])
+    assert hb.next_wait() == hb.fast_interval
+    assert det.metrics.counts["heartbeat_flows"] == 1
+
+
+def test_heartbeat_sends_fast_during_a_burst_and_stops_promptly(bindtodevice):
+    import time
+
+    from idps.live.heartbeat import Heartbeat
+
+    sock = FakeSocket()
+    now = [0.0]  # a frozen clock: the burst can't expire however slow the machine is
+    hb = Heartbeat("lab_attack", interval=5.0, fast_interval=0.01, burst_flows=10,
+                   sock_factory=lambda *a: sock, clock=lambda: now[0])
+    hb.note_flows(50)
+    hb.start()  # one beat at start, then fast: a 5 s heartbeat could never send 5 in time
+    wait_for(lambda: len(sock.sent) >= 5)
+    t = time.monotonic()
+    hb.stop()
+    assert time.monotonic() - t < 1.0
+    assert hb.bursts == 1
 
 
 # --- block reports to the SOC -----------------------------------------------------------------

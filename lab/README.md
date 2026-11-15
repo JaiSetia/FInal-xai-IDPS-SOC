@@ -40,8 +40,10 @@ Don't run anything else in them.
 
 ## Scripts
 
-`attacks/`: `portscan.sh`, `ssh_bruteforce.sh`, `dos.sh [syn|slow]`, `webattack.sh`
-(sqlmap vs DVWA), `replay.sh` (tcpreplay of dataset PCAPs). They all refuse to run unless
+`attacks/`: `portscan.sh`, `ssh_bruteforce.sh [EXTRA]` (EXTRA more wrong guesses), `dos.sh [syn [hping3-interval]|slow]`
+(for example `syn u500` = 2,000 SYN/s instead of a flood), `webattack.sh`
+(sqlmap vs DVWA), `replay.sh` (tcpreplay of dataset PCAPs), `benign.sh [SECONDS]`
+(normal traffic for the false-positive test, see [../docs/live.md](../docs/live.md)). They all refuse to run unless
 the targets are exactly 10.10.2.10 / 10.10.2.11 **and** they run inside the attacker container.
 
 Export `LAB_VICTIM_PASSWORD` in the attacker shell for the brute-force script to hit the real password.
