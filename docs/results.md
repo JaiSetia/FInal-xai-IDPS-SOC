@@ -368,3 +368,50 @@ Recall is the fair column. F1 and precision depend on how many normal flows ther
 On unseen traffic the model keeps its scores for attacks whose flows look the same on any network (scans and brute force) and loses them where the training data was narrow: one web server's timeout (slowloris), too little normal SSH (false SSH-Patator alerts), and attack types the dataset never had (SYN flood, SQL injection). This is the dataset-generalisation gap reported in the literature on CIC-IDS2017, measured on our own network. The fixes are more varied training data (B1's analyst feedback, or a second dataset like CSE-CIC-IDS2018) and rules next to the model for what flows can't show (B2).
 
 Limitations: 386 normal flows is a small sample, and the normal traffic comes from one generator on one host. CSE-CIC-IDS2018 was not tested (optional, needs a download).
+
+## ML against rules: Suricata with ET Open (lab and CIC-IDS2017 Friday, 15 November 2026)
+
+Suricata 7.0.10 with the free ET Open ruleset (updated 13 November 2026, 53,510 rules loaded) was run on the same traffic as the full-week model. Lab: two new recordings of every attack and of normal traffic (`data/raw/lab_pcaps/`, labelled the same way as the unseen-data test). CIC-IDS2017: the whole Friday capture, scored on the 34,687 Friday flows in the model's test split. HOME_NET is set to the protected network (lab 10.10.2.0/24, CIC 192.168.10.0/24) and EXTERNAL_NET to any, so the inbound-attack rules can fire. Suricata alerts are matched to flows by addresses, ports and time. Its own protocol-anomaly alerts ("SURICATA …") are counted separately. Almost all of them here are "TCPv4 invalid checksum", from checksum offload in the capture, and Suricata is told to ignore checksums. Script: `scripts/suricata_compare.py`; report: `reports/suricata_compare.json` (lab only: `reports/suricata_compare_lab.json`).
+
+Suricata's rules often fire once per attack (after a threshold, or on one request) rather than on every flow. So the table gives both: does each attack raise any alert at all, and what share of its flows were flagged. "Security" leaves out informational rules (ET INFO, ET POLICY, ping notices).
+
+### Lab
+
+| Attack | Suricata: any alert | Suricata: flows flagged | ML: flows flagged | Either |
+|---|---|---|---|---|
+| Port scan (nmap) | **no** | 0% | 100% | 100% |
+| SYN flood (hping3) | **no** | 0% | 100% (as PortScan) | 100% |
+| SSH brute force (hydra) | yes (4–6 alerts per run) | 10% | 100% | 100% |
+| SQL injection (sqlmap) | **yes** (41 alerts per run) | 25% | 0% | 25% |
+| Slow HTTP DoS (slowhttptest) | no | 0% | 0% | 0% |
+
+| Normal traffic (277 flows) | False-positive rate |
+|---|---|
+| Suricata, security rules | 2.9% (phpinfo page access; "Potential SSH Scan" from back-to-back SCP copies) |
+| Suricata, all rules | 4.7% (adds ping notices) |
+| ML model | 15.2% (the normal SSH sessions called SSH-Patator, as in the unseen-data test; SSH is a larger share of this recording) |
+
+### CIC-IDS2017 Friday (test-split flows)
+
+| Class | Flows | Suricata: any alert | Suricata: flows flagged | ML: flows flagged |
+|---|---|---|---|---|
+| PortScan | 1,660 | yes (3 in these flows; about 40 per database port over the day) | 0.3% | 99.9% |
+| DDoS (LOIC) | 3,646 | yes ("ET DOS Terse HTTP GET", 1 here, 20 over the day) | 0.0% | 99.6% |
+| Bot (Ares) | 123 | no | 0% | 0% |
+
+BENIGN false-positive rate on the 29,258 normal test flows: Suricata 0.1% (security rules) or 0.3% (all rules); ML 2.1%. The ML side is in-distribution here: same day and tools as its training data, and 13.1% of these test flows have the same features as a training flow.
+
+### What this shows
+
+- **The two catch different attacks.** In the lab, the model catches the port scan and the SYN flood, which the default ET Open rules miss: ET Open ships its nmap SYN-scan rules switched off, and none of its enabled rules fired on the SYN flood. Suricata catches sqlmap, which the model can't see, because the attack is in the request text and the database's error replies (`ET WEB_SERVER SQL Errors in HTTP 200 Response`). Together they catch 4 of the 5 lab attacks; either alone catches 3.
+- **Rules raise fewer false alarms.** Suricata's false-positive rate is 5–20× lower than the model's, in the lab and on CIC-IDS2017. Its rules describe specific bad behaviour, while the model flags anything that looks like an attack class.
+- **Rules flag attacks, not flows.** Suricata usually alerts once per attack, so it notices each scan, brute force and DDoS but flags few of their flows. The model scores every flow. That makes the model better for blocking decisions (step 4's policy counts confident flows) and Suricata better as a high-precision signal for analysts.
+- **Neither catches slow HTTP DoS.** ET Open has no slowloris rule, and the model learnt it from a different web server (see the unseen-data test).
+- **Neither catches the CIC-IDS2017 Bot in the test split.** No ET Open rule matches the Ares bot's traffic. The model's Bot result comes from the label conflict described in the full-week model section.
+
+### Summary for the report
+
+A flow-based ML model and a signature-based IDS are complementary. The model finds volumetric and behavioural attacks (scans, floods, brute force) without any rule, including traffic the rules ignore by default. Signatures find attacks that live in the payload (SQL injection) and raise far fewer false alarms. This supports step 8: run Suricata next to the model, send both to the SOC, and keep automatic blocking on the ML policy.
+
+LightGBM was not added (optional; see the roadmap).
+

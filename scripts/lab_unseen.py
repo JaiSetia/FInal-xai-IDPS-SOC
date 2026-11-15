@@ -5,6 +5,7 @@
         --out data/processed/lab_smoke.parquet          # a trial run: its own files
     python scripts/lab_unseen.py --sessions slow_dos --append   # add or replace sessions in the data
     python scripts/lab_unseen.py --score-only             # re-score data/processed/lab_labelled.parquet
+    python scripts/lab_unseen.py --keep-pcaps             # also keep each session's pcap (for scripts/suricata_compare.py)
 
 Offline only (no live sensor, no SOC). Each session records the attacker's traffic with tcpdump in the
 sensor, runs one attack (or benign.sh) in the attacker container, extracts the flows from the pcap
@@ -52,6 +53,7 @@ MODEL_REPORT = ROOT / "reports" / "week_xgboost.json"
 ATTACKER = la.ATTACKER
 ALERT_FLOOR = la.ALERT_FLOOR
 PCAP = "/tmp/lab_unseen.pcap"
+PCAP_DIR = ROOT / "data" / "raw" / "lab_pcaps"  # --keep-pcaps default (git-ignored with data/raw/*)
 FLOWS = "/tmp/lab_unseen.parquet"
 TCPDUMP_DRAIN = 3          # seconds to let the last packets reach tcpdump before stopping it
 TCPDUMP_STOP_WAIT = 15     # seconds for SIGINT to stop tcpdump before SIGKILL
@@ -447,11 +449,36 @@ def session_warnings(info: dict) -> list[str]:
     return out
 
 
-def run_session(session: str, repeat: int, benign_seconds: int, password: str) -> tuple[pd.DataFrame, dict, dict]:
-    """Record, run, extract and copy one session. Returns (labelled flows, extraction meta, info);
-    raises SessionError (with the info) when the session must not be used."""
-    from idps.features import read_features
+def pcap_name(session: str, repeat: int) -> str:
+    return f"{session}_{repeat}.pcap"
 
+
+def keep_pcap(session: str, repeat: int, dest_dir: Path) -> Path:
+    """Copy the session's pcap out of the sensor to dest_dir/<session>_<repeat>.pcap.part and return
+    that temporary path; the caller renames it with `commit_pcap` once the session succeeded."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    part = dest_dir / (pcap_name(session, repeat) + ".part")
+    try:
+        # Absolute: `docker compose` runs from lab/, so a relative path would land under lab/.
+        bs.compose("cp", f"sensor:{PCAP}", str(part.resolve()), timeout=900)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
+    return part
+
+
+def commit_pcap(part: Path) -> Path:
+    final = part.with_name(part.name.removesuffix(".part"))
+    os.replace(part, final)
+    return final
+
+
+def run_session(session: str, repeat: int, benign_seconds: int, password: str,
+                keep_pcaps: Path | None = None) -> tuple[pd.DataFrame, dict, dict]:
+    """Record, run, extract and copy one session. Returns (labelled flows, extraction meta, info);
+    raises SessionError (with the info) when the session must not be used. With `keep_pcaps`, the
+    pcap is copied out of the sensor before the next session removes it, under a temporary name, and
+    renamed to <keep_pcaps>/<session>_<repeat>.pcap only after extraction and labelling succeeded."""
     log(f"{session} #{repeat}")
     info: dict = {"session": session, "repeat": repeat}
     la.sh("sensor", f"pkill -INT -f '{la.tcpdump_pattern(PCAP)}'; rm -f {PCAP} {FLOWS}")
@@ -472,6 +499,27 @@ def run_session(session: str, repeat: int, benign_seconds: int, password: str) -
     errors = session_errors(session, info)
     if errors:
         raise SessionError("; ".join(errors), info)
+    part = None
+    if keep_pcaps is not None:
+        try:
+            part = keep_pcap(session, repeat, keep_pcaps)
+        except Exception as exc:  # noqa: BLE001
+            raise SessionError(f"could not copy the pcap out of the sensor: {exc}", info) from exc
+    try:
+        labelled, meta = _extract_and_label(session, repeat, info)
+        if part is not None:  # only a session that fully succeeded keeps its pcap
+            info["pcap"] = _rel(commit_pcap(part))
+            log(f"  pcap kept: {info['pcap']}")
+    except BaseException:
+        if part is not None:
+            part.unlink(missing_ok=True)
+        raise
+    return labelled, meta, info
+
+
+def _extract_and_label(session: str, repeat: int, info: dict) -> tuple[pd.DataFrame, dict]:
+    from idps.features import read_features
+
     r = la.sh("sensor", la.extract_cmd(PCAP, FLOWS), timeout=900)
     if r.returncode != 0:
         raise SessionError(f"flow extraction failed: {(r.stderr or r.stdout)[-500:]}", info)
@@ -490,7 +538,7 @@ def run_session(session: str, repeat: int, benign_seconds: int, password: str) -
     if warns:
         info["warnings"] = warns
     log(f"  {len(flows)} flows extracted, {len(labelled)} labelled {TRUTH[session]}")
-    return labelled, meta, info
+    return labelled, meta
 
 
 def write_atomic(df: pd.DataFrame, meta: dict, out: Path) -> None:
@@ -507,7 +555,7 @@ def write_atomic(df: pd.DataFrame, meta: dict, out: Path) -> None:
 
 
 def collect(sessions: list[str], repeats: int, benign_minutes: float, password: str, out: Path,
-            append: bool = False) -> dict:
+            append: bool = False, keep_pcaps: Path | None = None) -> dict:
     """Run every session `repeats` times. The data file is written once, at the end (also after a
     Ctrl-C), from the sessions that succeeded: merged into the existing file with `append`, else
     replacing it (the old file is kept as .bak). Nothing is written if no session succeeded."""
@@ -520,7 +568,8 @@ def collect(sessions: list[str], repeats: int, benign_minutes: float, password: 
         for rep in range(1, repeats + 1):
             for name in sessions:
                 try:
-                    df, m, info = run_session(name, rep, int(benign_minutes * 60), password)
+                    extra = {"keep_pcaps": keep_pcaps} if keep_pcaps is not None else {}
+                    df, m, info = run_session(name, rep, int(benign_minutes * 60), password, **extra)
                     if meta and m != meta:
                         raise SessionError("extraction metadata differs between sessions", info)
                     meta = meta or m
@@ -558,6 +607,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--append", action="store_true",
                     help="merge the new sessions into the existing labelled file (same session and "
                          "repeat are replaced) instead of replacing it")
+    ap.add_argument("--keep-pcaps", nargs="?", type=Path, const=PCAP_DIR, default=None, metavar="DIR",
+                    help="copy each session's pcap to DIR/<session>_<repeat>.pcap (default DIR "
+                         "data/raw/lab_pcaps); the pcaps and flows then come from the same recording")
     ap.add_argument("--out", type=Path, default=DATA,
                     help="labelled flows file (default data/processed/lab_labelled.parquet)")
     ap.add_argument("--report", type=Path, default=None,
@@ -581,7 +633,7 @@ def main(argv: list[str] | None = None) -> int:
             print("a sensor loop (idps.live) is running in the lab; stop it first", file=sys.stderr)
             return 2
         done = collect(args.sessions, args.repeats, args.benign_minutes, env["LAB_VICTIM_PASSWORD"],
-                       args.out, args.append)
+                       args.out, args.append, args.keep_pcaps)
         runs = done["runs"]
         if not done["written"]:
             print("no session succeeded; nothing was written or scored:", file=sys.stderr)

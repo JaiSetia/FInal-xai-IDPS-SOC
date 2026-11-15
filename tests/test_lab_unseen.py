@@ -390,6 +390,90 @@ def test_run_session_ok_labels_attacker_flows(lab):
     assert fl.ran("idps.features extract") and not fl.running
 
 
+def test_run_session_keep_pcaps_copies_pcap_out_of_sensor(lab, tmp_path, monkeypatch):
+    fl = lab()
+    copied = []
+    orig = fl.compose
+    monkeypatch.setattr(lu.bs, "compose", lambda *a, **k: (copied.append(a), orig(*a, **k))[1])
+    dest = tmp_path / "pcaps"
+    _, _, info = lu.run_session("portscan", 2, 60, "pw", keep_pcaps=dest)
+    assert ("cp", f"sensor:{lu.PCAP}", str(dest / "portscan_2.pcap.part")) in copied
+    assert (dest / "portscan_2.pcap").exists() and info["pcap"].endswith("portscan_2.pcap")
+    # the pcap is copied before the flows are extracted, and nothing is copied by default
+    copied.clear()
+    lu.run_session("portscan", 1, 60, "pw")
+    assert not any(c[1] == f"sensor:{lu.PCAP}" for c in copied)
+
+
+def test_run_session_keep_pcaps_not_for_failed_session(lab, tmp_path):
+    lab(attack_exit=1)
+    with pytest.raises(lu.SessionError):
+        lu.run_session("portscan", 1, 60, "pw", keep_pcaps=tmp_path)
+    assert not list(tmp_path.glob("*.pcap"))
+
+
+def test_keep_pcaps_only_kept_after_the_session_succeeded(lab, tmp_path, monkeypatch):
+    """The pcap is copied under a temporary name and renamed only when extraction and labelling worked."""
+    seen = {}
+    orig = lu.commit_pcap
+    monkeypatch.setattr(lu, "commit_pcap", lambda part: (seen.update(part=part, final_before=(part.with_name(part.name.removesuffix(".part"))).exists()), orig(part))[1])
+    lab()
+    lu.run_session("portscan", 1, 60, "pw", keep_pcaps=tmp_path)
+    assert seen["part"].name == "portscan_1.pcap.part" and seen["final_before"] is False
+    assert (tmp_path / "portscan_1.pcap").exists() and not list(tmp_path.glob("*.part"))
+
+
+def test_keep_pcaps_removed_when_labelling_finds_no_flows(lab, tmp_path):
+    lab(flows_rows=[("10.10.2.10", "10.10.3.5", 3000)])        # no flow with the attacker as an endpoint
+    with pytest.raises(lu.SessionError, match="no flows"):
+        lu.run_session("portscan", 1, 60, "pw", keep_pcaps=tmp_path)
+    assert not list(tmp_path.iterdir())                         # neither the final name nor a .part file
+
+
+def test_keep_pcaps_removed_when_extraction_fails(lab, tmp_path, monkeypatch):
+    fl = lab()
+    real_sh = fl.sh
+    def sh(service, script, **kw):
+        if "idps.features extract" in script:
+            return subprocess.CompletedProcess([], 1, stdout="", stderr="boom")
+        return real_sh(service, script, **kw)
+    monkeypatch.setattr(lu.la, "sh", sh)
+    with pytest.raises(lu.SessionError, match="extraction failed"):
+        lu.run_session("portscan", 1, 60, "pw", keep_pcaps=tmp_path)
+    assert not list(tmp_path.iterdir())
+
+
+def test_collect_passes_keep_pcaps_through(monkeypatch, tmp_path):
+    got = []
+    def fake(session, repeat, seconds, password, keep_pcaps=None):
+        got.append(keep_pcaps)
+        return pd.DataFrame({"session": [session], "repeat": [repeat], "label": ["PortScan"], "family": ["PortScan"],
+                             "start_ms": [1]}), dict(META), {"session": session, "repeat": repeat}
+    monkeypatch.setattr(lu, "run_session", fake)
+    out = tmp_path / "l.parquet"
+    lu.collect(["portscan"], 1, 1, "pw", out, keep_pcaps=tmp_path / "pcaps")
+    lu.collect(["portscan"], 1, 1, "pw", out)
+    assert got == [tmp_path / "pcaps", None]
+
+
+def test_keep_pcap_destination_is_absolute_for_relative_keep_pcaps(lab, tmp_path, monkeypatch):
+    """docker compose runs with cwd=lab/, so a relative destination would be resolved there."""
+    monkeypatch.chdir(tmp_path)
+    fl = lab()
+    copied = []
+    orig = fl.compose
+    monkeypatch.setattr(lu.bs, "compose", lambda *a, **k: (copied.append(a), orig(*a, **k))[1])
+    lu.run_session("portscan", 1, 60, "pw", keep_pcaps=Path("pcaps"))
+    dests = [Path(c[2]) for c in copied if c[0] == "cp" and c[1] == f"sensor:{lu.PCAP}"]
+    assert len(dests) == 1 and dests[0].is_absolute() and dests[0].parent == (tmp_path / "pcaps").resolve()
+    assert (tmp_path / "pcaps" / "portscan_1.pcap").exists()
+
+
+def test_keep_pcaps_option_default_dir():
+    assert lu.PCAP_DIR == lu.ROOT / "data" / "raw" / "lab_pcaps"
+    assert lu.pcap_name("web_sqli", 3) == "web_sqli_3.pcap"
+
+
 def test_run_session_accepts_124_for_syn_flood(lab):
     lab(attack_exit=124)
     df, _, info = lu.run_session("syn_flood", 1, 60, "pw")
