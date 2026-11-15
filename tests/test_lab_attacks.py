@@ -174,3 +174,75 @@ def test_attacks_commands_and_families():
         unknown |= set(family) - MODEL_CLASSES
     # 'Web Attack - Sql Injection' is not a class of the week model, so it can never match.
     assert unknown <= {NOT_A_CLASS}, unknown - {NOT_A_CLASS}
+
+
+# ---- extract_cmd / start_tcpdump ----------------------------------------------------------------
+
+import subprocess  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+def test_extract_cmd_uses_the_live_sensors_backend():
+    assert la.extract_cmd() == f"python -m idps.features extract {la.PCAP} -o {la.FLOWS} --backend nfstream"
+    assert la.extract_cmd("/tmp/a.pcap", "/tmp/a.parquet") == (
+        "python -m idps.features extract /tmp/a.pcap -o /tmp/a.parquet --backend nfstream")
+
+
+def test_tcpdump_pattern_does_not_match_its_own_shell():
+    import re
+    pat = la.tcpdump_pattern("/tmp/x.pcap")
+    assert re.search(pat, "tcpdump -i lab_attack -s 0 -U -w /tmp/x.pcap host 10.10.1.10")
+    assert not re.search(pat, "tcpdump -i lab_attack -s 0 -U -w /tmp/other.pcap host 10.10.1.10")
+    assert not re.search(pat, f"sh -c pgrep -f '{pat}'")  # the pgrep's own command line
+
+
+class _Lab:
+    def __init__(self, running_polls):
+        self.polls = list(running_polls)   # what tcpdump_running answers, in order
+        self.started, self.compose_calls, self.scripts = False, [], []
+
+    def sh(self, service, script, timeout=120, check=False, secrets=None):
+        self.scripts.append(script)
+        assert "pgrep -f" in script and la.tcpdump_pattern("/tmp/t.pcap") in script
+        rc = 0 if (self.polls.pop(0) if self.polls else self.started) else 1
+        return subprocess.CompletedProcess([], rc, stdout="", stderr="")
+
+    def compose(self, *args, **kw):
+        self.compose_calls.append(args)
+        self.started = True
+
+
+def _install(monkeypatch, polls):
+    lab = _Lab(polls)
+    monkeypatch.setattr(la, "sh", lab.sh)
+    monkeypatch.setattr(la.bs, "compose", lab.compose)
+    monkeypatch.setattr(la.time, "sleep", lambda s: None)
+    return lab
+
+
+def test_start_tcpdump_starts_and_checks_by_path(monkeypatch):
+    lab = _install(monkeypatch, [False])  # no old one; afterwards it reports running
+    la.start_tcpdump("/tmp/t.pcap", "10.10.1.10")
+    assert lab.compose_calls == [("exec", "-d", "sensor", "tcpdump", "-i", la.bs.INTERFACE, "-s", "0", "-U",
+                                  "-w", "/tmp/t.pcap", "host", "10.10.1.10")]
+
+
+def test_start_tcpdump_waits_for_the_old_one_to_exit(monkeypatch):
+    lab = _install(monkeypatch, [True, True, False])
+    la.start_tcpdump("/tmp/t.pcap")
+    assert len(lab.compose_calls) == 1 and len(lab.scripts) == 4  # 3 old-one polls + 1 check
+
+
+def test_start_tcpdump_raises_if_old_one_stays(monkeypatch):
+    lab = _install(monkeypatch, [True] * 1000)
+    with pytest.raises(RuntimeError, match="still running"):
+        la.start_tcpdump("/tmp/t.pcap", old_wait=0)
+    assert lab.compose_calls == []
+
+
+def test_start_tcpdump_raises_if_it_did_not_start(monkeypatch):
+    lab = _install(monkeypatch, [False, False])
+    with pytest.raises(RuntimeError, match="did not start"):
+        la.start_tcpdump("/tmp/t.pcap")
+    assert len(lab.compose_calls) == 1

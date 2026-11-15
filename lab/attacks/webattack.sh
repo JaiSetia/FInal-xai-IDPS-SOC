@@ -29,5 +29,11 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' --cookie "PHPSESSID=$SESSID; secur
   "$BASE/vulnerabilities/sqli/")
 [ "$CODE" = 200 ] || fail "login did not work (target page returned HTTP $CODE)"
 
+# Marker for scripts/lab_unseen.py: flows that started before this second (the setup and login curls
+# above) are not sqlmap traffic. Seconds are enough: the script drops the marker second too, so
+# wait 2 s before sqlmap starts; otherwise its first (keep-alive) connection, which carries many of
+# its requests, starts in the marker second and is dropped.
+echo "webattack: sqlmap-start $(date +%s)"
+sleep 2
 sqlmap -u "$BASE/vulnerabilities/sqli/?id=1&Submit=Submit" \
   --cookie="PHPSESSID=$SESSID; security=low" --batch --flush-session --level=2 --dbs

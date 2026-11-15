@@ -236,9 +236,40 @@ class LiveSensor(bb.RunSensor):
         self._thread.start()
 
 
+def extract_cmd(pcap: str = PCAP, flows: str = FLOWS) -> str:
+    """Shell command (run in the sensor) that extracts the flows of a pcap with the same features and
+    backend the live sensor uses; NFStream cuts the flows still open at the end of the file."""
+    return f"python -m idps.features extract {pcap} -o {flows} --backend nfstream"
+
+
+def tcpdump_pattern(pcap: str = PCAP) -> str:
+    """Regex for `pgrep -f` / `pkill -f` that matches the tcpdump writing `pcap` and not the shell that
+    runs pgrep (the bracket keeps the pattern from matching its own command line)."""
+    return f"[t]cpdump .*-w {pcap}"
+
+
+def tcpdump_running(pcap: str = PCAP) -> bool:
+    return sh("sensor", f"pgrep -f '{tcpdump_pattern(pcap)}'", timeout=30).returncode == 0
+
+
+def start_tcpdump(pcap: str = PCAP, host: str = ATTACKER, old_wait: float = 15) -> None:
+    """Record everything to and from `host` in the sensor into `pcap`. Waits for an earlier tcpdump
+    writing the same file to exit first; raises if that does not happen or the new one did not start."""
+    end = time.monotonic() + old_wait
+    while tcpdump_running(pcap):
+        if time.monotonic() > end:
+            raise RuntimeError(f"an earlier tcpdump writing {pcap} is still running in the sensor")
+        time.sleep(1)
+    bs.compose("exec", "-d", "sensor", "tcpdump", "-i", bs.INTERFACE, "-s", "0", "-U", "-w", pcap,
+               "host", host)
+    time.sleep(2)
+    if not tcpdump_running(pcap):
+        raise RuntimeError("tcpdump did not start in the sensor")
+
+
 def offline(model: str) -> dict:
-    r = sh("sensor", f"python -m idps.features extract {PCAP} -o {FLOWS} --backend nfstream "
-                     f">/dev/null 2>&1 && python -c '{OFFLINE_PY}' {FLOWS} {model} {ATTACKER} {ALERT_FLOOR}",
+    r = sh("sensor", f"{extract_cmd()} >/dev/null 2>&1 && python -c '{OFFLINE_PY}' {FLOWS} {model} "
+                     f"{ATTACKER} {ALERT_FLOOR}",
            timeout=900)
     try:
         return json.loads(r.stdout.strip().splitlines()[-1])
@@ -260,11 +291,7 @@ def run_one(name: str, mode: str, soc: bb.Soc, env: dict) -> dict:
     watch = BlockWatch() if blocking else None
     try:
         sensor.wait_ready()
-        bs.compose("exec", "-d", "sensor", "tcpdump", "-i", bs.INTERFACE, "-s", "0", "-U", "-w", PCAP,
-                   "host", ATTACKER)
-        time.sleep(2)
-        if sh("sensor", "pgrep -x tcpdump", timeout=30).returncode != 0:
-            raise RuntimeError("tcpdump did not start in the sensor")
+        start_tcpdump()
         entry["probe_before"] = probe() if blocking else None
         start_ms = sensor_ms()
         started = datetime.fromtimestamp(start_ms / 1000, UTC)

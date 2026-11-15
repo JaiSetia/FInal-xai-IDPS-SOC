@@ -337,3 +337,34 @@ The flow counts are from the dry-run; the blocking runs match within a few flows
 ### Summary for the report
 
 Of five lab attacks, **three are detected and blocked** (port scan, SSH brute force, SYN flood) and **two are missed** (slow HTTP DoS, SQL injection). None of the attacks produced a false block of a protected server, and every block ended by itself after its 60 s. The misses come from the limits of flow features and of a single training dataset, not from the sensor: the offline score of each recording matches the live result exactly. These are the cases where adding rules next to the model is worth it.
+
+## Unseen data: our own labelled lab traffic (lab, 15 November 2026)
+
+The full-week model was scored on traffic it never trained on: two rounds of every lab attack plus 2 × 10 minutes of normal traffic (web browsing, downloads, SSH and SCP sessions, ping), recorded on the sensor with tcpdump and turned into flows with the same NFStream features as the live sensor. The true label comes from the recording itself: in an attack recording, every flow to or from the attacker (10.10.1.10) is that attack, and in a normal-traffic recording every flow is BENIGN. DVWA's setup and login requests before sqlmap starts are left out. Script: `scripts/lab_unseen.py`; data: `data/processed/lab_labelled.parquet` (git-ignored); report: `reports/lab_unseen.json` (model checksum 4a59a3564377…).
+
+The test split was scored without the 0.5 alert floor, so the comparison below uses the lab scores without it too. The floor changed nothing here.
+
+| Class | Lab flows | Lab recall | Test-split recall | Test-split F1 |
+|---|---|---|---|---|
+| BENIGN | 386 | 91.7% | 98.9% | 0.992 |
+| PortScan | 2,048 | 100% | 99.9% | 0.704 |
+| SSH-Patator | 90 | 98.9% | 97.9% | 0.990 |
+| DoS slowloris | 1,046 | **0%** | 73.1% | 0.845 |
+| SYN flood (not a model class) | 53,742 | 0% as DoS (100% as PortScan) | — | — |
+| SQL injection (not a model class) | 8 | 0% (all BENIGN) | — | — |
+
+Recall is the fair column. F1 and precision depend on how many normal flows there are per attack flow, and the lab has far fewer normal flows than the test split.
+
+### What this shows
+
+- **Attacks that look the same everywhere carry over.** Port scan and SSH brute force score as well on our own network as on the test split, even though the hosts, addresses, operating systems and tools (nmap, hydra) are all different.
+- **Normal web traffic is now clean.** All 353 normal web flows score BENIGN. With the Friday-only model, 14.8% of normal lab flows were false PortScan alerts (step 2), so training on the whole week fixed that.
+- **Every normal SSH session is flagged as SSH brute force** (28 of 28, median confidence 0.89, up to 0.99). Most of the generator's SSH flows are SCP copies of a small file (median 0.2 s), plus a few interactive sessions of up to 32 s. Each one is a password login followed by a short exchange, which looks like one brute-force attempt. CIC-IDS2017 has very little normal SSH, so the model learnt "short SSH session means attack". The remaining false positives are 4 ping flows called FTP-Patator, at low confidence (0.52–0.81). So the lab false-positive rate, 8.3% (32 of 386), is much higher than the test split's 1.1%. No block is likely: blocking needs 5 confident flows from one source within 60 s, and the normal traffic makes about 1–2 SSH logins a minute. But an analyst would see these alerts.
+- **Slow HTTP DoS doesn't carry over at all.** The lab's nginx cuts the slow connections at 60 s (median flow 60.0 s), while the CIC-IDS2017 Apache flows the model learnt from lasted 75–105 s. A change of web server is enough to hide the attack.
+- **Attacks the dataset doesn't have are missed or misnamed.** The SYN flood is called PortScan (each flood packet looks like one scan probe), and SQL injection looks like browsing.
+
+### Summary for the report
+
+On unseen traffic the model keeps its scores for attacks whose flows look the same on any network (scans and brute force) and loses them where the training data was narrow: one web server's timeout (slowloris), too little normal SSH (false SSH-Patator alerts), and attack types the dataset never had (SYN flood, SQL injection). This is the dataset-generalisation gap reported in the literature on CIC-IDS2017, measured on our own network. The fixes are more varied training data (B1's analyst feedback, or a second dataset like CSE-CIC-IDS2018) and rules next to the model for what flows can't show (B2).
+
+Limitations: 386 normal flows is a small sample, and the normal traffic comes from one generator on one host. CSE-CIC-IDS2018 was not tested (optional, needs a download).
