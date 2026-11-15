@@ -4,7 +4,7 @@ import { useLiveRefresh } from "../useLiveRefresh";
 import { api, query } from "../api/client";
 import {
   ALERT_STATUSES, ATTACK_CLASSES, type AlertDetail as AlertDetailT, type AlertStatus, type Block, type CaseDetail,
-  type CaseSummary, type Page, type RuleInfo,
+  type CaseSummary, type Page, type Reputation, type RuleInfo,
 } from "../api/types";
 import {
   Card, ErrorText, Pill, Segmented, SeverityBadge, SourceTag, Timeline, useAction, useLoad, useNow, type TimelineItem, type Tone,
@@ -258,6 +258,8 @@ function AlertPage({ id }: { id: string }) {
             </dl>
           </Card>
 
+          <ReputationCard alertId={alert.id} ip={alert.src_ip} />
+
           <Card title="Triage">
             <div className="stack" style={{ gap: 14 }}>
               <Segmented<AlertStatus> label="Status" value={alert.status} onChange={(s) => void setStatus(s)} disabled={act.busy}
@@ -330,6 +332,71 @@ function AlertPage({ id }: { id: string }) {
         </div>
       </div>
     </>
+  );
+}
+
+/** True for addresses the SOC never sends to AbuseIPDB (private, loopback, link-local, CGNAT,
+ *  documentation and other reserved ranges). The server decides; this only avoids a pointless click. */
+export function isReservedIp(ip: string): boolean {
+  if (ip.includes(":")) {
+    const v = ip.toLowerCase();
+    return v === "::1" || v.startsWith("fe80:") || v.startsWith("fc") || v.startsWith("fd") || v.startsWith("::ffff:") || v.startsWith("2001:db8:");
+  }
+  const o = ip.split(".").map(Number);
+  if (o.length !== 4 || o.some((x) => !Number.isInteger(x) || x < 0 || x > 255)) return false;
+  const [a, b, c] = o;
+  return a === 10 || a === 127 || a === 0 || a >= 224
+    || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
+    || (a === 100 && b >= 64 && b <= 127) || (a === 192 && b === 0 && (c === 0 || c === 2))
+    || (a === 198 && (b === 18 || b === 19)) || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113);
+}
+
+/** AbuseIPDB reputation of the source IP. Looked up only when the analyst asks: the lookup sends the
+ *  IP to a third party, and the free quota is small. Private addresses are never looked up. */
+function ReputationCard({ alertId, ip }: { alertId: number; ip: string }) {
+  const act = useAction();
+  const [rep, setRep] = useState<Reputation | null>(null);
+  async function check() {
+    const r = await act.run(() => api<Reputation>(`/alerts/${alertId}/reputation`));
+    if (r) setRep(r);
+  }
+  const score = rep?.available ? rep.abuse_confidence : null;
+  const tone: Tone = score === null ? "neutral" : score >= 75 ? "danger" : score >= 25 ? "warn" : "ok";
+  const reserved = isReservedIp(ip);
+  return (
+    <Card title="Source reputation" actions={score !== null ? <Pill tone={tone}>abuse score {score}%</Pill> : undefined}>
+      <ErrorText error={act.error} />
+      {/* One live region that stays mounted, so the result is announced when it arrives. */}
+      <div role="status" aria-live="polite">
+        {reserved ? (
+          <p className="muted" style={{ margin: 0 }}>{ip} is a private or reserved address: it has no public reputation and is never looked up.</p>
+        ) : rep && !rep.available ? (
+          <p className="muted" style={{ margin: "0 0 8px" }}>No reputation for {rep.ip}: {rep.reason ?? "not available"}.</p>
+        ) : rep ? (
+          <dl className="kv small-kv">
+            <dt>Abuse score</dt>
+            <dd>{score === null ? "—" : `${score}%`} <span className="muted small-text">(AbuseIPDB confidence; 25%+ suspicious, 75%+ high)</span></dd>
+            <dt>Reports</dt><dd>{rep.total_reports?.toLocaleString() ?? "—"}</dd>
+            <dt>Last reported</dt><dd>{rep.last_reported_at ? dateTime(rep.last_reported_at) : "never"}</dd>
+            <dt>Country</dt><dd>{rep.country ?? "—"}</dd>
+            <dt>Network</dt><dd className="wrap-anywhere">{[rep.isp, rep.usage_type].filter(Boolean).join(" · ") || "—"}</dd>
+            <dt>Checked</dt><dd>{rep.checked_at ? dateTime(rep.checked_at) : "—"}{rep.cached && <span className="muted small-text"> (cached)</span>}</dd>
+          </dl>
+        ) : null}
+      </div>
+      {!reserved && (!rep || !rep.available) && (
+        <div>
+          <button type="button" onClick={() => void check()} disabled={act.busy}>
+            {act.busy ? "Checking…" : rep ? "Try again" : `Check ${ip} on AbuseIPDB`}
+          </button>
+          {!rep && (
+            <p className="muted small-text" style={{ margin: "6px 0 0" }}>
+              If the SOC has an AbuseIPDB key, only the IP address is sent to AbuseIPDB.
+            </p>
+          )}
+        </div>
+      )}
+    </Card>
   );
 }
 

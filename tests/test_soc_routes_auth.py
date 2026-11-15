@@ -34,7 +34,8 @@ def test_every_non_public_route_requires_a_token(soc_app):
             continue
         url = path.replace("{alert_id}", "1").replace("{case_id}", "1") \
             .replace("{action_id}", "1").replace("{user_id}", "1").replace("{sensor_id}", "1") \
-            .replace("{conversation_id}", "1")
+            .replace("{conversation_id}", "1") \
+            .replace("{channel}", "webhook")
         assert "{" not in url, f"unhandled path parameter in {path}"
         r = client.request(method, url, json={})
         assert r.status_code == 401, f"{method} {path} returned {r.status_code} without a token"
@@ -57,6 +58,7 @@ def test_public_routes_are_only_health_and_login(soc_app):
     ("POST", "/admin/sensors"), ("GET", "/admin/audit"), ("PATCH", "/admin/users/1/role"),
     ("POST", "/admin/users/1/disable"), ("POST", "/admin/users/1/enable"),
     ("POST", "/admin/users/1/reset-password"), ("POST", "/admin/sensors/1/revoke"),
+    ("GET", "/admin/integrations"), ("POST", "/admin/integrations/webhook/test"),
 ])
 def test_analysts_cannot_use_admin_routes(client, analyst_headers, method, path):
     assert client.request(method, path, json={}, headers=analyst_headers).status_code == 403

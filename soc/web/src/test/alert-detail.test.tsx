@@ -189,6 +189,8 @@ beforeEach(() => {
 
 const show = (url = "/alerts/7") =>
   render(<MemoryRouter initialEntries={[url]}><Routes><Route path="/alerts/:id" element={<AlertDetail />} /></Routes></MemoryRouter>);
+// The page has other live regions (the reputation card); the notice is the one outside that card.
+const notice = () => screen.getAllByRole("status").find((e) => !e.closest(".card")?.textContent?.startsWith("Source reputation"))!;
 const loaded = () => screen.findByRole("heading", { level: 1 });
 
 describe("AlertDetail page", () => {
@@ -284,7 +286,7 @@ describe("AlertDetail page", () => {
     expect(screen.queryByText(/PortScan · alert #7/)).toBeNull();
     release();
     expect(await screen.findByRole("heading", { level: 1, name: "DoS · alert #2" })).toBeInTheDocument();
-    expect(screen.getByRole("status")).toBeEmptyDOMElement();
+    expect(notice()).toBeEmptyDOMElement();
     expect(screen.getByLabelText("Add to open case")).toHaveValue("");
   });
 
@@ -359,7 +361,7 @@ describe("AlertDetail page", () => {
     expect(calls("POST")[0][1].json).toEqual({ alert_ids: [7] });
     expect(await screen.findByRole("link", { name: "case #5" })).toHaveAttribute("href", "/cases/5");
     expect(screen.getByRole("link", { name: "case #5" }).parentElement).toHaveTextContent("In case #5.");
-    expect(screen.getByRole("status")).toHaveTextContent("Added to case #5.");
+    expect(notice()).toHaveTextContent("Added to case #5.");
     expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
   });
 
@@ -373,7 +375,7 @@ describe("AlertDetail page", () => {
     await waitFor(() => expect(calls("POST", "/cases").length).toBe(1));
     expect(calls("POST")[0][1].json).toEqual({ title: "Scan wave", alert_ids: [7] });
     expect(await screen.findByText(/^In/)).toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("Created case #8.");
+    expect(notice()).toHaveTextContent("Created case #8.");
   });
 
   it("hides case controls when the alert already has a case", async () => {

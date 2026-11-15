@@ -245,6 +245,55 @@ export interface RulesStatus {
   max_per_minute?: number;
 }
 
+export type IntegrationChannel = "webhook" | "slack" | "email" | "syslog";
+
+/** GET /admin/integrations: secrets are never sent, only a hint of the target. */
+export interface IntegrationStatus {
+  channel: IntegrationChannel;
+  configured: boolean;
+  enabled: boolean;
+  min_severity: Severity;
+  include_rules: boolean;
+  target_hint: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  last_error_at: string | null;
+  queued: number;
+  sent: number;
+  failed: number;
+  dropped: number;
+  rate_limited: number;
+  deduped: number;
+}
+
+export interface IntegrationsResponse {
+  channels: IntegrationStatus[];
+  abuseipdb: { configured: boolean; cache_hours: number };
+}
+
+export interface IntegrationTestResult {
+  channel: IntegrationChannel;
+  ok: boolean;
+  error: string | null;
+  duration_ms: number;
+  tested_at: string;
+}
+
+/** GET /alerts/{id}/reputation (AbuseIPDB, looked up only on request). */
+export interface Reputation {
+  ip: string;
+  available: boolean;
+  reason: string | null;
+  abuse_confidence: number | null;
+  total_reports: number | null;
+  country: string | null;
+  isp: string | null;
+  usage_type: string | null;
+  last_reported_at: string | null;
+  checked_at: string | null;
+  cached: boolean;
+}
+
 export type DriftLevel = "ok" | "watch" | "drift" | "unknown";
 
 export interface Drift {

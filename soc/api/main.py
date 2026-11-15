@@ -7,6 +7,8 @@ Run a single process (no --workers): the live alert feed is an in-process broadc
 See docs/soc.md for settings, endpoints and the auth model.
 """
 
+import contextlib
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +18,8 @@ from soc.api import auth
 from soc.api.broadcast import AlertBroadcaster
 from soc.api.db import init_db, make_engine, make_session_factory
 from soc.api.geo import GeoLocator
+from soc.api.integrations.manager import NotificationManager
+from soc.api.integrations.reputation import ReputationService
 from soc.api.limits import BodyLimitMiddleware
 from soc.api.routes import (
     actions,
@@ -25,6 +29,7 @@ from soc.api.routes import (
     blocks,
     cases,
     geo,
+    integrations,
     live,
     metrics,
     sensors,
@@ -40,7 +45,13 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
     # The interactive docs are unauthenticated, so they are off unless IDPS_SOC_ENABLE_DOCS=true.
     docs = {} if settings.enable_docs else {"docs_url": None, "redoc_url": None,
                                            "openapi_url": None}
-    app = FastAPI(title="IDPS SOC API", **docs)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        app.state.notifier.close()  # stop the notification workers
+
+    app = FastAPI(title="IDPS SOC API", lifespan=lifespan, **docs)
     app.state.settings = settings
     engine = make_engine(settings.database_url)
     init_db(engine)
@@ -53,6 +64,9 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
     app.state.assistant_llm = make_llm(settings.assistant_model, settings.assistant_effort)
     app.state.assistant_limiter = None
     app.state.assistant_slots = None
+    # Outbound integrations (notifications, syslog, reputation); all optional, env-configured.
+    app.state.notifier = NotificationManager(settings)
+    app.state.reputation = ReputationService(settings)
     app.state.sensor_audit = SensorAuditState()  # throttles sensor-status audit rows
     app.state.broadcaster = AlertBroadcaster(settings.ws_max_connections, settings.ws_queue_size)
     app.state.login_throttle = LoginThrottle(
@@ -80,7 +94,7 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
 
     app.include_router(auth.router)
     for module in (alerts, live, blocks, actions, cases, metrics, geo, assistant, admin, sensors,
-                   training):
+                   training, integrations):
         app.include_router(module.router)
     return app
 

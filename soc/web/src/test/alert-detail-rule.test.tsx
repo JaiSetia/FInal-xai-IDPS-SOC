@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import AlertDetail, { timeline } from "../pages/AlertDetail";
+import AlertDetail, { isReservedIp, timeline } from "../pages/AlertDetail";
 import { sensorsStatus } from "./sensor-fixtures";
 
 const h = vi.hoisted(() => ({ api: vi.fn() }));
@@ -169,5 +169,112 @@ describe("timeline for rule alerts", () => {
   it("omits the sid when the rule is null", () => {
     const items = timeline(ruleAlert({}, { rule: null, predicted_class: "ET SCAN" }) as never, [], T + 10);
     expect(texts(items)[1]).toBe("Suricata rule matched: ET SCAN");
+  });
+});
+
+describe("isReservedIp", () => {
+  it.each([
+    "10.0.0.1", "10.255.255.255", "172.16.0.1", "172.31.255.255", "192.168.1.1", "127.0.0.1", "169.254.1.1",
+    "100.64.0.1", "100.127.255.255", "203.0.113.5", "198.18.0.1", "198.19.255.255", "0.0.0.0", "224.0.0.1",
+    "::1", "fe80::1", "fd00::1", "fc00::1", "2001:db8::1", "::ffff:1.2.3.4",
+  ])("%s is reserved", (ip) => { expect(isReservedIp(ip)).toBe(true); });
+  it.each([
+    "172.15.255.255", "172.32.0.1", "100.63.255.255", "100.128.0.1", "192.167.1.1", "169.253.1.1", "198.17.0.1", "198.20.0.1",
+    "8.8.8.8", "45.33.32.156", "1.1.1.1", "2606:4700:4700::1111", "2001:4860:4860::8888", "not-an-ip", "1.2.3",
+  ])("%s is public", (ip) => { expect(isReservedIp(ip)).toBe(false); });
+});
+
+describe("ReputationCard", () => {
+  const PUB = "45.33.32.156";
+  const rep = (o: Record<string, unknown> = {}) => ({
+    ip: PUB, available: true, reason: null, abuse_confidence: 80, total_reports: 1234, country: "DE", isp: "Acme ISP",
+    usage_type: "Data Center", last_reported_at: "2026-02-01T10:00:00Z", checked_at: "2026-02-02T10:00:00Z", cached: false, ...o,
+  });
+  let reply: () => unknown;
+  const repCalls = () => h.api.mock.calls.filter(([p]) => String(p).endsWith("/reputation"));
+  const card = () => screen.getByText("Source reputation").closest(".card") as HTMLElement;
+  const open = async (r: () => unknown, ip = PUB) => {
+    alert = mk({ src_ip: ip });
+    reply = r;
+    const base = h.api.getMockImplementation()!;
+    h.api.mockImplementation(async (p: string, o?: unknown) => (p === "/alerts/7/reputation" ? reply() : base(p, o)));
+    await show();
+  };
+  const click = () => fireEvent.click(within(card()).getByRole("button"));
+
+  it("public ip: button, key note, persistent status region, no request until clicked", async () => {
+    await open(() => rep());
+    expect(within(card()).getByRole("button", { name: `Check ${PUB} on AbuseIPDB` })).toBeInTheDocument();
+    expect(card()).toHaveTextContent("If the SOC has an AbuseIPDB key, only the IP address is sent to AbuseIPDB.");
+    expect(within(card()).getByRole("status")).toBeEmptyDOMElement();
+    expect(repCalls()).toHaveLength(0);
+    click();
+    await within(card()).findByText("Abuse score");
+    expect(repCalls()).toHaveLength(1);
+    expect(within(card()).getByRole("status")).toHaveTextContent("Abuse score");
+  });
+
+  it.each(["10.0.0.1", "192.168.1.5", "::1"])("reserved ip %s shows the note and never requests", async (ip) => {
+    await open(() => rep(), ip);
+    expect(card()).toHaveTextContent(`${ip} is a private or reserved address: it has no public reputation and is never looked up.`);
+    expect(within(card()).queryByRole("button")).toBeNull();
+    expect(repCalls()).toHaveLength(0);
+  });
+
+  it("unavailable shows the reason and a Try again button that requests again", async () => {
+    await open(() => rep({ available: false, reason: "no API key", abuse_confidence: null }));
+    click();
+    expect(await within(card()).findByText(`No reputation for ${PUB}: no API key.`)).toBeInTheDocument();
+    expect(within(card()).queryByText(/abuse score/)).toBeNull();
+    expect(card()).not.toHaveTextContent("only the IP address is sent");
+    reply = () => rep({ abuse_confidence: 30 });
+    fireEvent.click(within(card()).getByRole("button", { name: "Try again" }));
+    expect(await within(card()).findByText("abuse score 30%")).toBeInTheDocument();
+    expect(repCalls()).toHaveLength(2);
+    expect(within(card()).queryByRole("button")).toBeNull();
+  });
+
+  it("available shows score pill, legend, reports, last reported, country, network, checked", async () => {
+    await open(() => rep({ cached: true }));
+    click();
+    await within(card()).findByText("Abuse score");
+    expect(within(card()).getByText("abuse score 80%")).toHaveClass("pill");
+    const c = card();
+    expect(dd(c, "Abuse score")).toHaveTextContent("80% (AbuseIPDB confidence; 25%+ suspicious, 75%+ high)");
+    expect(dd(c, "Reports")).toHaveTextContent("1,234");
+    expect(dd(c, "Last reported").textContent).not.toBe("never");
+    expect(dd(c, "Country")).toHaveTextContent("DE");
+    expect(dd(c, "Network")).toHaveTextContent("Acme ISP · Data Center");
+    expect(dd(c, "Checked")).toHaveTextContent("(cached)");
+    expect(c.querySelector("button")).toBeNull();
+  });
+
+  it("score dash and no pill when abuse_confidence is null", async () => {
+    await open(() => rep({ abuse_confidence: null }));
+    click();
+    await within(card()).findByText("Abuse score");
+    expect(dd(card(), "Abuse score").textContent).toMatch(/^— /);
+    expect(within(card()).queryByText(/abuse score/)).toBeNull();
+  });
+
+  it("never when not reported, and no (cached) when fresh", async () => {
+    await open(() => rep({ last_reported_at: null, cached: false }));
+    click();
+    await within(card()).findByText("Abuse score");
+    expect(dd(card(), "Last reported")).toHaveTextContent("never");
+    expect(dd(card(), "Checked").textContent).not.toContain("cached");
+  });
+
+  it.each([[75, "danger"], [100, "danger"], [74, "warn"], [25, "warn"], [24, "ok"], [0, "ok"]])("score %i has tone %s", async (n, tone) => {
+    await open(() => rep({ abuse_confidence: n }));
+    click();
+    expect(await within(card()).findByText(`abuse score ${n}%`)).toHaveClass(tone);
+  });
+
+  it("a request error is shown and the button stays", async () => {
+    await open(() => { throw new Error("quota exceeded"); });
+    click();
+    expect(await within(card()).findByText(/quota exceeded/)).toBeInTheDocument();
+    expect(within(card()).getByRole("button", { name: `Check ${PUB} on AbuseIPDB` })).toBeInTheDocument();
   });
 });

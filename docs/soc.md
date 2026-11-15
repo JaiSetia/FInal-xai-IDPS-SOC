@@ -30,6 +30,9 @@ Settings (environment variables, prefix `IDPS_SOC_`):
 | `WOULD_BLOCK_RETENTION_DAYS` | 7 | Dry-run would-block records older than this are deleted (1 to 365) |
 | `BLOCK_ALLOWLIST` | **empty: blocking refused** | Comma-separated addresses/networks the SOC must never ask to block: gateways, DNS, the SOC host, the sensors, the analysts. Required before any block request is accepted |
 
+Notification, syslog and reputation settings (`NOTIFY_*`, `WEBHOOK_*`, `SLACK_*`, `SMTP_*`, `SYSLOG_*`,
+`ABUSEIPDB_*`, `PUBLIC_URL`) are listed under "Integrations" below.
+
 The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep their own
 (`IDPS_ALLOWLIST`) as a second, independent check; set both.
 
@@ -58,6 +61,9 @@ The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep thei
 | `POST /sensor/actions/{id}/result` | sensor | `{"success": bool, "result": {...}}` |
 | `GET/POST /cases`, `GET/PATCH/DELETE /cases/{id}` | user | Cases |
 | `POST /cases/{id}/notes` | user | Note, up to 10,000 characters |
+| `GET /alerts/{id}/reputation` | user | AbuseIPDB reputation of the alert's source address, on demand; see "Integrations" |
+| `GET /admin/integrations` | admin | Status of the notification and syslog channels (never any secret); see "Integrations" |
+| `POST /admin/integrations/{channel}/test` | admin | Send a labelled test message (`webhook`, `slack`, `email`, `syslog`); audited, 3 per minute per channel |
 | `POST /cases/{id}/alerts`, `DELETE /cases/{id}/alerts/{alert_id}` | user | Attach or detach alerts (an alert is in at most one case) |
 | `GET /metrics/summary?hours=24` | user | Alerts per bucket (hourly up to 72 h, else daily), by class and severity, `by_source` (`{"ml": n, "rule": n}`, always both keys), top 10 sources, false-positive rate, detection latency p50/p95, active blocks, `would_blocks` (dry-run decisions in the window), `by_class_per_day` (cached for 60 s; last 7 UTC days whatever `hours` is: `[{day, class, count}]`, non-zero pairs only, classes beyond the top 25 as `(other)`), `anomaly_per_day` (same 7 days and cache: `[{day, count}]`, alerts the Isolation Forest also flagged, non-zero days only) |
 | `GET /topology?hours=1` | user | Nodes (host, alert count, max severity) and edges (src to dst, count, max severity) |
@@ -275,6 +281,176 @@ does not send `source` (every older sensor) is `"ml"`; so is every alert stored 
 - **Upgrade.** Start the new SOC first: `init_db` adds `alerts.source` (indexed) and `alerts.rule`
   (JSON) to an existing database (nullable, no backfill). An SOC from before this step answers 422 to
   `source`/`rule` and to the `rules` status block.
+
+## Integrations (roadmap step 9, B3)
+
+Everything here is optional and off until configured. **Configuration is environment only** (or a
+secret file, below): there is no API to set or read a URL, token or password, the admin endpoints
+show only a host or a masked address, and nothing secret is logged or written to the audit log.
+Set the variables in the API's environment (the lab: `lab/.env`, see `lab/README.md`).
+
+Secrets (`WEBHOOK_URL`, `WEBHOOK_SECRET`, `SLACK_WEBHOOK_URL`, `SMTP_PASSWORD`, `ABUSEIPDB_KEY`) may
+instead be read from a file, e.g. a Docker secret: `IDPS_SOC_WEBHOOK_URL_FILE=/run/secrets/hook`.
+A blank value counts as unset. If both `IDPS_SOC_X` and `IDPS_SOC_X_FILE` are set, the direct
+variable wins.
+
+| Variable (`IDPS_SOC_` prefix) | Default | Meaning |
+|---|---|---|
+| `PUBLIC_URL` | none | Dashboard address, e.g. `https://soc.example.com`; alerts in messages link to `<url>/alerts/<id>` |
+| `NOTIFY_ENABLED` | true | Kill switch for every channel |
+| `NOTIFY_MIN_SEVERITY` | `high` | Notify for alerts at or above this (`low`, `medium`, `high`, `critical`): high and critical by default |
+| `NOTIFY_QUEUE_SIZE` | 500 | Per-channel in-memory queue; when full, messages are dropped (counted) |
+| `NOTIFY_MAX_ATTEMPTS` / `NOTIFY_BACKOFF_SECONDS` | 3 / 1.0 | Tries per message; wait doubles each time (1 s, 2 s, ...; at most 30 s) |
+| `NOTIFY_RATE_PER_MINUTE` | 20 | Per channel. Beyond it alerts are held back and, as soon as there is room, one message says "and K more" with counts by severity and class |
+| `NOTIFY_DEDUPE_SECONDS` | 300 | The same (class, source address), or (rule, source, destination, port), is sent once per window; a higher severity is still sent. A folded rule alert (a follow-up with a larger count) is a repeat of its first. 0 = off |
+| `NOTIFY_TIMEOUT_SECONDS` | 5 | Deadline for the WHOLE exchange of one send (connect, handshake, request, answer; SMTP: the whole conversation), so a server dribbling bytes cannot hold a worker. Answers are read only up to 4 KB |
+| `NOTIFY_ALLOW_PRIVATE`, `NOTIFY_ALLOW_HTTP` | false | **Dev/lab only**, see "Webhook destinations" |
+| `WEBHOOK_URL`, `WEBHOOK_SECRET` | none | Generic webhook; with a secret every body is signed |
+| `WEBHOOK_MIN_SEVERITY`, `WEBHOOK_INCLUDE_RULES` | global, true | Per-channel threshold, and whether Suricata (`rule`) alerts are sent |
+| `SLACK_WEBHOOK_URL`, `SLACK_MIN_SEVERITY`, `SLACK_INCLUDE_RULES` | none, global, true | Slack incoming webhook |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY` | none, 587 (465 for `ssl`), `starttls` | `starttls`, `ssl`, or `none` (a local test receiver only; a password is never sent without TLS). With `starttls`, a server that does not offer STARTTLS is a permanent failure: there is no plaintext fallback |
+| `SMTP_USERNAME`, `SMTP_PASSWORD` | none | Optional login |
+| `SMTP_FROM`, `SMTP_TO` | none | One sender; up to 20 comma-separated recipients. Email needs host, from and to |
+| `EMAIL_MIN_SEVERITY`, `EMAIL_INCLUDE_RULES` | global, true | |
+| `SYSLOG_HOST`, `SYSLOG_PORT`, `SYSLOG_PROTOCOL` | none, 514, `udp` | `udp`, `tcp` or `tls` |
+| `SYSLOG_CA_FILE` | system CAs | TLS: the CA that signed the receiver's certificate (the host name is checked) |
+| `SYSLOG_MIN_SEVERITY`, `SYSLOG_INCLUDE_RULES`, `SYSLOG_INCLUDE_BLOCKS` | `low`, true, true | A SIEM wants the whole stream: every alert, and block events |
+| `SYSLOG_RATE_PER_MINUTE` | 0 (off) | The syslog channel has no dedupe and, by default, no rate limit |
+| `SYSLOG_IDLE_SECONDS` | 60 | TCP/TLS: a link idle this long is reopened; a link the receiver has closed is always replaced before sending |
+| `ABUSEIPDB_KEY`, `ABUSEIPDB_CACHE_HOURS` | none, 24 | See "Reputation" |
+| `ABUSEIPDB_TIMEOUT_SECONDS`, `ABUSEIPDB_MAX_PER_MINUTE`, `ABUSEIPDB_MAX_PER_DAY` | 5, 30, 900 | Timeout for the whole exchange; most uncached lookups per minute and per day (the free tier allows 1,000 a day) |
+
+### How delivery works
+
+New alerts are offered to the channels after the ingest transaction has committed. That step only
+filters (severity, source, duplicates) and puts a small record on a bounded in-memory queue; it does
+no network I/O and never raises into the request, so a dead Slack or SIEM cannot slow or fail
+ingest. One background thread per channel sends, with retries and backoff for transient errors
+(network failure, timeout, HTTP 408/425/429/5xx, SMTP 4xx) and none for permanent ones (other 4xx,
+refused login, a refused destination). Counters per channel: `sent`, `failed` (given up after the
+last try), `dropped` (queue full), `rate_limited` (held back, covered by a digest), `deduped`.
+The queue is in memory: alerts queued when the API stops are not sent. The SOC runs as one process
+(see "Live feed"), so there is one queue per channel.
+
+Messages are small: class, severity, source (`ml` or `rule`) and rule signature and sid, source and
+destination address and port, sensor, time and a link. Never the features or the explanation.
+Text an attacker can influence (the class, a rule signature) is cleaned of control and
+direction-override characters and escaped for where it lands: Slack text is put in code spans with
+`& < >` escaped (so `<!channel>` or a link cannot be injected), email HTML is escaped and no newline
+can reach a header, CEF values are escaped.
+
+### Channels
+
+- **Generic webhook.** `POST` of JSON (`Content-Type: application/json`). With `WEBHOOK_SECRET` the
+  request carries `X-IDPS-Timestamp: <unix seconds>` and `X-IDPS-Signature: sha256=<hex>`, the
+  HMAC-SHA256 of `"<timestamp>." + <exact body bytes>`. A receiver must verify the signature over
+  the raw body, compare it in constant time, and **reject a timestamp more than a few minutes
+  (say 5) from its own clock**, so a captured message cannot be replayed later. Body for an alert:
+  `{"type":"idps.alert","version":1,"id":12,"severity":"high","class":"DoS","source":"ml","rule":null,
+  "src":{"ip":"203.0.113.7","port":51514},"dst":{"ip":"10.10.1.5","port":80},"protocol":6,
+  "sensor":"lab-sensor","at":"2026-11-15T12:00:00Z","url":"https://soc.example.com/alerts/12"}`.
+  For a rule alert `rule` is `{"sid","signature","category","count"}`. Other types: `idps.digest`
+  (`more`, `blocks`, `by_severity`, `top_classes`; `blocks` counts held-back block events, which
+  only syslog receives) and `idps.test`.
+- **Slack.** An incoming-webhook message with Slack blocks: a header ("HIGH alert: <class or
+  signature>"), fields (severity, source, class, sensor, from to, rule and sid) and an "Open alert"
+  button when `PUBLIC_URL` is set.
+- **Email.** Plain text plus HTML, one message per alert to all recipients; the subject is
+  `[IDPS] HIGH alert: DoS`.
+- **Syslog/CEF.** RFC 5424 messages (facility local0, app `idps-soc`, MSGID `ALERT`, `BLOCK`, `TEST`
+  or `DIGEST`) whose text is CEF:
+  `CEF:0|IDPS|IDPS SOC|<version>|<class or rule sid>|<name>|<0-10>|rt=... src=... dst=... spt=... dpt=... proto=TCP cat=<class> cs1Label=source cs1=ml|rule dvchost=<sensor> externalId=<alert id>`;
+  rule alerts add `cs2Label=ruleSignature cs2=<signature>`, `cs3Label=ruleCategory` and `cnt`. CEF
+  severity: low 3, medium 5, high 8, critical 10. In the header `\` and `|` are escaped; in values `\`
+  and `=` are, and newlines become `\n`. Block events (`blocked`, `unblocked`, `would_block`) are sent as
+  `CEF:0|IDPS|IDPS SOC|<v>|blocked|IP blocked|6|rt=... act=blocked src=<ip> dvchost=... reason=...`.
+  UDP is one datagram per message; TCP and TLS use RFC 6587 octet counting (`<length> <message>`) on
+  a connection that is kept open and reopened after an error. TLS verifies the receiver's
+  certificate against `SYSLOG_CA_FILE`.
+
+### Webhook destinations (SSRF guard)
+
+The webhook and Slack URLs are checked every time before connecting: **https only**; the host name
+is resolved by the SOC and the connection goes to that checked address (a second DNS answer cannot
+redirect it, and the certificate is still checked against the name); a name that resolves to any
+private, loopback, link-local, multicast or otherwise non-public address is refused (IPv6 forms
+that carry an IPv4 address (mapped, NAT64, 6to4, Teredo, IPv4-compatible) are judged by the address
+inside; decimal, octal and short spellings are judged by what the resolver returns); no credentials in the URL; **redirects are never followed** (a 3xx
+is a failure); timeouts are short and responses are read only up to 4 KB. Errors shown to admins
+never include the URL. `NOTIFY_ALLOW_HTTP=true` and `NOTIFY_ALLOW_PRIVATE=true` switch the https
+and the public-address rules off. **They are for development and the lab only** (a receiver on
+127.0.0.1); do not set them in a real deployment. Syslog and SMTP hosts are chosen by the operator
+and are not subject to this check.
+
+### Admin endpoints
+
+`GET /admin/integrations` (admin):
+
+```json
+{"channels": [
+  {"channel": "webhook", "configured": true, "enabled": true, "min_severity": "high",
+   "include_rules": true, "target_hint": "hooks.example.com",
+   "last_success_at": "2026-11-15T12:00:03Z", "last_error": null, "last_error_at": null,
+   "queued": 0, "sent": 12, "failed": 0, "dropped": 0, "rate_limited": 0, "deduped": 3},
+  {"channel": "slack", "...": "same keys"}, {"channel": "email", "target_hint": "smtp.example.com:587 to ***@example.org", "...": "..."},
+  {"channel": "syslog", "target_hint": "tcp://siem.example.com:6514", "min_severity": "low", "...": "..."}],
+ "abuseipdb": {"configured": true, "cache_hours": 24.0}}
+```
+
+`channel` is always in the order webhook, slack, email, syslog. `configured`: the settings are
+there; `enabled`: configured and `NOTIFY_ENABLED`. `target_hint` is the host only (webhook, Slack),
+the SMTP host and port with masked recipient domains, or `protocol://host:port` (syslog); null when
+not configured. `last_error` is a short fixed-form text such as `HTTP 500`, `timed out`,
+`connection failed (ConnectionRefusedError)` or `destination refused: ...`. Dedupe only remembers
+an alert once it is queued, and forgets it again if its delivery finally fails, so a failed or
+dropped message does not suppress the next one. At shutdown, queued and held-back messages are
+counted as `dropped`.
+
+`POST /admin/integrations/{channel}/test` (admin, no body) sends a message labelled as a test
+("IDPS SOC test message: this is not an alert") once, without retries, and answers 200:
+
+```json
+{"channel": "webhook", "ok": false, "error": "HTTP 500", "duration_ms": 41,
+ "tested_at": "2026-11-15T12:00:00Z"}
+```
+
+`ok: true` gives `error: null`. A failed delivery is still a 200 with `ok: false`. 409: the channel
+is not configured (or `NOTIFY_ENABLED` is false); 429: more than 3 tests for that channel in a
+minute; 422: unknown channel. Each test is audited as `integration_test` on
+`integration:<channel>` with `{"ok": ..., "error": ...}` (no destination). A test does not change the
+counters but does update `last_success_at` / `last_error`.
+
+### Reputation (AbuseIPDB)
+
+`GET /alerts/{id}/reputation` (analyst or admin) answers with AbuseIPDB's view of the alert's
+**source** address. The dashboard calls it only when an analyst opens it; nothing is looked up at
+ingest or for lists.
+
+```json
+{"ip": "45.33.32.156", "available": true, "reason": null, "abuse_confidence": 87,
+ "total_reports": 42, "country": "NL", "isp": "Example Hosting BV",
+ "usage_type": "Data Center/Web Hosting/Transit", "last_reported_at": "2026-11-14T10:00:00+00:00",
+ "checked_at": "2026-11-15T12:00:00Z", "cached": false}
+```
+
+All keys are always present. When nothing is available: `available: false`, `reason` is one of
+`"private address"` (private, loopback, link-local, documentation or other non-public: never sent
+anywhere), `"not configured"` (no `IDPS_SOC_ABUSEIPDB_KEY`), `"lookup failed: <short reason>"`
+(timeout, quota, rejected key, bad answer) or `"too many lookups; try again in a minute"`; the
+other fields are null. 404 for an unknown alert. Results are cached in memory for
+`ABUSEIPDB_CACHE_HOURS` (24); `cached: true` repeats the original `checked_at`. Errors are not
+cached. The cache is per process and empty after a restart.
+
+Each real lookup is audited as `reputation_lookup` on `alert:<id>` with `{"ip", "available"}` (who
+looked up which address); cache hits and refused addresses are not. Concurrent lookups of one address
+share one request. Limits: `ABUSEIPDB_MAX_PER_MINUTE` and `ABUSEIPDB_MAX_PER_DAY` (reason
+`"daily lookup limit reached"`); the cache is an LRU of at most 10,000 addresses.
+
+**Privacy.** A lookup sends the alert's source IP address to AbuseIPDB, a third party, together
+with your API key, and nothing else (no alert, destination, sensor or user data). Only public
+addresses are sent, and only when someone opens the reputation of that alert. AbuseIPDB sees the
+SOC's server address and which addresses you are investigating. Leave `ABUSEIPDB_KEY` unset if that
+is not acceptable.
 
 ## Learning from analysts (roadmap B1)
 

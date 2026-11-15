@@ -163,6 +163,28 @@ services:
       # Real locations for public addresses: the MaxMind GeoLite2 City file, copied into the
       # SOC's volume (it can't be mounted from ~/Desktop and must not go in the image or git).
       IDPS_SOC_GEOIP_DB: ${LAB_SOC_GEOIP_DB:-}
+      # Integrations (docs/soc.md, "Integrations"): every one optional, values only in lab/.env
+      # (git-ignored). This SOC can't open outbound connections (soc/netguard.sh), so in the lab
+      # they are tried against receivers on its own loopback (lab/README.md).
+      IDPS_SOC_PUBLIC_URL: ${LAB_SOC_PUBLIC_URL:-}
+      IDPS_SOC_NOTIFY_MIN_SEVERITY: ${LAB_NOTIFY_MIN_SEVERITY:-}
+      IDPS_SOC_NOTIFY_ALLOW_PRIVATE: ${LAB_NOTIFY_ALLOW_PRIVATE:-}
+      IDPS_SOC_NOTIFY_ALLOW_HTTP: ${LAB_NOTIFY_ALLOW_HTTP:-}
+      IDPS_SOC_WEBHOOK_URL: ${LAB_WEBHOOK_URL:-}
+      IDPS_SOC_WEBHOOK_SECRET: ${LAB_WEBHOOK_SECRET:-}
+      IDPS_SOC_SLACK_WEBHOOK_URL: ${LAB_SLACK_WEBHOOK_URL:-}
+      IDPS_SOC_SMTP_HOST: ${LAB_SMTP_HOST:-}
+      IDPS_SOC_SMTP_PORT: ${LAB_SMTP_PORT:-}
+      IDPS_SOC_SMTP_SECURITY: ${LAB_SMTP_SECURITY:-}
+      IDPS_SOC_SMTP_USERNAME: ${LAB_SMTP_USERNAME:-}
+      IDPS_SOC_SMTP_PASSWORD: ${LAB_SMTP_PASSWORD:-}
+      IDPS_SOC_SMTP_FROM: ${LAB_SMTP_FROM:-}
+      IDPS_SOC_SMTP_TO: ${LAB_SMTP_TO:-}
+      IDPS_SOC_SYSLOG_HOST: ${LAB_SYSLOG_HOST:-}
+      IDPS_SOC_SYSLOG_PORT: ${LAB_SYSLOG_PORT:-}
+      IDPS_SOC_SYSLOG_PROTOCOL: ${LAB_SYSLOG_PROTOCOL:-}
+      IDPS_SOC_SYSLOG_CA_FILE: ${LAB_SYSLOG_CA_FILE:-}
+      IDPS_SOC_ABUSEIPDB_KEY: ${LAB_ABUSEIPDB_KEY:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import ssl,urllib.request; urllib.request.urlopen('https://127.0.0.1:8443/health', context=ssl.create_default_context(cafile='/run/idps-soc/ca.pem'), timeout=2)"]
       interval: 3s

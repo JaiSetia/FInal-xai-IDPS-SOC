@@ -1,5 +1,6 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { sensorState, sensorsStatus } from "./sensor-fixtures";
+import { ApiError } from "../api/client";
 import Admin, { AUDIT_GROUPS, DetailPairs, auditGroup, auditQuery } from "../pages/Admin";
 
 const h = vi.hoisted(() => ({ api: vi.fn() }));
@@ -21,6 +22,8 @@ let users: Record<string, unknown>[];
 let sensors: Record<string, unknown>[];
 let status: unknown;
 let models: Record<string, unknown>[];
+let integrations: unknown;
+let integrationTest: (channel: string) => unknown;
 let auditAll: Record<string, unknown>[];
 let auditCursor: string | null;
 let auditOlder: Record<string, { items: unknown[]; next_cursor?: string | null }>;
@@ -35,6 +38,8 @@ beforeEach(() => {
   sensors = [sensor(), sensor({ id: 2, name: "old", revoked: true })];
   status = sensorsStatus([sensorState({ sensor_id: 1, name: "gw" })]);
   models = [];
+  integrationTest = (channel) => ({ channel, ok: true, error: null, duration_ms: 42, tested_at: "2026-02-01T10:00:00Z" });
+  integrations = { channels: [], abuseipdb: { configured: false, cache_hours: 24 } };
   auditAll = [];
   auditCursor = null;
   auditOlder = {};
@@ -47,6 +52,9 @@ beforeEach(() => {
     if (m === "GET" && path === "/admin/sensors") return sensors;
     if (m === "GET" && path === "/sensors/status") return status;
     if (m === "GET" && path === "/models") return { models };
+    if (m === "GET" && path === "/admin/integrations") return integrations;
+    const itest = /^\/admin\/integrations\/(\w+)\/test$/.exec(path);
+    if (m === "POST" && itest) return integrationTest(itest[1]);
     if (m === "GET" && path.startsWith("/admin/audit")) {
       const u = new URL(path, "http://x");
       const c = u.searchParams.get("cursor");
@@ -88,10 +96,10 @@ describe("auditGroup", () => {
     expect(AUDIT_GROUPS.actions).toEqual(["action_request", "action_confirmed", "action_rejected", "action_refused", "action_result"]);
     expect(AUDIT_GROUPS.assistant).toEqual(["assistant_message", "assistant_propose_block"]);
     expect(AUDIT_GROUPS.blocks).toEqual(["ingest_blocks"]);
-    expect(AUDIT_GROUPS.alerts).toEqual(["ingest_alerts", "alert_status"]);
+    expect(AUDIT_GROUPS.alerts).toEqual(["ingest_alerts", "alert_status", "reputation_lookup"]);
     expect(AUDIT_GROUPS.cases).toEqual(["case_create", "case_update", "case_delete", "case_note", "case_attach", "case_detach"]);
     expect(AUDIT_GROUPS.users).toEqual(["user_create", "user_role", "user_disable", "user_enable", "user_reset_password", "sensor_create", "sensor_revoke",
-      "sensor_status_first", "sensor_status_changed"]);
+      "sensor_status_first", "sensor_status_changed", "integration_test"]);
   });
   it.each(["action_proposed", "user_login", "assistant_chat", "case_created", "ingest_other", "alert_", "action_", "", "login_failed"])(
     "%j is other (exact names only)", (a) => { expect(auditGroup(a)).toBe("other"); });
@@ -109,7 +117,7 @@ describe("auditQuery", () => {
   it("is just the limit for all", () => { expect(auditQuery("all", "")).toBe("?limit=100"); });
   it("has one action per name of a group", () => {
     expect(auditQuery("blocks", "")).toBe("?action=ingest_blocks&limit=100");
-    expect(auditQuery("alerts", "")).toBe("?action=ingest_alerts&action=alert_status&limit=100");
+    expect(auditQuery("alerts", "")).toBe("?action=ingest_alerts&action=alert_status&action=reputation_lookup&limit=100");
     const p = new URLSearchParams(auditQuery("users", ""));
     expect(p.getAll("action")).toEqual(AUDIT_GROUPS.users);
   });
@@ -548,7 +556,7 @@ describe("audit log", () => {
     expect(screen.getByText("case:5")).toBeInTheDocument();
     expect(screen.getByText("1 entry shown.")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Event"), { target: { value: "alerts" } });
-    await waitFor(() => expect(auditPaths()).toContain("/admin/audit?action=ingest_alerts&action=alert_status&limit=100"));
+    await waitFor(() => expect(auditPaths()).toContain("/admin/audit?action=ingest_alerts&action=alert_status&action=reputation_lookup&limit=100"));
     expect(await screen.findByText("2 entries shown.")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Event"), { target: { value: "all" } });
     expect(await screen.findByText("8 entries shown.")).toBeInTheDocument();
@@ -786,5 +794,194 @@ describe("model versions card", () => {
     await waitFor(() => expect(calls("GET", "/models").length).toBe(2));
     fireEvent.click(screen.getAllByRole("button", { name: /^Revoke/ })[0]);
     await waitFor(() => expect(calls("GET", "/models").length).toBe(3));
+  });
+});
+
+describe("Integrations card", () => {
+  const chan = (o: Record<string, unknown> = {}) => ({
+    channel: "webhook", configured: true, enabled: true, min_severity: "high", include_rules: true, target_hint: "https://hooks.example/…abc",
+    last_success_at: null, last_error: null, last_error_at: null, queued: 0, sent: 0, failed: 0, dropped: 0, rate_limited: 0, deduped: 0, ...o,
+  });
+  const setup = (channels: unknown[], abuseipdb = { configured: false, cache_hours: 24 }) => { integrations = { channels, abuseipdb }; };
+  const card = async () => {
+    show();
+    await loaded();
+    const c = (await screen.findByText("Integrations", { selector: ".card h2, .card h3, .card *" })).closest(".card") as HTMLElement;
+    return c;
+  };
+  const rowOf = (c: HTMLElement, name: string) => within(c).getByText(name, { selector: "b" }).closest("tr") as HTMLElement;
+
+  it("pills: not configured, off, on; dash for unconfigured Sends and Delivery; target hint", async () => {
+    setup([
+      chan({ channel: "webhook", configured: false, enabled: false, target_hint: null }),
+      chan({ channel: "slack", enabled: false, target_hint: "slack-hint" }),
+      chan({ channel: "email", target_hint: "ops@example.org" }),
+    ]);
+    const c = await card();
+    await within(c).findByText("Slack");
+    const w = rowOf(c, "Webhook");
+    expect(within(w).getByText("not configured")).toBeInTheDocument();
+    expect(within(w).getAllByText("—")).toHaveLength(2);
+    expect(within(rowOf(c, "Slack")).getByText("off")).toBeInTheDocument();
+    expect(within(rowOf(c, "Slack")).getByText("slack-hint")).toBeInTheDocument();
+    expect(within(rowOf(c, "Email")).getByText("on")).toBeInTheDocument();
+    expect(within(rowOf(c, "Email")).getByText("ops@example.org")).toBeInTheDocument();
+  });
+
+  it("Sends text covers severity and rule inclusion", async () => {
+    setup([chan({ channel: "webhook", min_severity: "high", include_rules: true }), chan({ channel: "slack", min_severity: "critical", include_rules: false })]);
+    const c = await card();
+    await within(c).findByText("Slack");
+    expect(rowOf(c, "Webhook")).toHaveTextContent("high and above, model and rule alerts");
+    expect(rowOf(c, "Slack")).toHaveTextContent("critical and above, model alerts only");
+  });
+
+  it("delivery counts: sent only, then failed, held back, dropped, last sent, last error", async () => {
+    setup([
+      chan({ channel: "webhook", sent: 1234 }),
+      chan({ channel: "slack", sent: 5, failed: 2, rate_limited: 3, deduped: 4, dropped: 1, last_success_at: "2026-02-01T10:00:00Z", last_error: "HTTP 500" }),
+    ]);
+    const c = await card();
+    await within(c).findByText("Slack");
+    const w = rowOf(c, "Webhook");
+    expect(w).toHaveTextContent("1,234 sent");
+    expect(w.textContent).not.toMatch(/failed|held back|dropped|last sent|last error/);
+    const s = rowOf(c, "Slack");
+    expect(within(s).getByText("2 failed")).toHaveClass("danger-text");
+    expect(s).toHaveTextContent("7 held back");
+    expect(s).toHaveTextContent("1 dropped");
+    expect(s).toHaveTextContent("last sent");
+    expect(within(s).getByText("last error: HTTP 500")).toHaveClass("danger-text");
+  });
+
+  it("Test is disabled unless the channel is enabled", async () => {
+    setup([chan({ channel: "webhook", configured: false, enabled: false }), chan({ channel: "slack", enabled: false }), chan({ channel: "email" })]);
+    const c = await card();
+    await within(c).findByText("Slack");
+    expect(within(c).getByRole("button", { name: "Send a test message to Webhook" })).toBeDisabled();
+    expect(within(c).getByRole("button", { name: "Send a test message to Slack" })).toBeDisabled();
+    expect(within(c).getByRole("button", { name: "Send a test message to Email" })).toBeEnabled();
+  });
+
+  it("Test posts, shows 'sent in N ms' in a status element and reloads the status", async () => {
+    setup([chan({ channel: "slack" })]);
+    const c = await card();
+    await within(c).findByText("Slack");
+    const before = calls("GET", "/admin/integrations").length;
+    fireEvent.click(within(c).getByRole("button", { name: "Send a test message to Slack" }));
+    await waitFor(() => expect(calls("POST", "/admin/integrations/slack/test")).toHaveLength(1));
+    const st = await within(rowOf(c, "Slack")).findByText("sent in 42 ms");
+    expect(st.closest("[role=status]")).not.toBeNull();
+    await waitFor(() => expect(calls("GET", "/admin/integrations").length).toBe(before + 1));
+  });
+
+  it("a failed test shows failed: <error> in danger text", async () => {
+    setup([chan({ channel: "email" })]);
+    integrationTest = (channel) => ({ channel, ok: false, error: "SMTP refused", duration_ms: 5, tested_at: "2026-02-01T10:00:00Z" });
+    const c = await card();
+    await within(c).findByText("Email");
+    fireEvent.click(within(c).getByRole("button", { name: "Send a test message to Email" }));
+    const msg = await within(c).findByText("failed: SMTP refused");
+    expect(msg).toHaveClass("danger-text");
+    expect(msg.closest("[role=status]")).not.toBeNull();
+  });
+
+  it("AbuseIPDB line: on with cache hours, or not configured", async () => {
+    setup([], { configured: true, cache_hours: 24 });
+    const c = await card();
+    await waitFor(() => expect(c.textContent).toContain("AbuseIPDB reputation: on, cached 24 h."));
+    cleanup();
+    setup([], { configured: false, cache_hours: 24 });
+    const c2 = await card();
+    await waitFor(() => expect(c2.textContent).toContain("AbuseIPDB reputation: not configured."));
+  });
+});
+
+describe("Integrations card test results and errors", () => {
+  const chan = (o: Record<string, unknown> = {}) => ({
+    channel: "webhook", configured: true, enabled: true, min_severity: "high", include_rules: true, target_hint: null,
+    last_success_at: null, last_error: null, last_error_at: null, queued: 0, sent: 0, failed: 0, dropped: 0, rate_limited: 0, deduped: 0, ...o,
+  });
+  const open = async (channels: unknown[]) => {
+    integrations = { channels, abuseipdb: { configured: false, cache_hours: 24 } };
+    show();
+    await loaded();
+    const c = (await screen.findByText("Integrations", { selector: ".card *" })).closest(".card") as HTMLElement;
+    await within(c).findAllByRole("button", { name: /Send a test message/ });
+    return c;
+  };
+  const btn = (c: HTMLElement, name: string) => within(c).getByRole("button", { name: `Send a test message to ${name}` });
+
+  it.each([
+    [429, "Too many", "not sent: too many tests; wait a minute"],
+    [409, "conflict", "not sent: not configured or notifications are off"],
+    [500, "boom", "not sent: boom"],
+  ])("HTTP %i shows %s", async (status, msg, text) => {
+    integrationTest = () => { throw new ApiError(status, msg); };
+    const c = await open([chan()]);
+    fireEvent.click(btn(c, "Webhook"));
+    const el = await within(c).findByText(text);
+    expect(el).toHaveClass("danger-text");
+    expect(el.closest("[role=status]")).not.toBeNull();
+  });
+
+  it("a plain Error shows its message", async () => {
+    integrationTest = () => { throw new Error("network down"); };
+    const c = await open([chan()]);
+    fireEvent.click(btn(c, "Webhook"));
+    expect(await within(c).findByText("not sent: network down")).toBeInTheDocument();
+  });
+
+  it("clears the row result when a new test starts and disables every Test button meanwhile", async () => {
+    const c = await open([chan({ channel: "webhook" }), chan({ channel: "slack" })]);
+    fireEvent.click(btn(c, "Webhook"));
+    await within(c).findByText("sent in 42 ms");
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const base = h.api.getMockImplementation()!;
+    h.api.mockImplementation(async (p: string, o?: { method?: string }) => {
+      if (o?.method === "POST" && p === "/admin/integrations/webhook/test") { await gate; return { channel: "webhook", ok: true, error: null, duration_ms: 7, tested_at: "x" }; }
+      return base(p, o);
+    });
+    fireEvent.click(btn(c, "Webhook"));
+    await waitFor(() => expect(within(c).queryByText("sent in 42 ms")).toBeNull());
+    expect(within(c).getByRole("button", { name: "Send a test message to Webhook" })).toHaveTextContent("Sending…");
+    expect(btn(c, "Webhook")).toBeDisabled();
+    expect(btn(c, "Slack")).toBeDisabled();
+    release();
+    expect(await within(c).findByText("sent in 7 ms")).toBeInTheDocument();
+    await waitFor(() => expect(btn(c, "Slack")).toBeEnabled());
+  });
+
+  it("disabled buttons explain why", async () => {
+    const c = await open([chan({ channel: "webhook", configured: false, enabled: false }), chan({ channel: "slack", enabled: false }), chan({ channel: "email" })]);
+    expect(btn(c, "Webhook")).toHaveAttribute("title", "Not configured in the SOC's environment");
+    expect(btn(c, "Slack").getAttribute("title")).toMatch(/switched off/);
+    expect(btn(c, "Email")).not.toHaveAttribute("title");
+  });
+
+  it("an error older than the last success is 'earlier error' in muted text, with its time", async () => {
+    const c = await open([chan({ last_success_at: "2026-02-02T10:00:00Z", last_error_at: "2026-02-01T10:00:00Z", last_error: "HTTP 500" })]);
+    const el = within(c).getByText(/earlier error/);
+    expect(el).toHaveClass("muted");
+    expect(el).not.toHaveClass("danger-text");
+    expect(el.textContent).toMatch(/^earlier error \(.+\): HTTP 500$/);
+    expect(el.textContent).not.toContain("()");
+  });
+
+  it.each([
+    ["error after the last success", "2026-02-01T10:00:00Z", "2026-02-02T10:00:00Z"],
+    ["no success at all", null, "2026-02-02T10:00:00Z"],
+  ])("%s is 'last error' in danger text", async (_n, ok, err) => {
+    const c = await open([chan({ last_success_at: ok, last_error_at: err, last_error: "HTTP 500" })]);
+    const el = within(c).getByText(/last error/);
+    expect(el).toHaveClass("danger-text");
+    expect(el).not.toHaveClass("muted");
+    expect(el.textContent).toMatch(/^last error \(.+\): HTTP 500$/);
+  });
+
+  it("error without a timestamp has no parentheses", async () => {
+    const c = await open([chan({ last_error: "oops", last_error_at: null })]);
+    expect(within(c).getByText("last error: oops")).toBeInTheDocument();
   });
 });

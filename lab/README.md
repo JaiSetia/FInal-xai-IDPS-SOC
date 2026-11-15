@@ -95,6 +95,54 @@ echo 'LAB_SOC_GEOIP_DB=/var/lib/idps-soc/GeoLite2-City.mmdb' >> .env
 docker compose up -d soc && ./check_isolation.sh
 ```
 
+## Trying the integrations (notifications, syslog, reputation)
+
+The SOC can send high and critical alerts to a webhook, Slack and email and export a syslog/CEF
+stream (see [../docs/soc.md](../docs/soc.md), "Integrations"). The lab SOC **cannot open outbound
+connections** (see "How the lab is isolated"; this is not relaxed for integrations), so in the lab
+you try them against receivers inside the SOC's own container, on its loopback address. Nothing
+leaves the lab and no real Slack, mail server or SIEM is involved.
+
+1. In `lab/.env` set (placeholders; `.env` is git-ignored):
+
+   ```sh
+   LAB_NOTIFY_ALLOW_PRIVATE=true     # dev/lab only: lets the webhook go to 127.0.0.1
+   LAB_NOTIFY_ALLOW_HTTP=true        # dev/lab only
+   LAB_WEBHOOK_URL=http://127.0.0.1:9000/hook
+   LAB_WEBHOOK_SECRET=lab-shared-secret-change-me
+   LAB_SLACK_WEBHOOK_URL=http://127.0.0.1:9000/slack   # same receiver, shows the Slack JSON
+   LAB_SMTP_HOST=127.0.0.1
+   LAB_SMTP_PORT=2525
+   LAB_SMTP_SECURITY=none
+   LAB_SMTP_FROM=idps@lab.invalid
+   LAB_SMTP_TO=oncall@lab.invalid
+   LAB_SYSLOG_HOST=127.0.0.1
+   LAB_SYSLOG_PORT=5514
+   LAB_SYSLOG_PROTOCOL=tcp           # or udp
+   LAB_SOC_PUBLIC_URL=http://localhost:5173
+   ```
+
+2. Recreate the SOC and start the receivers, each in its own terminal:
+
+   ```sh
+   docker compose up -d soc && ./check_isolation.sh
+   docker compose exec soc python /opt/idps/lab/soc/listen.py http 9000     # LISTEN_HMAC_SECRET=... checks the signature
+   docker compose exec soc python /opt/idps/lab/soc/listen.py smtp 2525
+   docker compose exec soc python /opt/idps/lab/soc/listen.py syslog 5514
+   ```
+
+   To check the HMAC (signature over `<X-IDPS-Timestamp>.<body>`, timestamp within 5 minutes), start the web receiver with the same secret:
+   `docker compose exec -e LISTEN_HMAC_SECRET=lab-shared-secret-change-me soc python /opt/idps/lab/soc/listen.py http 9000`.
+
+3. In the dashboard's Admin page (or `POST /admin/integrations/<channel>/test`) press the test
+   button of each channel, then run an attack (`docker compose exec attacker /attacks/dos.sh syn u500`
+   or `portscan.sh`): high and critical alerts appear in the receivers, every alert in the syslog
+   one, as CEF.
+
+The reputation of a lab alert says "private address": lab addresses are never sent to AbuseIPDB, and
+the lab SOC could not reach it anyway. Real lookups need a deployed SOC with outbound access and
+`IDPS_SOC_ABUSEIPDB_KEY`.
+
 ## Running detection on the sensor
 
 `live.sh` runs `python -m idps.live` with the SOC's address, CA and token, so alerts and

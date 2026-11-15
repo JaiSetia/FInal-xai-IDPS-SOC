@@ -1,9 +1,12 @@
 """SOC API settings, overridable with IDPS_SOC_* environment variables."""
 
+import os
+import re
 from functools import lru_cache
-from typing import Annotated
+from pathlib import Path
+from typing import Annotated, Literal
 
-from pydantic import Field, IPvAnyNetwork, SecretStr, field_validator
+from pydantic import Field, IPvAnyNetwork, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 MIN_SECRET_LENGTH = 32
@@ -22,8 +25,20 @@ DEFAULT_SEVERITY_BY_CLASS = {
 }
 
 
+# Integration secrets can come from a file instead of the environment: IDPS_SOC_<NAME>_FILE=path
+# (Docker/Kubernetes secrets). Blank values (docker compose passes "" for an unset ${VAR:-}) mean
+# "not set" for every integration setting.
+SECRET_FIELDS = ("webhook_url", "webhook_secret", "slack_webhook_url", "smtp_password",
+                 "abuseipdb_key")
+INTEGRATION_PREFIXES = ("notify_", "webhook_", "slack_", "smtp_", "email_", "syslog_",
+                        "abuseipdb_")
+_EMAIL = re.compile(r"^[^@\s<>,;\"]+@[^@\s<>,;\"]+$")
+
+
 class SocSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="IDPS_SOC_")
+    # hide_input_in_errors: a rejected value (an address list, a URL, a secret) is never echoed
+    # into the validation error, which ends up in logs.
+    model_config = SettingsConfigDict(env_prefix="IDPS_SOC_", hide_input_in_errors=True)
 
     # SQLite for local development; PostgreSQL in deployment, e.g.
     # postgresql+psycopg://user:pass@host/idps
@@ -77,6 +92,127 @@ class SocSettings(BaseSettings):
     # Browser origins allowed to call the API (the dashboard's dev server by default).
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173"])
+
+    # --- Integrations (docs/soc.md, "Integrations") -----------------------------------------
+    # Every channel is optional and configured ONLY here (environment or *_FILE secret files),
+    # never through the API; the API never returns or logs these values.
+    # Base address of the dashboard, for links to an alert in notifications (blank: no link).
+    public_url: str | None = None
+    notify_enabled: bool = True  # kill switch for every channel
+    # Notify for new alerts at or above this severity (a channel's own *_MIN_SEVERITY overrides).
+    notify_min_severity: str = "high"
+    # DEV/LAB ONLY. Webhook destinations must be https and public; these let a lab test use a
+    # local receiver. (Slack and webhook URLs go through the same check.)
+    notify_allow_private: bool = False
+    notify_allow_http: bool = False
+    notify_queue_size: int = Field(default=500, ge=1, le=100_000)  # per channel
+    notify_max_attempts: int = Field(default=3, ge=1, le=6)
+    notify_backoff_seconds: float = Field(default=1.0, ge=0, le=60)  # doubles each retry
+    notify_rate_per_minute: int = Field(default=20, ge=1, le=10_000)  # per channel, then a digest
+    notify_dedupe_seconds: int = Field(default=300, ge=0, le=86_400)  # 0 = off
+    notify_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    # Generic webhook: JSON POST, optional HMAC-SHA256 of the body in X-IDPS-Signature.
+    webhook_url: SecretStr | None = None
+    webhook_secret: SecretStr | None = None
+    webhook_min_severity: str | None = None
+    webhook_include_rules: bool = True
+    # Slack incoming webhook.
+    slack_webhook_url: SecretStr | None = None
+    slack_min_severity: str | None = None
+    slack_include_rules: bool = True
+    # Email over SMTP. smtp_security "none" is for a local test receiver only.
+    smtp_host: str | None = None
+    smtp_port: int | None = Field(default=None, ge=1, le=65535)  # 465 for ssl, else 587
+    smtp_security: Literal["starttls", "ssl", "none"] = "starttls"
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
+    smtp_from: str | None = None
+    smtp_to: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    email_min_severity: str | None = None
+    email_include_rules: bool = True
+    # Syslog/CEF export for a SIEM. Every alert by default (low and up), no dedupe, no rate limit
+    # (a SIEM wants the whole stream); blocks are sent too.
+    syslog_host: str | None = None
+    syslog_port: int = Field(default=514, ge=1, le=65535)
+    syslog_protocol: Literal["udp", "tcp", "tls"] = "udp"
+    syslog_ca_file: str | None = None  # TLS: CA that signed the receiver's certificate
+    syslog_min_severity: str = "low"
+    syslog_include_rules: bool = True
+    syslog_include_blocks: bool = True
+    syslog_idle_seconds: float = Field(default=60, gt=0, le=3600)  # reconnect a TCP/TLS link idle this long
+    syslog_rate_per_minute: int = Field(default=0, ge=0, le=1_000_000)  # 0 = unlimited
+    # AbuseIPDB reputation of an alert's source address (looked up only when an analyst opens
+    # it). This sends that public IP to a third party; see docs/soc.md.
+    abuseipdb_key: SecretStr | None = None
+    abuseipdb_cache_hours: float = Field(default=24, gt=0, le=24 * 30)
+    abuseipdb_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    abuseipdb_max_per_minute: int = Field(default=30, ge=1, le=10_000)  # uncached lookups
+    abuseipdb_max_per_day: int = Field(default=900, ge=1, le=1_000_000)  # free tier: 1000
+
+    @property
+    def smtp_port_effective(self) -> int:
+        return self.smtp_port or (465 if self.smtp_security == "ssl" else 587)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _integration_inputs(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        for key in list(data):
+            blank = isinstance(data[key], str) and not data[key].strip()
+            if blank and (key.startswith(INTEGRATION_PREFIXES) or key == "public_url"):
+                del data[key]  # blank = unset (the default applies)
+        for name in SECRET_FIELDS:
+            path = os.environ.get(f"IDPS_SOC_{name.upper()}_FILE", "").strip()
+            if path and name not in data:
+                try:
+                    value = Path(path).read_text(encoding="utf-8").strip()
+                except OSError as exc:  # never echo the path's content; the path is not secret
+                    raise ValueError(f"IDPS_SOC_{name.upper()}_FILE cannot be read") from exc
+                if value:
+                    data[name] = value
+        return data
+
+    @field_validator("notify_min_severity", "syslog_min_severity", "webhook_min_severity",
+                     "slack_min_severity", "email_min_severity")
+    @classmethod
+    def _severity_name(cls, value: str | None) -> str | None:
+        if value is not None:
+            value = value.strip().casefold()
+            if value not in SEVERITIES:
+                raise ValueError(f"severity must be one of {SEVERITIES}")
+        return value
+
+    @field_validator("public_url")
+    @classmethod
+    def _public_url(cls, value: str | None) -> str | None:
+        if value is not None:
+            value = value.strip().rstrip("/")
+            if not re.match(r"^https?://[^\s/?#]+(/[^\s?#]*)?$", value):
+                raise ValueError("IDPS_SOC_PUBLIC_URL must be an http(s) address without a query")
+        return value
+
+    @field_validator("smtp_to", mode="before")
+    @classmethod
+    def _split_recipients(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
+
+    @field_validator("smtp_to")
+    @classmethod
+    def _recipients_valid(cls, value: list[str]) -> list[str]:
+        if len(value) > 20 or not all(_EMAIL.match(v) for v in value):
+            raise ValueError("IDPS_SOC_SMTP_TO must be up to 20 plain email addresses")
+        return value
+
+    @field_validator("smtp_from")
+    @classmethod
+    def _sender_valid(cls, value: str | None) -> str | None:
+        if value is not None and not _EMAIL.match(value.strip()):
+            raise ValueError("IDPS_SOC_SMTP_FROM must be a plain email address")
+        return None if value is None else value.strip()
 
     @field_validator("jwt_secret")
     @classmethod

@@ -460,3 +460,24 @@ The forwarder reported 17 alerts sent, 30 folded, and nothing dropped, rate-limi
 **In the SOC.** Alerts carry a "rule" tag; the Alerts page and the Threat Center's live alerts filter by "Raised by" (model, rule or both); a rule alert's page shows the matched signature, SID, category and Suricata severity instead of a model explanation; the Alerts number splits model and rule counts; Sensor health shows the forwarder's state. Rule alerts are never used as training rows.
 
 **Hardening** (from the review): the Suricata container keeps only the `NET_RAW` and `DAC_READ_SEARCH` capabilities, with `no-new-privileges`, a 3 GB memory limit and a process limit; capture works without `NET_ADMIN`. Rule alerts have their own outbox cap and a per-minute limit, so a flood of them can't push model alerts out during an SOC outage.
+
+## Integrations: notifications, SIEM export and IP reputation (15 November 2026)
+
+The SOC can now send new alerts to people and to other tools. All channels are optional and configured only in the SOC's environment (or `_FILE` secrets); the API never returns a URL, token or password, and errors are scrubbed before they are shown or audited. Docs: `docs/soc.md`, "Integrations".
+
+| Channel | What it sends | Default |
+|---|---|---|
+| Webhook | JSON per alert, signed with HMAC-SHA256 over a timestamp and the body | high and critical, model and rule alerts |
+| Slack | One message per alert (class, severity, rule signature, source → target, sensor, link) | high and critical |
+| Email (SMTP, STARTTLS or SSL) | Plain-text and HTML message | high and critical |
+| Syslog / CEF (UDP, TCP or TLS, RFC 5424) | Every alert from low up, plus blocks, in CEF for SIEMs such as Splunk or Elastic | low and above |
+
+Delivery never slows alert ingest: each channel has a bounded queue and one worker, with retries, a per-minute limit that turns a burst into one "and K more" summary, and suppression of repeats (the same class from the same source, or the same rule between the same addresses) for a few minutes. Admin → Integrations shows each channel's state (configured, last success, last error, counts) and a test button that sends one labelled test message.
+
+**Check.** On a local SOC with receivers on loopback (`lab/soc/listen.py`), the test buttons delivered to all three configured channels (Slack had no webhook and showed "not configured"). A critical alert then arrived as a signed webhook, an email and a CEF syslog line at severity 10, and a low-severity port scan only as syslog, as configured. After restarting the syslog receiver, which is what a SIEM restart looks like, the next alert still arrived.
+
+**Reputation.** An alert's page can look up the source IP on AbuseIPDB, but only when the analyst clicks: only the IP is sent, private and reserved addresses are never sent (and the page says so without a button), results are cached for 24 hours, lookups are capped per minute and per day (900, under the free plan's 1,000), and each real lookup is audited because it discloses an IP to a third party. Without a key it reports "not configured".
+
+**Security review.** The review checked the outbound requests most closely, because a webhook URL is a way to make the SOC open connections. Webhook and Slack URLs must be https and resolve only to public addresses (IPv4 inside IPv6 forms such as NAT64 and 6to4 are decoded and checked); the SOC connects to the address it checked, never follows redirects and ignores proxy settings; every exchange has an overall deadline, so a server that answers one byte at a time can't freeze a channel. Attacker-influenced text (rule signatures, class names) is escaped for Slack, email headers and HTML, and CEF. Private destinations and plain http need an explicit lab-only flag.
+
+**Lab note.** The lab SOC container blocks all outbound connections by design, so it can't reach Slack, a mail server or a SIEM. Trying the channels in the lab uses receivers inside the SOC container (`lab/README.md`, "Trying the integrations").

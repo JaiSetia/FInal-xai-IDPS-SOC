@@ -1,6 +1,7 @@
 """Alert ingest (sensors) and alert triage (analysts)."""
 
 import json
+import logging
 import math
 import re
 from datetime import datetime
@@ -38,6 +39,7 @@ from soc.api.db import get_db
 from soc.api.geo import geo_out
 from soc.api.models import SOURCE_ML, SOURCE_RULE, Alert, AlertStatus, Severity, ml_alerts_clause
 
+log = logging.getLogger("soc.api")
 router = APIRouter(tags=["alerts"])
 
 MAX_BATCH = 500
@@ -337,6 +339,10 @@ def ingest_alerts(batch: AlertBatch, sensor: Sensor, request: Request,
     request.app.state.broadcaster.publish_many(
         [AlertOut.model_validate(r).model_dump(mode="json") | {"src_geo": geo_out(locator, r.src_ip)}
          for r in rows])
+    try:  # queue only: filtering and bounded in-memory queues, no I/O; never fails the ingest
+        request.app.state.notifier.submit_alerts(rows, sensor.name)
+    except Exception:
+        log.exception("could not queue notifications")
     return IngestResult(accepted=len(rows), skipped_benign=skipped, ids=[r.id for r in rows],
                         features_dropped=features_dropped, model_info_dropped=model_dropped)
 

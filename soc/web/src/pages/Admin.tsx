@@ -1,6 +1,8 @@
 import { useRef, useState, type FormEvent } from "react";
-import { api } from "../api/client";
-import type { AdminUser, AuditEntry, ModelVersion, Page, Role, Sensor } from "../api/types";
+import { api, ApiError } from "../api/client";
+import type {
+  AdminUser, AuditEntry, IntegrationChannel, IntegrationsResponse, IntegrationTestResult, ModelVersion, Page, Role, Sensor,
+} from "../api/types";
 import { useAuth } from "../auth";
 import { Card, ErrorText, PageHead, Pill, useAction, useLoad } from "../components/common";
 import { useSensors } from "../sensors";
@@ -286,10 +288,10 @@ export const AUDIT_GROUPS: Record<Exclude<AuditGroup, "all">, string[]> = {
   actions: ["action_request", "action_confirmed", "action_rejected", "action_refused", "action_result"],
   assistant: ["assistant_message", "assistant_propose_block"],
   blocks: ["ingest_blocks"],
-  alerts: ["ingest_alerts", "alert_status"],
+  alerts: ["ingest_alerts", "alert_status", "reputation_lookup"],
   cases: ["case_create", "case_update", "case_delete", "case_note", "case_attach", "case_detach"],
   users: ["user_create", "user_role", "user_disable", "user_enable", "user_reset_password", "sensor_create", "sensor_revoke",
-    "sensor_status_first", "sensor_status_changed"],
+    "sensor_status_first", "sensor_status_changed", "integration_test"],
 };
 
 /** Which group an audit action belongs to. */
@@ -321,6 +323,105 @@ export function DetailPairs({ details }: { details: Record<string, unknown> }) {
         <li key={k}><span className="muted">{k}:</span> {typeof v === "string" ? `“${v}”` : JSON.stringify(v)}</li>
       ))}
     </ul>
+  );
+}
+
+const CHANNEL_NAME: Record<IntegrationChannel, string> = {
+  webhook: "Webhook", slack: "Slack", email: "Email", syslog: "Syslog / CEF (SIEM)",
+};
+
+/** Notification and SIEM channels: configured in the SOC's environment (never here), with a test
+ *  button that sends one clearly labelled test message. */
+function Integrations({ onChanged }: { onChanged: () => void }) {
+  const { data, error, reload } = useLoad(() => api<IntegrationsResponse>("/admin/integrations"), []);
+  // Each row shows its own last test: the delivery result, or why the SOC refused to test.
+  const [results, setResults] = useState<Partial<Record<IntegrationChannel, { ok: boolean; text: string }>>>({});
+  const [testing, setTesting] = useState<IntegrationChannel | null>(null);
+
+  async function test(channel: IntegrationChannel) {
+    setTesting(channel);
+    setResults((m) => ({ ...m, [channel]: undefined }));
+    let res: { ok: boolean; text: string };
+    try {
+      const r = await api<IntegrationTestResult>(`/admin/integrations/${channel}/test`, { method: "POST" });
+      res = r.ok ? { ok: true, text: `sent in ${r.duration_ms} ms` } : { ok: false, text: `failed: ${r.error ?? "unknown error"}` };
+    } catch (err) {
+      const why = err instanceof ApiError && err.status === 429 ? "too many tests; wait a minute"
+        : err instanceof ApiError && err.status === 409 ? "not configured or notifications are off"
+        : err instanceof Error ? err.message : String(err);
+      res = { ok: false, text: `not sent: ${why}` };
+    }
+    setTesting(null);
+    setResults((m) => ({ ...m, [channel]: res }));
+    void reload();
+    onChanged();
+  }
+
+  return (
+    <Card title="Integrations">
+      <ErrorText error={error} />
+      {data && (
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Channel</th><th>Sends</th><th>Delivery</th><th><span className="sr-only">Test</span></th></tr></thead>
+            <tbody>
+              {data.channels.map((c) => {
+                const r = results[c.channel];
+                return (
+                  <tr key={c.channel}>
+                    <td>
+                      <b>{CHANNEL_NAME[c.channel]}</b>{" "}
+                      {!c.configured ? <Pill>not configured</Pill> : !c.enabled ? <Pill tone="warn">off</Pill> : <Pill tone="ok">on</Pill>}
+                      {c.target_hint && <div className="muted small-text mono wrap-anywhere">{c.target_hint}</div>}
+                    </td>
+                    <td className="small-text">
+                      {c.configured
+                        ? <>{c.min_severity} and above{c.include_rules ? ", model and rule alerts" : ", model alerts only"}</>
+                        : "—"}
+                    </td>
+                    <td className="small-text">
+                      {c.configured ? (
+                        <>
+                          {c.sent.toLocaleString()} sent
+                          {c.failed > 0 && <> · <span className="danger-text">{c.failed.toLocaleString()} failed</span></>}
+                          {c.rate_limited + c.deduped > 0 && <> · {(c.rate_limited + c.deduped).toLocaleString()} held back</>}
+                          {c.dropped > 0 && <> · {c.dropped.toLocaleString()} dropped</>}
+                          {c.last_success_at && <div className="muted">last sent {dateTime(c.last_success_at)}</div>}
+                          {c.last_error && (() => {
+                            // An error older than the last success is history, not the current state.
+                            const old = !!c.last_success_at && !!c.last_error_at && Date.parse(c.last_success_at) > Date.parse(c.last_error_at);
+                            return (
+                              <div className={`wrap-anywhere ${old ? "muted" : "danger-text"}`}>
+                                {old ? "earlier error" : "last error"}{c.last_error_at ? ` (${dateTime(c.last_error_at)})` : ""}: {c.last_error}
+                              </div>
+                            );
+                          })()}
+                        </>
+                      ) : "—"}
+                    </td>
+                    <td>
+                      <button type="button" disabled={!c.enabled || testing !== null} onClick={() => void test(c.channel)}
+                        aria-label={`Send a test message to ${CHANNEL_NAME[c.channel]}`}
+                        title={!c.configured ? "Not configured in the SOC's environment" : !c.enabled ? "Notifications are switched off (IDPS_SOC_NOTIFY_ENABLED)" : undefined}>
+                        {testing === c.channel ? "Sending…" : "Test"}
+                      </button>
+                      <div role="status" className="small-text">
+                        {r && <span className={r.ok ? undefined : "danger-text wrap-anywhere"}>{r.text}</span>}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="muted small-text" style={{ margin: "10px 0 0" }}>
+        Channels and their secrets are set in the SOC's environment (see docs/soc.md, "Integrations"); this page never
+        shows them. Bursts are summarised and repeats held back, so one attack doesn't send hundreds of messages.
+        AbuseIPDB reputation: {data ? (data.abuseipdb.configured ? `on, cached ${data.abuseipdb.cache_hours} h` : "not configured") : "…"}.
+      </p>
+    </Card>
   );
 }
 
@@ -453,6 +554,7 @@ export default function Admin() {
         <Users onChanged={changed} />
         <Sensors onChanged={changed} />
       </div>
+      <Integrations onChanged={changed} />
       <Models refresh={refresh} />
       <Audit refresh={refresh} />
     </>

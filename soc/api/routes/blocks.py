@@ -203,13 +203,17 @@ def _message(request: Request, sensor, ev: BlockEvent, at: datetime,
                         geo=geo_out(request.app.state.geo, ev.ip))
 
 
-def _publish(request: Request, messages: list[BlockMessage]) -> None:
+def _publish(request: Request, messages: list[BlockMessage], sensor_name: str = "") -> None:
     """Hand the messages to the live feed; a failure here never fails the committed ingest."""
     try:
         request.app.state.broadcaster.publish_many(
             [m.model_dump(mode="json") for m in messages])
     except Exception:
         log.exception("could not publish block events to the live feed")
+    try:  # syslog/CEF export of block events: queued in memory, never blocks or fails the ingest
+        request.app.state.notifier.submit_blocks(messages, sensor_name)
+    except Exception:
+        log.exception("could not queue block notifications")
 
 
 @router.post("/ingest/blocks", response_model=BlockIngestResult, status_code=201)
@@ -258,7 +262,7 @@ def ingest_blocks(batch: BlockBatch, sensor: Sensor, request: Request,
           {"events": len(batch.events), "blocked": blocked, "unblocked": unblocked,
            "would_block": would})
     db.commit()
-    _publish(request, messages)  # only after the commit, never for a refused batch
+    _publish(request, messages, sensor.name)  # only after the commit, never for a refused batch
     background.add_task(prune_in_background, request.app, now)  # after the response
     return BlockIngestResult(blocked=blocked, unblocked=unblocked, would_block=would)
 
