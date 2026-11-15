@@ -49,13 +49,16 @@ Shared with the rest of the IDPS: `IDPS_MODEL_PATH`, `IDPS_DRY_RUN` (default `tr
 | `IDPS_LIVE_TOP_K` | 5 | Features per SHAP explanation |
 | `IDPS_LIVE_MAX_EXPLANATIONS_PER_BATCH` | 50 | Alerts per batch that get SHAP; the rest are sent without |
 | `IDPS_LIVE_BACKGROUND_SIZE` | 50 | First BENIGN flows kept as SHAP background (only models that need one) |
-| `IDPS_LIVE_OUTBOX_MAX_ALERTS` | 5000 | Cap of the SOC outbox |
+| `IDPS_LIVE_OUTBOX_MAX_ALERTS` | 5000 | Cap of the SOC outbox for model alerts |
+| `IDPS_LIVE_OUTBOX_MAX_RULE_ALERTS` | 1000 | Separate cap for rule (Suricata) alerts, see "Rules next to ML" |
 | `IDPS_LIVE_OUTBOX_FILE` | `data/processed/live_outbox.json` | Where unsent alerts are saved |
 | `IDPS_LIVE_ALERTS_FILE` | `data/processed/live_alerts.jsonl` | Alerts when no SOC is configured (mode 0600) |
 | `IDPS_LIVE_METRICS_SECONDS` | 10 | Period of the metrics log line |
 | `IDPS_SOC_URL` | unset | SOC base URL, `https://` (plain `http://` only for localhost) |
 | `IDPS_SOC_SENSOR_TOKEN` (alias `IDPS_SOC_TOKEN`) | unset | Sensor token from `python -m soc.api create-sensor`. Never logged |
 | `IDPS_SOC_CA_FILE` | unset | PEM of the CA that signed the SOC certificate |
+
+The rule forwarder has its own `IDPS_RULES_*` settings (see "Rules next to ML").
 
 Setting only one of URL and token is an error (exit 2), not a silent fallback to the file. Only
 the `IDPS_`-prefixed names are read; a bare `SOC_URL` or `SOC_TOKEN` in the environment is ignored.
@@ -148,7 +151,7 @@ With a SOC configured, a daemon thread (`idps/live/status.py`) posts the sensor'
 `POST /sensor/status` once at start and then every `IDPS_LIVE_STATUS_SECONDS` (default 30): dry-run
 and blocking flags, interface and mode, model name and checksum result, the response policy, the
 allowlist (at most 100 entries), outbox size, SHAP p95, heartbeat state and the flows / alerts /
-blocked / would_block counters. No token or URL is in it. A failure is logged once per streak and
+blocked / would_block counters and the rule forwarder's `rules` block (see "Rules next to ML"). No token or URL is in it. A failure is logged once per streak and
 retried at the next interval; detection is never affected. The thread stops before the sink closes.
 
 `IDPS_FAITHFULNESS_REPORT` (optional path) points at the JSON written by
@@ -565,6 +568,105 @@ python scripts/lab_unseen.py --score-only                      # re-score data/p
 - **Data file.** `data/processed/lab_labelled.parquet` (git-ignored) with `session`, `repeat`, `label`, `family` and the features. It is written once at the end through a temporary file; the previous file is kept as `lab_labelled.parquet.bak`. `--append` merges new sessions into the existing file (the same session and repeat are replaced); without it the file is replaced. If no session succeeded nothing is written or scored and the exit code is 1. `--out` picks another data file (the report then goes to `reports/<name>.json` unless `--report` says otherwise), so a trial run cannot overwrite a full collection.
 - **Scoring.** `models/week_xgboost.joblib` (sha256 checked on load), reported twice in `reports/lab_unseen.json`: `with_floor` (a prediction below the 0.5 alert floor counts as BENIGN, as deployed) and `no_floor` (plain argmax). The test-split scores in `reports/week_xgboost.json` use no floor, so the printed lab-against-test table uses `no_floor`. The report also holds the BENIGN false-positive rate, per-label recall and top predictions, family-level macro-F1, a truth-by-predicted confusion table, the model checksum and notes.
 - **Reading it.** Recall is the fair column; F1 depends on the class mix. The family-level macro-F1 covers about five families and the test-split macro-F1 covers 14 classes, so they are not the same measure. The lab has one client, a round-trip time of about 0.1 ms and repeats that are not independent (see `notes` in the report).
+
+## Rules next to ML (roadmap step 8)
+
+The sensor can run Suricata next to the model and send its alerts to the SOC as **rule alerts**
+(`source: "rule"`), so an analyst sees what the rules caught beside what the model caught, and can
+filter by either. Off by default; nothing about rules is sent unless `IDPS_RULES_EVE` names Suricata's
+`eve.json`.
+
+```
+Suricata (ET Open, lab_attack) --eve.json (alert events only)--> forwarder thread in idps.live
+   --> drop engine events and informational alerts --> fold repeats --> the SOC outbox --> SOC
+```
+
+- **Settings** (read by `idps/rules/config.py`; live mode only, ignored with `--pcap`):
+
+  | Variable | Default | Meaning |
+  |---|---|---|
+  | `IDPS_RULES_EVE` | unset (off) | Path of Suricata's `eve.json`. The lab: `/run/idps-rules/eve.json` |
+  | `IDPS_RULES_INCLUDE_INFO` | `false` | Also send informational alerts (ET INFO, ET POLICY, GPL ICMP_INFO, GPL INFO, GPL POLICY, or the categories Not Suspicious Traffic, Misc activity, Potential Corporate Privacy Violation), as family "Policy" |
+  | `IDPS_RULES_DEDUPE_SECONDS` | 60 | Repeats of the same (sid, source, destination, destination port) inside this window are folded (see below); 0 sends every event |
+  | `IDPS_RULES_MAX_PER_MINUTE` | 120 | At most this many rule alerts are queued per minute; the excess is dropped and counted as `rate_limited`. 0 = no limit. Blocking is not affected |
+  | `IDPS_RULES_BLOCK_SIDS` | empty | Comma list of Suricata signature ids whose alerts may trigger an automatic block. Empty: rules never block. A listed SID is also exempt from the informational filter (engine events are never exempt) |
+  | `IDPS_RULES_PROTECTED_NETS` | empty (the lab's `live.sh` sets `10.10.2.0/24`) | Comma list of the networks you protect. A rule hit whose source is inside one is never handed to the response engine, on top of `IDPS_ALLOWLIST` |
+  | `IDPS_RULES_FROM_START` | `false` | Read an existing eve file from its start (replays history; tests) |
+  | `IDPS_RULES_POLL_SECONDS` | 0.5 | How often the file is polled |
+
+- **Reading the file** (`idps/rules/tail.py`). Starts at the **end** of a file that already exists
+  (what Suricata wrote before the sensor started is history); a file that appears later is read from
+  its start. A line is used only when its newline has arrived. A file that gets smaller (the lab's size
+  cap empties it) is read again from its start; a rotated file (new inode) is finished and the new one
+  is followed. A line over 1 MiB is skipped. Small losses to know: the lines written between the last poll and
+  a truncation (the lab's size cap) are lost with the old content; a truncation followed, before the next poll, by
+  more new data than the old size is not seen (a 32 MB burst in 0.5 s); one poll reads at most 8 MiB or 50,000
+  lines and carries on at the next.
+- **What is dropped** (counted in the status, never sent): Suricata engine events (text starting
+  `SURICATA `, e.g. `SURICATA STREAM Packet with invalid ack`, which fire on ordinary traffic) and
+  informational alerts. The classification helpers are shared with `scripts/suricata_compare.py`
+  (`idps/rules/eve.py`). A line that is not valid JSON (including a fragment, the tail of a line cut by a restart or
+  a truncation), has no UTC offset in its timestamp, or has an unusable address, protocol or sid is counted in
+  `dropped_invalid`, as is a half line the tailer drops when the file is truncated or rotated, and a line over 1 MiB.
+- **Family and confidence.** `predicted_class` is a short family, decided in this order: a keyword in
+  the signature (BRUTE FORCE, SQL INJECTION, XSS, DIRECTORY TRAVERSAL), the signature's ruleset prefix
+  (ET SCAN -> Scan, ET DOS -> DoS, ET WEB_ -> Web Attack, ET MALWARE / TROJAN / CNC -> Malware, ET
+  EXPLOIT / SHELLCODE -> Exploit, ET INFO / POLICY -> Policy), then the Suricata category (e.g. Web
+  Application Attack, Attempted Denial of Service, A Network Trojan was detected), else **Rule match**.
+  Malware, Exploit and DoS prefixes come first (a malware rule that mentions SQLi is malware), then
+  whole-word keywords (`SQLI` does not match `SQLITE`), then the other prefixes, then the category.
+  An attack ruleset (ET SCAN / WEB_ / MALWARE / TROJAN / EXPLOIT / DOS ...) is never informational,
+  whatever its category says: the prefix wins over the category (this also applies to the Suricata
+  comparison, so its informational split can differ slightly from the 15 November run).
+  `confidence` comes from Suricata's severity (1 is the most severe): 1 -> 0.95, 2 -> 0.85, 3 -> 0.70,
+  4 -> 0.55 (anything else counts as 3). The SOC then applies its normal severity rule to the family
+  and confidence (`docs/soc.md`).
+- **Repeats are folded** by EVENT time (the eve timestamp, so a backlog read in one go folds the same
+  as live). The first event of a (sid, src, dst, dst port) is sent at once with `rule.count` 1. Repeats
+  inside the window are not sent but counted; when the window ends, if there were repeats, ONE
+  follow-up alert is sent with `rule.count` = all events of the window, `start_ms` the first and
+  `end_ms` the last. The same rule hitting the same source, destination and port 500 times is two
+  alerts per window; a scan across many ports or hosts is one key each and can still make many, which is
+  what `IDPS_RULES_MAX_PER_MINUTE` is for. At shutdown the open windows are flushed. At most 10,000 windows
+  are open; the oldest is closed first.
+- **A rule flood cannot push model alerts out.** Rule alerts have their own outbox cap
+  (`IDPS_LIVE_OUTBOX_MAX_RULE_ALERTS`, default 1000): beyond it the oldest RULE alerts are dropped, and
+  model alerts are only ever dropped by model alerts (cap `IDPS_LIVE_OUTBOX_MAX_ALERTS`). The two kinds
+  also never share a POST.
+- **Rule alerts do not block, unless you say so.** Automatic blocking is the model plus the policy
+  only. A rule can trigger a block only if its SID is in `IDPS_RULES_BLOCK_SIDS` **and** the event is in
+  the `to_server` direction (the source of a `to_client` event is the server) **and** its source is not
+  inside `IDPS_RULES_PROTECTED_NETS` **and** it is not an engine event. It then goes through the same
+  response engine as a model detection: the allowlist is checked first, dry-run only records a
+  would-block (reported to the SOC as `would_block`), an analyst's unblock grace period is respected, and
+  a real block is reported to the SOC like any other, with the reason "Suricata rule sid N (signature)
+  matched". **Decision:** the engine gets the detection with confidence 1.0, and it counts as the policy's
+  `min_flows` flows (one hit is enough) only when it is TCP on an **established flow**: Suricata logged an
+  application protocol, or packets in both directions. Anything else (UDP, ICMP, a bare SYN) is forgeable
+  with one spoofed packet and counts as ONE flow, like a single confident model detection; the policy then
+  needs `min_flows` such hits in its window. Events that are kept from the engine (not `to_server`, in a
+  protected net) are counted in `block_skipped` and logged for the first one and then every 100th. Every
+  hit of a listed rule reaches the policy, also the ones folded into a window, but once an address is
+  blocked the policy answers `already_blocked`. Protected servers must still be in `IDPS_ALLOWLIST`.
+- **Status.** The report has `rules: {enabled, eve_path, alerts_sent, dropped_engine, dropped_info,
+  last_event_at, error, deduped, dropped_invalid, rate_limited, block_skipped, include_info,
+  dedupe_seconds, max_per_minute, block_sids}` (counters since start; `alerts_sent` is what was queued for the SOC after folding; `block_sids` is how many
+  rules may block; `error` says why the file cannot be read, for example "does not exist yet (is
+  Suricata running?)"). With the forwarder off the status has **no `rules` key at all**, so a sensor that does not use rules still
+  reports to an SOC from before this step. It is part of the extended status, so
+  `IDPS_LIVE_SEND_FEATURES=false` leaves it out. A `last_event_at` that stops moving while attacks run
+  means Suricata stopped (or lost the sensor's network, see the lab README); there is no separate stale flag.
+- **Upgrade order: SOC first.** An SOC from before this step refuses the new alert fields (422) and
+  the `rules` block of the status. Upgrade the SOC, then the sensors; do not set `IDPS_RULES_EVE`
+  against an old SOC. As a safety net rule alerts never share an outbox batch with model alerts (also
+  after a restart), so an old SOC that refuses them costs only the rule alerts (logged with a hint,
+  counted in `dropped.alerts_rejected_by_soc`), never the model's.
+- **The lab.** `docker compose --profile rules up -d --build suricata` starts the Suricata service
+  next to the sensor; see `lab/README.md`. Rule alerts need the rules volume `idps-suricata` (made by
+  the Suricata comparison setup below).
+- **Not covered:** the dashboard's summary charts (`by_class`, severity, buckets) count both sources
+  together; only `by_source` splits them. Rule alerts carry no SHAP explanation and no features, so
+  they are never retraining data.
 
 ## Suricata comparison
 

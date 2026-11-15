@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import { CASE_STATUSES, type CaseDetail as CaseDetailT, type CaseStatus, type Note } from "../api/types";
-import { ConfidenceBar, ErrorText, Segmented, SeverityBadge, useAction, useLoad } from "../components/common";
+import { ConfidenceBar, ErrorText, Segmented, SeverityBadge, SourceTag, useAction, useLoad } from "../components/common";
 import { dateTime, endpoint } from "../format";
 
 /** One case: status, linked alerts and notes (the right half of the Cases screen).
@@ -88,7 +88,7 @@ export default function CasePanel({ id, onLoaded, onDeleted }: {
               {c.alerts.map((a) => (
                 <tr key={a.id}>
                   <td>
-                    <Link to={`/alerts/${a.id}`}>#{a.id} {a.predicted_class}</Link>{" "}
+                    <Link to={`/alerts/${a.id}`}>#{a.id} {a.predicted_class}</Link>{" "}<SourceTag source={a.source} />{" "}
                     <SeverityBadge severity={a.severity} />
                   </td>
                   <td className="mono">

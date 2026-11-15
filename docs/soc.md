@@ -43,8 +43,8 @@ The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep thei
 | `GET /health` | public | Liveness |
 | `POST /auth/login`, `GET /auth/me` | public, user | Login; current user |
 | `POST /ingest/alerts` | sensor | Batch of 1 to 500 alerts; stores and broadcasts them |
-| `GET /alerts` | user | Filters: `severity` (repeatable), `predicted_class`, `ip` (source or destination), `status`, `since`, `until` (timezone required) |
-| `GET /alerts/{id}`, `PATCH /alerts/{id}` | user | Detail with explanation; set `status` (new, acknowledged, false_positive, resolved) |
+| `GET /alerts` | user | Filters: `severity` (repeatable), `predicted_class`, `ip` (source or destination), `status`, `source` (`ml` or `rule`), `since`, `until` (timezone required) |
+| `GET /alerts/{id}`, `PATCH /alerts/{id}` | user | Detail with explanation (empty for rule alerts); set `status` (new, acknowledged, false_positive, resolved) |
 | `WS /ws/alerts` | user | Live feed: alerts (as `GET /alerts` plus `src_geo`) and typed block messages; see "Live feed" |
 | `POST /ingest/blocks` | sensor | Up to 100 `blocked` / `unblocked` / `would_block` events (`would_block` = a dry-run decision, stored in its own table, never a block) |
 | `GET /blocks` | user | `active=true/false`, `ip` |
@@ -59,7 +59,7 @@ The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep thei
 | `GET/POST /cases`, `GET/PATCH/DELETE /cases/{id}` | user | Cases |
 | `POST /cases/{id}/notes` | user | Note, up to 10,000 characters |
 | `POST /cases/{id}/alerts`, `DELETE /cases/{id}/alerts/{alert_id}` | user | Attach or detach alerts (an alert is in at most one case) |
-| `GET /metrics/summary?hours=24` | user | Alerts per bucket (hourly up to 72 h, else daily), by class and severity, top 10 sources, false-positive rate, detection latency p50/p95, active blocks, `would_blocks` (dry-run decisions in the window), `by_class_per_day` (cached for 60 s; last 7 UTC days whatever `hours` is: `[{day, class, count}]`, non-zero pairs only, classes beyond the top 25 as `(other)`), `anomaly_per_day` (same 7 days and cache: `[{day, count}]`, alerts the Isolation Forest also flagged, non-zero days only) |
+| `GET /metrics/summary?hours=24` | user | Alerts per bucket (hourly up to 72 h, else daily), by class and severity, `by_source` (`{"ml": n, "rule": n}`, always both keys), top 10 sources, false-positive rate, detection latency p50/p95, active blocks, `would_blocks` (dry-run decisions in the window), `by_class_per_day` (cached for 60 s; last 7 UTC days whatever `hours` is: `[{day, class, count}]`, non-zero pairs only, classes beyond the top 25 as `(other)`), `anomaly_per_day` (same 7 days and cache: `[{day, count}]`, alerts the Isolation Forest also flagged, non-zero days only) |
 | `GET /topology?hours=1` | user | Nodes (host, alert count, max severity) and edges (src to dst, count, max severity) |
 | `GET/POST /admin/users`, `PATCH /admin/users/{id}/role`, `POST /admin/users/{id}/disable`, `/enable`, `/reset-password` | admin | User management |
 | `GET/POST /admin/sensors`, `POST /admin/sensors/{id}/revoke` | admin | Sensors; the token is returned once, on creation |
@@ -228,6 +228,53 @@ client would only see alerts ingested by its own worker. Scaling out needs a sha
   they are dropped for that client (counted in `Subscriber.blocks_dropped`, the client stays
   connected), so a burst of block reports cannot push alerts out or get a client disconnected. A
   client that falls behind on alerts is still disconnected (4408) as before.
+
+## Rule alerts (roadmap step 8)
+
+A sensor that runs Suricata next to the model (`docs/live.md`, "Rules next to ML") sends its alerts
+through the same `POST /ingest/alerts`, marked `"source": "rule"` with a `rule` object. A sensor that
+does not send `source` (every older sensor) is `"ml"`; so is every alert stored before the column existed
+(NULL in the database, shown as `"ml"`).
+
+```json
+{"src_ip": "10.10.1.10", "src_port": 40000, "dst_ip": "10.10.2.11", "dst_port": 80, "protocol": 6,
+ "start_ms": 1763200800250, "end_ms": 1763200800250,
+ "predicted_class": "Scan", "confidence": 0.95, "source": "rule",
+ "rule": {"sid": 2009358, "rev": 7, "signature": "ET SCAN Nmap Scripting Engine User-Agent Detected",
+          "category": "Web Application Attack", "severity": 1, "count": 1}}
+```
+
+- **Validation.** `source` is `ml` or `rule`. `source: "rule"` needs `rule`; `rule` on a model alert is a
+  422. `rule`: `sid` 0 to 2^32, `rev` optional, `signature` 1 to 300 characters, `category` optional up to
+  100, `severity` 1 to 4 (Suricata's, 1 most severe), `count` at least 1 (default 1); unknown keys, control
+  and direction-override characters are refused. The rest is the model alert's validation
+  (`predicted_class` 1 to 64 characters, `confidence` 0 to 1). `explanation` may be left out (it is then
+  stored empty). `features`, `model_sha256`, `model_version` and `anomaly_score` on a rule alert are
+  ignored (set to null) without counting them in `features_dropped`.
+- **predicted_class** is the family the sensor derives (Scan, DoS, Web Attack, Brute Force, Malware,
+  Exploit, Policy, or "Rule match"); **confidence** comes from Suricata's severity (1 -> 0.95, 2 -> 0.85,
+  3 -> 0.70, 4 -> 0.55). **Severity** is the existing rule unchanged: the family's base severity
+  (`SEVERITY_BY_CLASS`; the table now also has scan low, malware high, exploit high, policy low, and
+  "Rule match" gets `default_severity`), lowered one level when confidence is under
+  `IDPS_SOC_LOW_CONFIDENCE_BELOW` (0.6), which only a Suricata severity-4 rule reaches.
+- **Reading.** `AlertOut` (lists, the live feed, cases) and `AlertDetail` both carry `source` and `rule`
+  (`rule` is `null` for model alerts). `GET /alerts?source=ml|rule` filters (`ml` includes rows stored
+  without a source). `GET /metrics/summary` has `by_source` for the window; its other figures count both
+  sources. Rule alerts are triaged like any alert (status, cases). The assistant's `get_alert` and
+  `search_alerts` show the `rule` object (inside the escaped `<soc_data>` wrapper), its prompt says a rule alert has
+  no model score or SHAP explanation, and `get_playbook` knows the Scan and Malware families (Exploit, Policy and
+  Rule match answer with a note).
+- **Not training data.** `judged_alerts` (used by `GET /training/feedback` and `python -m
+  soc.api.export_feedback`) only returns model alerts (`ml_alerts_clause`), so a rule alert an analyst
+  confirmed or rejected is never exported, even if someone attached features to it.
+- **Sensor status.** `POST /sensor/status` accepts `rules` (`enabled`, `eve_path`, `alerts_sent`,
+  `dropped_engine`, `dropped_info`, `deduped`, `dropped_invalid`, `rate_limited`, `block_skipped`,
+  `last_event_at`, `error`, `include_info`, `dedupe_seconds`, `max_per_minute`, `block_sids`); a sensor with the
+  forwarder off sends no `rules` key; `GET /sensors/status` returns it in each sensor's
+  `status` (`null` for sensors that do not send it). It is not redacted for analysts.
+- **Upgrade.** Start the new SOC first: `init_db` adds `alerts.source` (indexed) and `alerts.rule`
+  (JSON) to an existing database (nullable, no backfill). An SOC from before this step answers 422 to
+  `source`/`rule` and to the `rules` status block.
 
 ## Learning from analysts (roadmap B1)
 

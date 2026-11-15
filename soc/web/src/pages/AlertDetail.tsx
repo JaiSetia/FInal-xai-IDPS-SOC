@@ -4,10 +4,10 @@ import { useLiveRefresh } from "../useLiveRefresh";
 import { api, query } from "../api/client";
 import {
   ALERT_STATUSES, ATTACK_CLASSES, type AlertDetail as AlertDetailT, type AlertStatus, type Block, type CaseDetail,
-  type CaseSummary, type Page,
+  type CaseSummary, type Page, type RuleInfo,
 } from "../api/types";
 import {
-  Card, ErrorText, Pill, Segmented, SeverityBadge, Timeline, useAction, useLoad, useNow, type TimelineItem, type Tone,
+  Card, ErrorText, Pill, Segmented, SeverityBadge, SourceTag, Timeline, useAction, useLoad, useNow, type TimelineItem, type Tone,
 } from "../components/common";
 import ExplanationChart from "../components/ExplanationChart";
 import type { FaithfulnessMethod } from "../api/types";
@@ -20,6 +20,13 @@ import { useSensors } from "../sensors";
 function Learning({ alert, busy, onTrueClass }: {
   alert: AlertDetailT; busy: boolean; onTrueClass: (value: string) => void;
 }) {
+  if (alert.source === "rule") {
+    return (
+      <p className="muted small-text" style={{ margin: 0 }}>
+        Raised by a Suricata rule, not the model: marking it doesn't change the model at the next retrain.
+      </p>
+    );
+  }
   const confirmed = alert.status === "confirmed";
   // A correction equal to the prediction is the same as none; anything else outside the list shows as itself.
   const current = alert.true_class && alert.true_class !== alert.predicted_class ? alert.true_class : "";
@@ -100,7 +107,9 @@ export function timeline(alert: AlertDetailT, blocks: Block[], now = Date.now())
     { key: "flow", t: alert.start_ms, at: time(alert.start_ms, ref),
       text: `flow seen: ${protocolName(alert.protocol)} ${endpoint(alert.src_ip, alert.src_port, alert.protocol)} → ${endpoint(alert.dst_ip, alert.dst_port, alert.protocol)}` },
     { key: "scored", t: received, at: time(alert.received_at, ref), tone: "accent",
-      text: `scored ${alert.predicted_class} ${percent(alert.confidence, 2)}${method ? `, explained (${method})` : ""}` },
+      text: alert.source === "rule"
+        ? `Suricata rule matched${alert.rule ? ` (sid ${alert.rule.sid})` : ""}: ${alert.predicted_class}`
+        : `scored ${alert.predicted_class} ${percent(alert.confidence, 2)}${method ? `, explained (${method})` : ""}` },
   ];
   for (const b of blocks) {
     const started = Date.parse(b.blocked_at);
@@ -206,7 +215,10 @@ function AlertPage({ id }: { id: string }) {
       <div className="page-head" style={{ justifyContent: "flex-start" }}>
         <h1>{alert.predicted_class} · alert #{alert.id}</h1>
         <SeverityBadge severity={alert.severity} />
-        <Pill tone="neutral">confidence {percent(alert.confidence, 1)}</Pill>
+        <SourceTag source={alert.source} />
+        {alert.source === "rule"
+          ? alert.rule && <Pill tone="neutral">rule severity {alert.rule.severity}</Pill>
+          : <Pill tone="neutral">confidence {percent(alert.confidence, 1)}</Pill>}
         {blocked && <Pill tone="danger">source blocked · {blocked.source}</Pill>}
       </div>
       <ErrorText error={act.error} />
@@ -229,11 +241,16 @@ function AlertPage({ id }: { id: string }) {
                 {dateTime(alert.received_at)}
                 {delay && <span className="muted small-text"> ({delay} after the flow ended)</span>}
               </dd>
-              <dt>Anomaly score</dt>
-              <dd>{num(alert.anomaly_score)} {alert.anomaly_score !== null && <span className="muted small-text">Isolation Forest</span>}</dd>
+              {alert.source !== "rule" && (
+                <>
+                  <dt>Anomaly score</dt>
+                  <dd>{num(alert.anomaly_score)} {alert.anomaly_score !== null && <span className="muted small-text">Isolation Forest</span>}</dd>
+                </>
+              )}
               <dt>Sensor</dt><dd>#{alert.sensor_id}</dd>
               <dt>Model</dt>
-              <dd>{alert.model_version
+              <dd>{alert.source === "rule" ? <span className="muted">Suricata rule (no model)</span>
+                : alert.model_version
                 ? <span className="mono small-text">{alert.model_version}</span>
                 : alert.model_sha256 ? <span className="mono small-text">sha256 {alert.model_sha256.slice(0, 12)}</span>
                 : <span className="muted">not reported by this sensor</span>}</dd>
@@ -295,17 +312,53 @@ function AlertPage({ id }: { id: string }) {
         </div>
 
         <div className="stack">
-          <Card title="Why the model flagged this flow">
-            <ExplanationChart explanation={alert.explanation} />
-            <Link className="button-link" style={{ marginTop: 16 }} to={`/assistant${query({ alert: alert.id })}`}>
-              Explain this alert with the assistant
-            </Link>
-          </Card>
-          <TrustCard sensorId={alert.sensor_id}
-            method={typeof alert.explanation?.method === "string" ? alert.explanation.method.toLowerCase() : null} />
+          {alert.source === "rule" ? (
+            alert.rule ? <RuleCard rule={alert.rule} alertId={alert.id} />
+              : <Card title="Why the rule fired"><p className="muted" style={{ margin: 0 }}>The sensor didn't send the rule's details.</p></Card>
+          ) : (
+            <>
+              <Card title="Why the model flagged this flow">
+                <ExplanationChart explanation={alert.explanation} />
+                <Link className="button-link" style={{ marginTop: 16 }} to={`/assistant${query({ alert: alert.id })}`}>
+                  Explain this alert with the assistant
+                </Link>
+              </Card>
+              <TrustCard sensorId={alert.sensor_id}
+                method={typeof alert.explanation?.method === "string" ? alert.explanation.method.toLowerCase() : null} />
+            </>
+          )}
         </div>
       </div>
     </>
+  );
+}
+
+const SURICATA_SEVERITY: Record<number, string> = { 1: "high", 2: "medium", 3: "low", 4: "informational" };
+
+/** A rule alert's reason: the Suricata signature that matched, instead of a model explanation. */
+function RuleCard({ rule, alertId }: { rule: RuleInfo; alertId: number }) {
+  return (
+    <Card title="Why the rule fired">
+      <p style={{ margin: "0 0 12px" }}>
+        Suricata matched the signature <b className="wrap-anywhere">{rule.signature}</b>.
+        {rule.count > 1 ? <> It matched {rule.count.toLocaleString()} times for this source, target and port within the folding window.</> : null}
+      </p>
+      <dl className="kv small-kv">
+        <dt>Rule</dt>
+        <dd className="mono">sid {rule.sid}{rule.rev != null ? ` · rev ${rule.rev}` : ""}</dd>
+        <dt>Category</dt><dd>{rule.category ?? "—"}</dd>
+        <dt>Rule severity</dt>
+        <dd>{rule.severity} <span className="muted small-text">({SURICATA_SEVERITY[rule.severity] ?? "?"}; 1 is the most severe)</span></dd>
+        <dt>Matches</dt><dd>{rule.count.toLocaleString()}</dd>
+      </dl>
+      <p className="muted small-text" style={{ margin: "12px 0 0" }}>
+        Signatures look at packet contents (for example the text of a web request), which the model never sees.
+        A rule alert doesn't block on its own unless an admin has allowed its sid to.
+      </p>
+      <Link className="button-link" style={{ marginTop: 12 }} to={`/assistant${query({ alert: alertId })}`}>
+        Explain this alert with the assistant
+      </Link>
+    </Card>
   );
 }
 

@@ -6,6 +6,7 @@ Standard library only (no extra dependency).
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import math
@@ -249,6 +250,11 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def is_rule_alert(alert: dict) -> bool:
+    """True for an alert from the rule forwarder (idps.rules): it carries `"source": "rule"`."""
+    return alert.get("source") == "rule"
+
+
 # --- Outbox: alerts waiting for the SOC ---------------------------------------------------------
 
 def _refuse_symlink(path: Path) -> None:
@@ -298,9 +304,10 @@ class Outbox:
     """
 
     def __init__(self, path: str | Path | None, *, max_alerts: int = MAX_OUTBOX_ALERTS,
-                 merge: bool = False) -> None:
+                 merge: bool = False, max_rule_alerts: int = 1_000) -> None:
         self.path = None if path is None else Path(path)
-        self.max_alerts = max_alerts
+        self.max_alerts = max_alerts  # model alerts (everything that is not a rule alert)
+        self.max_rule_alerts = max_rule_alerts  # rule alerts: their own cap, see _trim
         self.merge = merge
         self.batches: list[list[dict]] = []
         self._lock = threading.RLock()
@@ -330,11 +337,20 @@ class Outbox:
             _move_aside(path, f"{type(exc).__name__}: {exc}")
             return
         alerts = [a for b in batches for a in b]
-        if len(alerts) > self.max_alerts:
-            log.error("outbox %s holds %d alerts, over the cap of %d: dropping the %d oldest",
-                      path, len(alerts), self.max_alerts, len(alerts) - self.max_alerts)
-            alerts = alerts[len(alerts) - self.max_alerts:]
-        self.batches = [alerts[i:i + MAX_BATCH] for i in range(0, len(alerts), MAX_BATCH)]
+        dropped = 0
+        for rule_kind, cap in ((False, self.max_alerts), (True, self.max_rule_alerts)):
+            kind = [a for a in alerts if is_rule_alert(a) == rule_kind]
+            if len(kind) > cap:  # the oldest of this kind beyond its own cap
+                dropped += len(kind) - cap
+                gone = {id(a) for a in kind[:len(kind) - cap]}
+                alerts = [a for a in alerts if id(a) not in gone]
+        if dropped:
+            log.error("outbox %s was over its caps (%d model, %d rule alerts): dropped the %d oldest",
+                      path, self.max_alerts, self.max_rule_alerts, dropped)
+        self.batches = []
+        for _, run in itertools.groupby(alerts, key=is_rule_alert):  # never mix the two kinds
+            run = list(run)
+            self.batches += [run[i:i + MAX_BATCH] for i in range(0, len(run), MAX_BATCH)]
 
     def __len__(self) -> int:
         with self._lock:
@@ -343,29 +359,45 @@ class Outbox:
     def add(self, alerts: list[dict], *, save: bool = True) -> int:
         """Queue alerts in batches of MAX_BATCH; returns how many old alerts had to be dropped."""
         with self._lock:
-            for i in range(0, len(alerts), MAX_BATCH):
-                chunk = alerts[i:i + MAX_BATCH]
-                if self.merge and self.batches and len(self.batches[-1]) + len(chunk) <= MAX_BATCH:
-                    self.batches[-1].extend(chunk)
-                else:
-                    self.batches.append(chunk)
-            dropped = 0
-            excess = len(self) - self.max_alerts
-            while excess > 0 and self.batches:  # drop exactly the oldest `excess` alerts
-                first = self.batches[0]
-                if len(first) <= excess:
-                    self.batches.pop(0)
-                    cut = len(first)
-                else:
-                    cut = excess
-                    del first[:cut]
-                dropped += cut
-                excess -= cut
+            # Model alerts and rule alerts (`"source": "rule"`) never share a batch: an SOC that
+            # predates rule alerts refuses the whole POST, and that must cost only the rule alerts.
+            for _, run in itertools.groupby(alerts, key=is_rule_alert):
+                run = list(run)
+                for i in range(0, len(run), MAX_BATCH):
+                    chunk = run[i:i + MAX_BATCH]
+                    last = self.batches[-1] if self.batches else None
+                    if (self.merge and last and is_rule_alert(last[0]) == is_rule_alert(chunk[0])
+                            and len(last) + len(chunk) <= MAX_BATCH):
+                        last.extend(chunk)
+                    else:
+                        self.batches.append(chunk)
+            dropped = self._trim()
             if dropped:
-                log.error("outbox over %d alerts: dropped the %d oldest", self.max_alerts, dropped)
+                log.error("outbox over its caps (%d model, %d rule alerts): dropped the %d oldest",
+                          self.max_alerts, self.max_rule_alerts, dropped)
             if save:
                 self.save()
             return dropped
+
+    def _trim(self) -> int:
+        """Drop the oldest alerts of each kind beyond its own cap (model alerts: max_alerts, rule
+        alerts: max_rule_alerts) and return how many. A kind only ever drops its own, so a flood of
+        rule alerts cannot push a model alert out. Caller holds the lock."""
+        dropped = 0
+        for rule_kind, cap in ((False, self.max_alerts), (True, self.max_rule_alerts)):
+            excess = sum(len(b) for b in self.batches if b and is_rule_alert(b[0]) == rule_kind) - cap
+            for batch in list(self.batches):
+                if excess <= 0:
+                    break
+                if not batch or is_rule_alert(batch[0]) != rule_kind:
+                    continue
+                cut = min(excess, len(batch))
+                del batch[:cut]
+                dropped += cut
+                excess -= cut
+                if not batch:
+                    self.batches.remove(batch)
+        return dropped
 
     def pop_first(self) -> None:
         with self._lock:

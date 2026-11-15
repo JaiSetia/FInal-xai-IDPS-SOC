@@ -4,7 +4,7 @@ import json
 import math
 import re
 from datetime import datetime
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import (
@@ -36,7 +36,7 @@ from soc.api.common import (
 )
 from soc.api.db import get_db
 from soc.api.geo import geo_out
-from soc.api.models import Alert, AlertStatus, Severity
+from soc.api.models import SOURCE_ML, SOURCE_RULE, Alert, AlertStatus, Severity, ml_alerts_clause
 
 router = APIRouter(tags=["alerts"])
 
@@ -90,6 +90,29 @@ def clean_features(value: object) -> dict[str, float]:
     return out
 
 
+Source = Literal["ml", "rule"]
+
+
+class RuleInfo(BaseModel):
+    """The rule behind a rule alert (Suricata). `severity` is Suricata's, 1 (most severe) to 4;
+    `count` is how many events of the same rule, source, destination and port the alert stands for
+    (1 for the first event; a follow-up alert carries the total of its window)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sid: StrictInt = Field(ge=0, le=2**32)
+    rev: StrictInt | None = Field(default=None, ge=0, le=2**31)
+    signature: str = Field(min_length=1, max_length=300)
+    category: str | None = Field(default=None, max_length=100)
+    severity: StrictInt = Field(ge=1, le=4)
+    count: StrictInt = Field(default=1, ge=1, le=2**31)
+
+    @field_validator("signature", "category")
+    @classmethod
+    def _plain(cls, value: str | None) -> str | None:
+        return None if value is None else plain_text(value.strip())
+
+
 class AlertIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -110,8 +133,24 @@ class AlertIn(BaseModel):
     features: Any = None
     model_sha256: Any = None
     model_version: Any = None
+    # "ml" (the default: sensors that predate rules send neither field) or "rule". A rule alert
+    # carries `rule`, names a short family in predicted_class (idps/rules/eve.py rule_family) and
+    # derives `confidence` from Suricata's severity; it has no features and no model identity.
+    source: Source = SOURCE_ML
+    rule: RuleInfo | None = None
     _features_dropped: bool = PrivateAttr(default=False)
     _model_info_dropped: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="after")
+    def _source_and_rule(self) -> Self:
+        if self.source == SOURCE_RULE:
+            if self.rule is None:
+                raise ValueError("a rule alert needs a `rule` object")
+            # Nothing of the model applies: dropped without counting (nobody sent it by mistake).
+            self.features = self.model_sha256 = self.model_version = self.anomaly_score = None
+        elif self.rule is not None:
+            raise ValueError("`rule` is only for alerts with source \"rule\"")
+        return self
 
     @model_validator(mode="after")
     def _sanitise_optional(self) -> Self:
@@ -206,6 +245,14 @@ class AlertOut(BaseModel):
     severity: Severity
     status: AlertStatus
     case_id: int | None
+    # "ml" for model alerts (and every alert stored before sources existed), "rule" for Suricata.
+    source: Source = SOURCE_ML
+    rule: RuleInfo | None = None  # null for model alerts
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _old_rows_are_ml(cls, value: Any) -> Any:
+        return SOURCE_ML if value is None else value
 
 
 class AlertDetail(AlertOut):
@@ -301,6 +348,7 @@ def list_alerts(
     predicted_class: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
     ip: Annotated[IPAddress | None, Query(description="matches source or destination")] = None,
     status: Annotated[AlertStatus | None, Query()] = None,
+    source: Annotated[Source | None, Query(description="ml = the model, rule = Suricata")] = None,
     since: datetime | None = None, until: datetime | None = None,
     limit: Limit = 50, cursor: Cursor = None,
 ):
@@ -316,6 +364,10 @@ def list_alerts(
         query = query.where(or_(Alert.src_ip == ip, Alert.dst_ip == ip))
     if status:
         query = query.where(Alert.status == status)
+    if source == SOURCE_ML:
+        query = query.where(ml_alerts_clause())  # NULL (stored before sources existed) counts
+    elif source == SOURCE_RULE:
+        query = query.where(Alert.source == SOURCE_RULE)
     if since:
         query = query.where(Alert.received_at >= since)
     if until:

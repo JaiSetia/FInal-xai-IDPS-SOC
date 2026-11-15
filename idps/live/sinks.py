@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Protocol
 
 from idps.live.metrics import Metrics
-from idps.soc_client import MAX_BLOCK_EVENTS, Outbox, SocRejectedError
+from idps.soc_client import MAX_BLOCK_EVENTS, Outbox, SocRejectedError, is_rule_alert
 
 log = logging.getLogger("idps.live")
 
@@ -253,7 +253,9 @@ class SocSink:
                         log.error("SOC answered HTTP %s: check IDPS_SOC_URL and the sensor token. "
                                   "Alerts are kept and retried; nothing is dropped", exc.status)
                     return False
-                log.error("SOC refused a batch of %d alerts, dropping it: %s", len(batch), exc)
+                log.error("SOC refused a batch of %d alerts, dropping it: %s%s", len(batch), exc,
+                          " (rule alerts: an SOC older than the rules feature refuses them; "
+                          "upgrade the SOC first, see docs/live.md)" if is_rule_alert(batch[0]) else "")
                 self.metrics.add("alerts_rejected", len(batch))
             except Exception as exc:  # noqa: BLE001  the sender thread must survive anything
                 self.outbox.requeue_front(batch)

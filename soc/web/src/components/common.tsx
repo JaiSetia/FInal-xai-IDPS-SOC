@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
-import type { Severity } from "../api/types";
+import type { AlertSource, Severity } from "../api/types";
 import { label } from "../format";
 
 export function SeverityBadge({ severity }: { severity: Severity }) {
   return <span className={`badge sev-${severity}`}>{severity}</span>;
+}
+
+/** Marks alerts raised by a Suricata rule; model alerts (the default) carry no mark. */
+export function SourceTag({ source }: { source?: AlertSource }) {
+  return source === "rule" ? <span className="pill accent source-tag" title="Raised by a Suricata rule">rule</span> : null;
 }
 
 export function StatusText({ value }: { value: string }) {

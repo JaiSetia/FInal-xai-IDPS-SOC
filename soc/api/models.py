@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    or_,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -161,6 +162,20 @@ class Alert(Base):
     model_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     model_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
     true_class: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Where the alert came from: "ml" (the model; also NULL, i.e. every row stored before this
+    # column existed) or "rule" (Suricata, via the sensor's rule forwarder). `rule` describes the
+    # rule that fired: {sid, rev, signature, category, severity 1-4, count}; null for model alerts.
+    source: Mapped[str | None] = mapped_column(String(8), nullable=True, index=True)
+    rule: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+
+
+SOURCE_ML, SOURCE_RULE = "ml", "rule"
+
+
+def ml_alerts_clause():
+    """SQL condition: the alert came from the model (source "ml" or NULL = stored before sources
+    existed). Anything that needs the model's features (training data) must use this."""
+    return or_(Alert.source.is_(None), Alert.source == SOURCE_ML)
 
 
 class Block(Base):

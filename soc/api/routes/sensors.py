@@ -141,6 +141,29 @@ class Faithfulness(StrictModel):
     methods: dict[Literal["shap", "lime"], MethodFaithfulness] = Field(min_length=1)
 
 
+class RulesInfo(StrictModel):
+    """The sensor's rule forwarder (Suricata alerts, idps.rules). `enabled` false: off, the rest is
+    zero (a sensor with the forwarder off leaves `rules` out altogether). The counters are since the sensor started. `alerts_sent` is what was queued for the SOC
+    (after folding repeats); `dropped_engine` / `dropped_info` are Suricata engine events and
+    informational alerts that were read and not sent. `error` is why the eve file cannot be read."""
+
+    enabled: StrictBool
+    eve_path: Text | None = Field(default=None, max_length=256)
+    alerts_sent: StrictInt = _COUNT
+    dropped_engine: StrictInt = _COUNT
+    dropped_info: StrictInt = _COUNT
+    deduped: StrictInt = Field(default=0, ge=0, le=2**53)
+    dropped_invalid: StrictInt = Field(default=0, ge=0, le=2**53)
+    rate_limited: StrictInt = Field(default=0, ge=0, le=2**53)  # over IDPS_RULES_MAX_PER_MINUTE
+    block_skipped: StrictInt = Field(default=0, ge=0, le=2**53)  # listed-SID events kept from the engine
+    max_per_minute: StrictInt = Field(default=0, ge=0, le=100_000)
+    last_event_at: datetime | None = None
+    error: Text | None = Field(default=None, max_length=300)
+    include_info: StrictBool = False
+    dedupe_seconds: float = Field(default=0.0, ge=0, le=1e6)
+    block_sids: StrictInt = Field(default=0, ge=0, le=100_000)  # how many rules may block
+
+
 class StatusReport(StrictModel):
     """POST /sensor/status. Every field is bounded: a sensor can't make the SOC store a big blob."""
 
@@ -159,6 +182,7 @@ class StatusReport(StrictModel):
     counters: Counters
     faithfulness: Faithfulness | None = None  # absent from older sensors
     drift: DriftInfo | None = None  # absent from older sensors
+    rules: RulesInfo | None = None  # absent from sensors that predate rule alerts
     sensor_version: Text | None = Field(default=None, max_length=32)
     sent_at: datetime | None = None
 

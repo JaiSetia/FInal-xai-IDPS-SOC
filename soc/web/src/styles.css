@@ -192,6 +192,8 @@ h1 .badge, h1 .pill { font-size: 13px; padding: 6px 12px; border-radius: 10px; }
 .pill.warn { color: var(--warn-text); background: var(--warn-wash); }
 .pill.danger { color: var(--danger-text); background: var(--danger-wash); }
 .pill.accent { color: var(--accent-soft-text); background: var(--accent-soft); }
+.danger-text { color: var(--danger-text); }
+.source-tag { margin-left: 2px; vertical-align: 1px; }
 .pill.round { border-radius: 999px; padding: 8px 12px; font-size: 13px; }
 .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .sev-low { color: var(--sev-low); }

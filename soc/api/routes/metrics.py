@@ -65,6 +65,9 @@ class MetricsSummary(BaseModel):
     alerts_per_bucket: list[Bucket]
     by_class: dict[str, int]
     by_severity: dict[str, int]
+    # Alerts in the window by where they came from; always both keys. alerts_total, by_class and
+    # the other figures count both sources together.
+    by_source: dict[str, int]
     top_sources: list[TopSource]
     triaged: int
     false_positives: int
@@ -172,6 +175,10 @@ def metrics_summary(user: AnyUser, db: Annotated[Session, Depends(get_db)], hour
         by_class["(other)"] = sum(n for _, n in by_class_all[MAX_CLASSES:])
     by_severity = {s.value: 0 for s in Severity} | grouped(Alert.severity)
     by_status = grouped(Alert.status)
+    # NULL = stored before sources existed = the model's
+    by_source = {"ml": 0, "rule": 0}
+    for k, n in grouped(func.coalesce(Alert.source, "ml")).items():
+        by_source[k] = by_source.get(k, 0) + n
     top = db.execute(select(Alert.src_ip, func.count().label("n")).where(in_window)
                      .group_by(Alert.src_ip).order_by(func.count().desc(), Alert.src_ip).limit(10))
 
@@ -198,6 +205,7 @@ def metrics_summary(user: AnyUser, db: Annotated[Session, Depends(get_db)], hour
     return MetricsSummary(
         hours=hours, since=since, bucket_seconds=step, alerts_total=sum(by_class.values()),
         alerts_per_bucket=series, by_class=by_class, by_severity=by_severity,
+        by_source=by_source,
         top_sources=[TopSource(ip=ip, count=n) for ip, n in top],
         triaged=triaged, false_positives=fp,
         false_positive_rate=fp / triaged if triaged else None,

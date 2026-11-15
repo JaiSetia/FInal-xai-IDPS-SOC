@@ -128,3 +128,51 @@ Settings, metrics and expected latency: [../docs/live.md](../docs/live.md).
 
 Code and scripts are copied into the images (macOS blocks Docker from mounting folders under
 `~/Desktop`), so rebuild after changing them: `docker compose up -d --build sensor soc`.
+
+## Rules next to the model (Suricata)
+
+An optional `suricata` service (profile `rules`) runs Suricata 7.0.10 with the ET Open rules on the
+sensor's `lab_attack` interface and writes only alert events to a volume the sensor mounts read-only.
+The sensor's rule forwarder (`IDPS_RULES_EVE`) sends them to the lab SOC as rule alerts. A plain
+`docker compose up` does not start it.
+
+Needs once: the rules volume `idps-suricata` (made for `scripts/suricata_compare.py`, see
+[../docs/live.md](../docs/live.md), "Suricata comparison"). The service loads it read-only.
+
+```sh
+docker compose --profile rules up -d --build suricata     # start (first time: builds lab/suricata)
+docker compose logs -f suricata                           # "engine started" once the rules are loaded (about a minute)
+docker compose exec \
+    -e IDPS_RULES_EVE=/run/idps-rules/eve.json \
+    -e IDPS_ALLOWLIST=10.10.1.1,10.10.1.2,10.10.2.0/24,10.10.3.0/24 \
+    sensor live.sh --interface lab_attack --model models/friday_xgboost.joblib
+docker compose exec attacker sh /attacks/portscan.sh      # rule alerts appear within seconds
+docker compose --profile rules stop suricata              # stop (the log volume is kept)
+docker compose --profile rules rm -f suricata && docker volume rm idps-lab_suricata_eve   # reset the log
+```
+
+- Rule alerts show up in a few seconds, because Suricata alerts per packet; model alerts still wait
+  for the flow timeout. In the dashboard, filter `source=rule`.
+- It shares the sensor's network namespace (`network_mode: service:sensor`): no network of its own, but
+  the sensor's interfaces, addresses and gateway (including `lab_mgmt`), so treat it as trusted as the
+  sensor. It is hardened: all capabilities dropped except `NET_RAW` (capture) and `DAC_READ_SEARCH` (read
+  the rules volume), `no-new-privileges`, `mem_limit: 3g`, `pids_limit: 512`, the rules volume read-only.
+  `run.sh` starts `suricata` directly as root without the image's entrypoint (which would need CHOWN, SETUID,
+  SETGID and NET_ADMIN). Without `NET_ADMIN` Suricata cannot change offload settings or enter promiscuous
+  mode; it only warns, and promisc is off in `suricata.yaml` because the sensor routes the traffic (every
+  packet is addressed to its own interface). If capture shows nothing, check the logs and, as a last resort,
+  add `NET_ADMIN`.
+- **After rebuilding or restarting the sensor, restart Suricata too** (`docker compose --profile rules restart
+  suricata`): it lives in the sensor's network namespace, which a recreated sensor replaces. A stale
+  `last_event_at` in the sensor's status while attacks run is the sign.
+- HOME_NET is the victim network `10.10.2.0/24` and EXTERNAL_NET is `any`; `-k none` is needed because
+  lab captures have unfilled checksums (otherwise every packet raises "SURICATA TCPv4 invalid
+  checksum"). Engine events and informational alerts are dropped by the forwarder.
+- `lab/suricata/suricata.yaml` writes only `alert` events (no flow, http, dns, tls, anomaly or stats
+  events, no fast.log). `lab/suricata/run.sh` (log folder `/eve`) empties `eve.json` when it passes 32 MB (`EVE_MAX_MB`);
+  the forwarder notices and starts again from the beginning. The ET Open rule set needs about 1 to 2 GB
+  of RAM (the container is limited to 3 GB).
+- Rules never block unless you list their SID: add `-e IDPS_RULES_BLOCK_SIDS=2009358` (still subject
+  to the allowlist, dry-run and `IDPS_RULES_PROTECTED_NETS`, which `live.sh` sets to the victim network; see [../docs/live.md](../docs/live.md)).
+- Rebuild the sensor and the SOC first (`docker compose up -d --build sensor soc`): the new
+  `idps/rules` package is copied into the image like all code, and an older SOC refuses rule alerts.

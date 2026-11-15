@@ -230,7 +230,9 @@ def test_alert_messages_and_ready_keep_their_shape(client, analyst_headers, sens
         ws.__exit__(None, None, None)
     assert set(msg) == {"id", "sensor_id", "received_at", "src_ip", "src_port", "dst_ip",
                         "dst_port", "protocol", "start_ms", "end_ms", "predicted_class",
-                        "confidence", "anomaly_score", "severity", "status", "case_id", "src_geo"}
+                        "confidence", "anomaly_score", "severity", "status", "case_id", "src_geo",
+                        "source", "rule"}
+    assert msg["source"] == "ml" and msg["rule"] is None
 
 
 # --- a flood of block events cannot starve alerts ------------------------------------------------

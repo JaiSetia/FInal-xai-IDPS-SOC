@@ -38,6 +38,13 @@ class Detection:
     confidence: float
     timestamp: float  # seconds; any monotone-ish clock, used for windows and TTLs
     explanation: dict | None = None  # SHAP summary etc., stored with the block
+    # How many flows this detection counts as in the window. 1 for a model detection. The rule
+    # forwarder (idps.rules) gives a rule the operator explicitly allowed to block min_flows, so
+    # one hit of it is enough evidence; everything else in evaluate() applies unchanged.
+    weight: int = 1
+    # Replaces the evidence text of a BLOCK decision's reason ("5 flows >= 0.9 confidence ...") for
+    # detections that are not flows, e.g. "Suricata rule sid 2009358 (...) matched".
+    note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -146,7 +153,7 @@ class ResponsePolicy:
                 return Decision(Action.ALREADY_BLOCKED, ip, f"blocked until t={until:.0f}", detection=d)
             del self._blocked_until[ip]  # expired; nftables dropped it too
 
-        count = self._count(ip, d.timestamp)
+        count = self._count(ip, d.timestamp, d.weight)
         if count < self.min_flows:
             return Decision(
                 Action.OBSERVE, ip,
@@ -158,7 +165,7 @@ class ResponsePolicy:
         self._flows.pop(ip, None)  # start fresh after the ban
         return Decision(
             Action.BLOCK, ip,
-            f"{count} flows >= {self.confidence_threshold} confidence ({d.label}) in {self.window_seconds:g}s",
+            d.note or f"{count} flows >= {self.confidence_threshold} confidence ({d.label}) in {self.window_seconds:g}s",
             ttl_seconds=self.ttl_seconds, flows_in_window=count, detection=d,
         )
 
@@ -168,11 +175,11 @@ class ResponsePolicy:
         if addr is not None:
             self._blocked_until.pop(str(addr), None)
 
-    def _count(self, ip: str, now: float) -> int:
+    def _count(self, ip: str, now: float, weight: int = 1) -> int:
         times = self._flows.pop(ip, None)
         if times is None:
             times = deque()
-        times.append(now)
+        times.extend([now] * min(max(int(weight), 1), self.min_flows))
         while times and times[0] < now - self.window_seconds:
             times.popleft()
         self._flows[ip] = times  # most recently seen goes last

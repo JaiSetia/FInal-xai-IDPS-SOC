@@ -1,8 +1,8 @@
 import { useCallback, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api, query } from "../api/client";
-import { ALERT_STATUSES, SEVERITIES, type Alert, type Page } from "../api/types";
-import { Card, ErrorText, SeverityBadge, StatusText, useLoad } from "../components/common";
+import { ALERT_STATUSES, SEVERITIES, type Alert, type AlertSource, type Page } from "../api/types";
+import { Card, ErrorText, SeverityBadge, SourceTag, StatusText, useLoad } from "../components/common";
 import { dateTime, endpoint, label, percent, protocolName } from "../format";
 import { useLiveAlerts } from "../live";
 
@@ -11,9 +11,11 @@ interface Filters {
   status: string;
   predicted_class: string;
   ip: string;
+  /** "" = both; "ml" also covers alerts stored before rule alerts existed. */
+  source: "" | AlertSource;
 }
 
-const EMPTY: Filters = { severity: "", status: "", predicted_class: "", ip: "" };
+const EMPTY: Filters = { severity: "", status: "", predicted_class: "", ip: "", source: "" };
 const PAGE = 100;
 
 function matches(a: Alert, f: Filters): boolean {
@@ -21,13 +23,18 @@ function matches(a: Alert, f: Filters): boolean {
   if (f.status && a.status !== f.status) return false;
   if (f.predicted_class && a.predicted_class !== f.predicted_class) return false;
   if (f.ip && a.src_ip !== f.ip && a.dst_ip !== f.ip) return false;
+  if (f.source && (a.source ?? "ml") !== f.source) return false;
   return true;
 }
 
 export default function Alerts() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
-  const initial: Filters = { ...EMPTY, ip: params.get("ip") ?? "", predicted_class: params.get("class") ?? "" };
+  const asked = params.get("source");
+  const initial: Filters = {
+    ...EMPTY, ip: params.get("ip") ?? "", predicted_class: params.get("class") ?? "",
+    source: asked === "ml" || asked === "rule" ? asked : "",
+  };
   const [draft, setDraft] = useState<Filters>(initial);
   const [filters, setFilters] = useState<Filters>(initial);
   const [fresh, setFresh] = useState<Set<number>>(new Set());
@@ -78,6 +85,13 @@ export default function Alerts() {
               {ALERT_STATUSES.map((s) => <option key={s} value={s}>{label(s)}</option>)}
             </select>
           </label>
+          <label className="field">Raised by
+            <select value={draft.source} onChange={set("source")}>
+              <option value="">model or rule</option>
+              <option value="ml">model</option>
+              <option value="rule">Suricata rule</option>
+            </select>
+          </label>
           <label className="field">Class
             <input value={draft.predicted_class} onChange={set("predicted_class")} placeholder="e.g. PortScan" />
           </label>
@@ -105,8 +119,8 @@ export default function Alerts() {
                   onClick={() => navigate(`/alerts/${a.id}`)}>
                   <td>{dateTime(a.received_at)}</td>
                   <td><SeverityBadge severity={a.severity} /></td>
-                  <td>{a.predicted_class}</td>
-                  <td>{percent(a.confidence)}</td>
+                  <td>{a.predicted_class} <SourceTag source={a.source} /></td>
+                  <td>{a.source === "rule" ? <span className="muted" title="Rule alerts have a severity, not a model confidence">—</span> : percent(a.confidence)}</td>
                   <td className="mono">{endpoint(a.src_ip, a.src_port, a.protocol)}</td>
                   <td className="mono">{endpoint(a.dst_ip, a.dst_port, a.protocol)}</td>
                   <td>{protocolName(a.protocol)}</td>

@@ -105,6 +105,8 @@ def run(args: argparse.Namespace) -> int:
     from idps.live.status import StatusReporter, build_status
     from idps.respond.engine import ResponseEngine
     from idps.respond.nft import BlockerError
+    from idps.rules.config import RulesSettings
+    from idps.rules.forward import RuleForwarder
     from idps.soc_client import Outbox, SocClient
 
     try:
@@ -114,8 +116,12 @@ def run(args: argparse.Namespace) -> int:
             "min_alert_confidence": args.min_alert_confidence,
             "alerts_file": args.alerts_file}.items() if v is not None}
         live = LiveSettings(**overrides)
+        rules = RulesSettings()  # IDPS_RULES_EVE and friends (off unless an eve.json is named)
     except ValidationError as exc:
         return _fail(_validation_message(exc))
+    if rules.enabled and not args.interface:
+        log.warning("IDPS_RULES_EVE is ignored in replay mode (rules are read from a live sensor)")
+        rules = RulesSettings(eve=None)
     if args.pcap and not os.path.isfile(args.pcap):
         return _fail(f"no such capture file: {args.pcap}")
     if args.duration is not None and args.duration <= 0:
@@ -166,7 +172,8 @@ def run(args: argparse.Namespace) -> int:
         if live.soc_configured:
             client = SocClient(live.soc_url, live.soc_token.get_secret_value(),
                                timeout=SOC_SEND_TIMEOUT, ca_file=live.soc_ca_file)
-            outbox = Outbox(live.outbox_file, max_alerts=live.outbox_max_alerts, merge=True)
+            outbox = Outbox(live.outbox_file, max_alerts=live.outbox_max_alerts, merge=True,
+                            max_rule_alerts=live.outbox_max_rule_alerts)
             sink = SocSink(client.post_alerts, outbox, metrics, post_blocks=client.post_blocks)
             log.info("alerts go to the SOC at %s (unsent ones wait in %s)", live.soc_url,
                      live.outbox_file)
@@ -200,6 +207,7 @@ def run(args: argparse.Namespace) -> int:
     heartbeat = None
     poller = None
     reporter = None
+    forwarder = None
     try:
         try:  # startup errors of the capture (bad interface name, ...) are "cannot start"
             if args.interface:
@@ -230,12 +238,20 @@ def run(args: argparse.Namespace) -> int:
             poller = ActionPoller(client, engine, sink, metrics, interval=live.action_poll_seconds)
             poller.start()
             log.info("polling the SOC for analyst actions every %g s", live.action_poll_seconds)
+        if rules.enabled:
+            forwarder = RuleForwarder(rules, sink, respond=detector.respond,
+                                      block_weight=engine.policy.min_flows)
+            forwarder.start()
+            log.info("rule alerts: following %s (informational %s, repeats folded for %g s, "
+                     "%d rule(s) may block)", rules.eve, "kept" if rules.include_info else "dropped",
+                     rules.dedupe_seconds, len(rules.block_sids))
         if client is not None:
             reporter = StatusReporter(client, lambda: build_status(
                 engine=engine, bundle=bundle, live_settings=live, metrics=metrics, sink=sink,
                 heartbeat=heartbeat, interface=args.interface,
                 faithfulness=faithfulness, model_sha256=digest, drift=drift,
-                extended=live.send_features),
+                extended=live.send_features,
+                rules=forwarder.status() if forwarder is not None else None),
                 interval=live.status_seconds)
             reporter.start()
             log.info("reporting status to the SOC every %g s", live.status_seconds)
@@ -247,6 +263,8 @@ def run(args: argparse.Namespace) -> int:
     finally:
         if heartbeat is not None:
             heartbeat.stop()
+        if forwarder is not None:
+            forwarder.stop()  # before the sink closes: it queues alerts and block reports
         if poller is not None:
             poller.stop(timeout=ACTION_STOP_TIMEOUT)  # before the sink closes: it queues block events
         if reporter is not None:

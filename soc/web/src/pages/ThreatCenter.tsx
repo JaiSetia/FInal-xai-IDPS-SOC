@@ -2,10 +2,10 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api, query } from "../api/client";
 import {
-  SEVERITIES, type Action, type Alert, type Block, type DriftLevel, type MetricsSummary, type Page, type Severity, type WouldBlock,
+  SEVERITIES, type Action, type Alert, type AlertSource, type Block, type DriftLevel, type MetricsSummary, type Page, type Severity, type WouldBlock,
 } from "../api/types";
 import {
-  Card, ConfidenceBar, Countdown, ErrorText, PageHead, Pill, SeverityBadge, StatusText, useLoad, useNow,
+  Card, ConfidenceBar, Countdown, ErrorText, PageHead, Pill, SeverityBadge, SourceTag, StatusText, useLoad, useNow,
 } from "../components/common";
 import { endpoint, oneLine, percent } from "../format";
 import { reporting, useSensors } from "../sensors";
@@ -102,20 +102,25 @@ function Kpi({ title, value, sub, children }: { title: string; value: string; su
 
 type SortKey = "newest" | "severity" | "confidence";
 
+const conf = (a: Alert) => (a.source === "rule" ? -1 : a.confidence);
+
 function LiveAlerts({ blocks, wouldBlocks }: { blocks: Block[]; wouldBlocks: WouldBlock[] }) {
   const navigate = useNavigate();
   const now = useNow(10_000);
   const [sort, setSort] = useState<SortKey>("newest");
   const [severity, setSeverity] = useState<Severity | "">("");
+  const [source, setSource] = useState<AlertSource | "">("");
   const [fresh, setFresh] = useState<Set<number>>(new Set());
   const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
   useEffect(() => () => { timers.current.forEach(clearTimeout); }, []);
   const { data, error, setData, reload } = useLoad(
-    () => api<Page<Alert>>(`/alerts${query({ severity: severity || undefined, limit: LIVE_ROWS })}`).then((p) => p.items),
-    [severity]);
+    () => api<Page<Alert>>(`/alerts${query({ severity: severity || undefined, source: source || undefined, limit: LIVE_ROWS })}`)
+      .then((p) => p.items),
+    [severity, source]);
 
   const live = useLiveRefresh(reload, useCallback((a: Alert) => {
     if (severity && a.severity !== severity) return;
+    if (source && (a.source ?? "ml") !== source) return;
     setData((rows) => (rows && !rows.some((r) => r.id === a.id) ? [a, ...rows].slice(0, LIVE_ROWS) : rows));
     setFresh((s) => new Set(s).add(a.id));
     // The highlight animation lasts 1.6 s; forget the id after that.
@@ -124,7 +129,7 @@ function LiveAlerts({ blocks, wouldBlocks }: { blocks: Block[]; wouldBlocks: Wou
       setFresh((s) => { const next = new Set(s); next.delete(a.id); return next; });
     }, 2000);
     timers.current.add(t);
-  }, [severity, setData]));
+  }, [severity, source, setData]));
 
   // The newest unexpired active block on the alert's own sensor decides its Response column
   // (a block on another sensor doesn't stop this traffic).
@@ -150,7 +155,8 @@ function LiveAlerts({ blocks, wouldBlocks }: { blocks: Block[]; wouldBlocks: Wou
   const rows = useMemo(() => {
     const list = [...(data ?? [])];
     if (sort === "severity") list.sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity] || b.id - a.id);
-    else if (sort === "confidence") list.sort((a, b) => b.confidence - a.confidence || b.id - a.id);
+    // Rule alerts have no model confidence: they sort after the model's.
+    else if (sort === "confidence") list.sort((a, b) => conf(b) - conf(a) || b.id - a.id);
     else list.sort((a, b) => b.id - a.id);
     return list;
   }, [data, sort]);
@@ -171,6 +177,13 @@ function LiveAlerts({ blocks, wouldBlocks }: { blocks: Block[]; wouldBlocks: Wou
             {SEVERITIES.map((s) => <option key={s}>{s}</option>)}
           </select>
         </label>
+        <label className="field inline">Raised by
+          <select value={source} onChange={(e) => setSource(e.target.value as AlertSource | "")}>
+            <option value="">model or rule</option>
+            <option value="ml">model</option>
+            <option value="rule">rule</option>
+          </select>
+        </label>
         <span className="muted small-text">
           <span className={`live-dot ${live ? "on" : "off"}`} />{live ? "Live" : "Live feed offline"}
         </span>
@@ -188,11 +201,14 @@ function LiveAlerts({ blocks, wouldBlocks }: { blocks: Block[]; wouldBlocks: Wou
               return (
                 <tr key={a.id} className={`clickable${fresh.has(a.id) ? " fresh" : ""}`} onClick={() => navigate(`/alerts/${a.id}`)}>
                   <td>
-                    <Link to={`/alerts/${a.id}`} onClick={(e) => e.stopPropagation()}><b>{a.predicted_class}</b></Link>
+                    <Link to={`/alerts/${a.id}`} onClick={(e) => e.stopPropagation()}><b>{a.predicted_class}</b></Link>{" "}
+                    <SourceTag source={a.source} />
                     <div className="muted small-text">#{a.id} · {ago(a.received_at, now)}</div>
                   </td>
                   <td className="mono">{a.src_ip} → {endpoint(a.dst_ip, a.dst_port, a.protocol)}</td>
-                  <td><ConfidenceBar value={a.confidence} digits={1} /></td>
+                  <td>{a.source === "rule"
+                    ? <span className="muted small-text" title="Rule alerts have a severity, not a model confidence">rule</span>
+                    : <ConfidenceBar value={a.confidence} digits={1} />}</td>
                   <td><SeverityBadge severity={a.severity} /></td>
                   <td><StatusText value={a.status} /></td>
                   <td>{src ? <Pill tone="danger">blocked · {src}</Pill>
@@ -202,7 +218,9 @@ function LiveAlerts({ blocks, wouldBlocks }: { blocks: Block[]; wouldBlocks: Wou
               );
             })}
             {data && rows.length === 0 && (
-              <tr><td colSpan={6} className="muted">No alerts yet{severity ? ` with severity ${severity}` : ""}.</td></tr>
+              <tr><td colSpan={6} className="muted">
+                No alerts yet{severity ? ` with severity ${severity}` : ""}{source ? ` from ${source === "ml" ? "the model" : "rules"}` : ""}.
+              </td></tr>
             )}
           </tbody>
         </table>
@@ -291,6 +309,11 @@ function SensorHealth() {
             {st.model.name} {st.model.checksum_ok ? "· checksum ok" : "· checksum FAILED"}
             {st.model.version && <><br /><span className="mono small-text">{st.model.version}</span></>}
           </dd>
+          <dt>Rules</dt>
+          <dd>{!st.rules ? "—"
+            : !st.rules.enabled ? "off"
+            : st.rules.error ? <span className="danger-text">{st.rules.error}</span>
+            : `Suricata · ${st.rules.alerts_sent.toLocaleString()} sent`}</dd>
           <dt>Heartbeat</dt><dd>{!st.heartbeat.enabled ? "off" : st.heartbeat.ok ? "1 / s · ok" : "failing"}</dd>
           <dt>Outbox</dt><dd>{st.outbox_pending.toLocaleString()} pending</dd>
           <dt>SHAP p95</dt><dd>{st.shap_p95_ms == null ? "—" : `${st.shap_p95_ms.toFixed(2)} ms`}</dd>
@@ -536,6 +559,8 @@ export default function ThreatCenter() {
   const classLine = m
     ? Object.entries(m.by_class).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([c, n]) => `${c} ${n.toLocaleString()}`).join(" · ")
     : "";
+  const sourceLine = m?.by_source && m.by_source.rule > 0
+    ? `model ${m.by_source.ml.toLocaleString()} · rules ${m.by_source.rule.toLocaleString()}` : "";
 
   return (
     <>
@@ -564,7 +589,8 @@ export default function ThreatCenter() {
         </div>
         <div className="stack">
           <div className="tc-kpis">
-            <Kpi title="Alerts" value={m ? m.alerts_total.toLocaleString() : "…"} sub={classLine || undefined}>
+            <Kpi title="Alerts" value={m ? m.alerts_total.toLocaleString() : "…"}
+              sub={[sourceLine, classLine].filter(Boolean).join(" — ") || undefined}>
               <SparkBars counts={(m?.alerts_per_bucket ?? []).map((b) => b.count)} />
             </Kpi>
             <Kpi title="Detection latency (p50)" value={seconds(latency?.p50_ms)}

@@ -12,4 +12,6 @@ if [ -s "$SHARED/sensor_token" ] && [ -s "$SHARED/ca.pem" ]; then
 else
   echo "live.sh: no lab SOC token in $SHARED; alerts go to a file" >&2
 fi
+# Rule-triggered blocks (IDPS_RULES_BLOCK_SIDS) never act on a source inside the protected network.
+export IDPS_RULES_PROTECTED_NETS="${IDPS_RULES_PROTECTED_NETS:-10.10.2.0/24}"
 exec python -m idps.live "$@"

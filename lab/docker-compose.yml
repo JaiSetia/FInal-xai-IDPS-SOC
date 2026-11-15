@@ -17,6 +17,9 @@
 #   (soc/netguard.sh); its port is published on 127.0.0.1 only, for the dashboard.
 # - Every setup step fails closed: endpoints start only once their *-net
 #   container reports healthy.
+# - Rules next to the model (roadmap step 8): the optional `suricata` service (profile
+#   `rules`) shares the sensor's network namespace to read lab_attack, loads the ET Open rules
+#   read-only and writes only alert events to a volume that the sensor mounts read-only.
 name: idps-lab
 
 networks:
@@ -39,6 +42,11 @@ networks:
 volumes:
   soc_data: {}     # SOC only: database, JWT secret, TLS keys
   soc_shared: {}   # ca.pem and the sensor token; read-only in the sensor
+  suricata_eve: {} # Suricata's alert log (eve.json): written by `suricata`, read-only in the sensor
+  idps-suricata:
+    # The ET Open rules, made by scripts/suricata_compare.py's setup (docs/live.md, "Suricata
+    # comparison"). Created outside this file, so `down -v` never deletes the 46 MB rule set.
+    external: true
 
 services:
   sensor:
@@ -66,6 +74,55 @@ services:
         ipv4_address: 10.10.3.2
     volumes:
       - soc_shared:/run/idps-soc:ro
+      - suricata_eve:/run/idps-rules:ro   # IDPS_RULES_EVE=/run/idps-rules/eve.json, see lab/README.md
+
+  suricata:
+    # Rules next to the model. Not started by a plain `up` (profile `rules`):
+    #   docker compose --profile rules up -d --build suricata
+    # It sees lab_attack because it shares the sensor's network namespace: it has no network of its
+    # own, but it DOES share the sensor's interfaces, addresses and gateway (including lab_mgmt), so
+    # it is as trusted as the sensor. Hence the hardening below. Image and configuration:
+    # lab/suricata/ (run.sh starts suricata directly, as root, without the image's entrypoint).
+    profiles: ["rules"]
+    build:
+      context: ./suricata
+    image: idps-lab-suricata
+    container_name: idps-suricata
+    network_mode: service:sensor
+    depends_on:
+      sensor: {condition: service_healthy}
+    # Only NET_RAW (capture) and DAC_READ_SEARCH (read the rules volume, whose folder belongs to the
+    # `suricata` user). No NET_ADMIN: without it Suricata cannot change the interface's offload
+    # settings or join promiscuous mode (promisc is off in suricata.yaml), it only warns. No
+    # CHOWN/SETUID/SETGID/DAC_OVERRIDE/SYS_NICE: those were for the image's entrypoint, which is not used.
+    cap_drop: [ALL]
+    cap_add: [NET_RAW, DAC_READ_SEARCH]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 3g      # ET Open needs 1 to 2 GB; Suricata is stopped by the kernel, not the sensor, if it grows
+    pids_limit: 512
+    environment:
+      EVE_MAX_MB: "32"   # run.sh empties eve.json when it passes this size
+    # -k none: lab captures carry unfilled checksums, so without it every packet raises "SURICATA
+    # TCPv4 invalid checksum". HOME_NET is the protected network and EXTERNAL_NET is any: with the
+    # default (everything private is "home") most ET rules, written $EXTERNAL_NET -> $HOME_NET, never
+    # fire. -S loads exactly the ET Open file from the read-only rules volume.
+    command:
+      - "-i"
+      - "lab_attack"
+      - "-k"
+      - "none"
+      - "-c"
+      - "/etc/idps/suricata.yaml"
+      - "-S"
+      - "/rules-volume/rules/suricata.rules"
+      - "--set"
+      - "vars.address-groups.HOME_NET=[10.10.2.0/24]"
+      - "--set"
+      - "vars.address-groups.EXTERNAL_NET=any"
+      - "--init-errors-fatal"
+    volumes:
+      - idps-suricata:/rules-volume:ro
+      - suricata_eve:/eve   # written by Suricata (root), read-only in the sensor
 
   soc-net:
     # Holds the SOC's network namespace: no default route, inbound TCP 8443 only, outbound

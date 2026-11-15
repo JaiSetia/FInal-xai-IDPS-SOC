@@ -646,3 +646,17 @@ describe("WorldMap compact", () => {
     expect(screen.getByRole("img", { name: "World map of 0 attack sources" })).toBeInTheDocument();
   });
 });
+
+describe("LiveFeed source tag", () => {
+  it("marks rule alerts only", async () => {
+    const { LiveFeed } = await import("../pages/WorldMap");
+    const mk = (id: number, o: Record<string, unknown>) => ({
+      key: id, kind: "alert" as const, at: T0, located: true,
+      alert: { id, predicted_class: `Cls${id}`, severity: "high", src_ip: "1.1.1.1", ...o } as never,
+    });
+    render(<MemoryRouter><LiveFeed items={[mk(1, { source: "rule" }), mk(2, { source: "ml" }), mk(3, {})]} paused={false} missed={0} now={T0} /></MemoryRouter>);
+    const tags = document.querySelectorAll(".source-tag");
+    expect(tags).toHaveLength(1);
+    expect(tags[0].parentElement).toHaveTextContent("Cls1");
+  });
+});

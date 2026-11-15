@@ -43,7 +43,11 @@ PLAYBOOKS = {
     "web attack": "web-attack.md", "web attacks": "web-attack.md", "web attack - brute force": "web-attack.md",
     "web attack - xss": "web-attack.md", "web attack - sql injection": "web-attack.md",
     "bot": "bot.md", "infiltration": "infiltration.md", "heartbleed": "heartbleed.md",
+    # Families of rule (Suricata) alerts, idps/rules/eve.py rule_family
+    "scan": "portscan.md", "malware": "bot.md",
 }
+# Rule families with no playbook of their own: answered with a note, not an error.
+NO_PLAYBOOK_FAMILIES = frozenset({"exploit", "policy", "rule match"})
 
 
 class _Args(BaseModel):
@@ -153,7 +157,17 @@ def _alert_brief(a: Alert) -> dict:
             "predicted_class": a.predicted_class, "confidence": round(a.confidence, 3),
             "src": f"{a.src_ip}:{a.src_port}", "dst": f"{a.dst_ip}:{a.dst_port}",
             "protocol": a.protocol, "status": a.status.value, "case_id": a.case_id,
-            "sensor_id": a.sensor_id}
+            "sensor_id": a.sensor_id, "source": a.source or "ml", **_rule_fields(a)}
+
+
+def _rule_fields(a: Alert) -> dict:
+    """The Suricata rule behind a rule alert (sid, rev, signature, category, severity, count). The
+    signature text comes from the ruleset, but it is still data: the caller wraps every result in
+    <soc_data>, with < and > escaped."""
+    if (a.source or "ml") != "rule" or not isinstance(a.rule, dict):
+        return {}
+    keys = ("sid", "rev", "signature", "category", "severity", "count")
+    return {"rule": {k: a.rule.get(k) for k in keys}}
 
 
 def _search_alerts(db: Session, a: SearchAlertsArgs, **_) -> dict:
@@ -228,7 +242,12 @@ def _metrics(db: Session, a: MetricsArgs, user: User, **_) -> dict:
 
 
 def _playbook(db: Session, a: PlaybookArgs, **_) -> dict:
-    name = PLAYBOOKS.get(a.attack_class.strip().casefold())
+    key = a.attack_class.strip().casefold()
+    name = PLAYBOOKS.get(key)
+    if name is None and key in NO_PLAYBOOK_FAMILIES:
+        return {"attack_class": a.attack_class, "playbook": None,
+                "note": "no playbook for this rule family; triage from the rule's signature and "
+                        "category, the traffic involved and the alert's severity"}
     if name is None:
         raise ToolError(f"no playbook for {a.attack_class!r}; known: {sorted(set(PLAYBOOKS))}")
     return {"attack_class": a.attack_class, "playbook": (PLAYBOOK_DIR / name).read_text()}

@@ -443,3 +443,20 @@ The full loop was run once in the lab with the step 7 code: the live sensor (dry
 ### Summary for the report
 
 Analyst feedback closes the loop the unseen-data test opened: 24 marked alerts removed every false alarm on normal lab traffic, live and on recordings the retrain never saw, without hurting the CIC-IDS2017 test scores. The cost was a small drop in SSH brute-force recall (about 5% of its flows), because normal SSH and brute-force SSH logins look alike in flow statistics; the blocking policy needs 5 confident flows, so a brute force is still blocked. The keep-or-reject gate means a bad feedback round can't replace a working model. Limitations: one round, one kind of false alarm, and a 7-row holdout.
+
+## Rules next to the model: Suricata live on the sensor (lab, 15 November 2026)
+
+Suricata 7.0.10 with ET Open now runs next to the model on the sensor (`docker compose --profile rules up -d suricata`). It shares the sensor's network namespace, reads the same `lab_attack` interface, and writes only alert events; the sensor's rule forwarder (`IDPS_RULES_EVE`) follows that log and sends rule alerts to the SOC marked `source: "rule"`, next to the model's alerts. Engine events and informational rules are dropped, and repeats of the same rule between the same source, target and port within 60 s are folded into one alert with a count. Rule alerts never block on their own unless an admin lists the rule's SID, and even then only for an established TCP connection, never for an address in the protected network, and always through the allowlist and dry-run setting.
+
+**Live check.** With the forwarder on and the retrained model (`week_xgboost_fb1`), sqlmap against DVWA and an nmap port scan were run while the sensor was live:
+
+| Attack | Model alerts | Rule alerts |
+|---|---|---|
+| sqlmap (SQL injection) | 0 | **17** (47 matches folded; 11 signatures, such as `ET WEB_SERVER SQL Injection Select Sleep Time Delay`, `ET SCAN Sqlmap SQL Injection Scan`, `ET WEB_SERVER SQL Errors in HTTP 200 Response`) |
+| nmap port scan | 1,024 (PortScan) | 0 |
+
+The forwarder reported 17 alerts sent, 30 folded, and nothing dropped, rate-limited or invalid. The two detectors now cover each other live, as the offline comparison predicted: the SQL injection the model can't see arrives as rule alerts, and the scan the default rules ignore arrives as model alerts. Rules are also faster: the first alert of each rule reached the SOC 0.1–0.5 s after the matching packet (11 of the 17), and the 6 folded follow-ups when their 60 s window closed (49–60 s). Model alerts wait for the flow to end (about 2 minutes, from the 120 s idle timeout).
+
+**In the SOC.** Alerts carry a "rule" tag; the Alerts page and the Threat Center's live alerts filter by "Raised by" (model, rule or both); a rule alert's page shows the matched signature, SID, category and Suricata severity instead of a model explanation; the Alerts number splits model and rule counts; Sensor health shows the forwarder's state. Rule alerts are never used as training rows.
+
+**Hardening** (from the review): the Suricata container keeps only the `NET_RAW` and `DAC_READ_SEARCH` capabilities, with `no-new-privileges`, a 3 GB memory limit and a process limit; capture works without `NET_ADMIN`. Rule alerts have their own outbox cap and a per-minute limit, so a flood of them can't push model alerts out during an SOC outage.

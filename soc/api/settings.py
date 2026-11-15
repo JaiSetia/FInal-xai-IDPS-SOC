@@ -17,6 +17,8 @@ DEFAULT_SEVERITY_BY_CLASS = {
     "dos": "high", "ddos": "critical", "bot": "high", "infiltration": "critical",
     "heartbleed": "critical", "web attack": "high", "ftp-patator": "medium",
     "ssh-patator": "medium", "brute force": "medium", "sql injection": "high", "xss": "medium",
+    # Families of rule (Suricata) alerts, see idps/rules/eve.py; "Rule match" gets default_severity.
+    "scan": "low", "malware": "high", "exploit": "high", "policy": "low",
 }
 
 

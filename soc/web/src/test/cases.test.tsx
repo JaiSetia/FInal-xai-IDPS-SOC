@@ -438,3 +438,14 @@ describe("untrusted text", () => {
     expect(screen.getByText("<b>x</b>")).toBeInTheDocument();
   });
 });
+
+describe("case alert list source tag", () => {
+  it("marks rule alerts only", async () => {
+    details["5"] = detail({ alerts: [alertRow({ id: 11, source: "rule" }), alertRow({ id: 12 }), alertRow({ id: 13, source: "ml" })], alert_count: 3 });
+    show("/cases/5");
+    await screen.findByText(/#11 PortScan/);
+    const rows = panel().closest("section, div")!.ownerDocument.querySelectorAll(".source-tag");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].closest("td")).toHaveTextContent("#11 PortScan");
+  });
+});

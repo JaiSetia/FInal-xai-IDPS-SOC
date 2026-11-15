@@ -1,6 +1,7 @@
 """Analyst feedback as training data: which alerts count, and with what label.
 
-An alert is a training row when an analyst judged it (status false_positive -> label BENIGN, or
+An alert is a training row when it is a MODEL alert (source "ml", never a Suricata rule alert),
+an analyst judged it (status false_positive -> label BENIGN, or
 confirmed -> label `true_class`, else the predicted class) and it carries the flow's model
 features. Used by the admin endpoint GET /training/feedback and the offline export
 `python -m soc.api.export_feedback`.
@@ -17,7 +18,7 @@ from collections.abc import Iterator
 from sqlalchemy import and_, exists, select
 from sqlalchemy.orm import Session, aliased
 
-from soc.api.models import Alert, AlertStatus
+from soc.api.models import Alert, AlertStatus, ml_alerts_clause
 
 FEEDBACK_STATUSES = (AlertStatus.FALSE_POSITIVE, AlertStatus.CONFIRMED)
 BENIGN = "BENIGN"
@@ -44,7 +45,10 @@ def judged_alerts(db: Session, *, with_features_only: bool = False, after_id: in
     """Judged alerts in id order. With `dedupe`, an alert is skipped when an earlier judged one
     (with features, if `with_features_only`) is the same flow; callers that scan everything
     anyway can dedupe themselves with flow_key() and count what they drop."""
-    query = (select(Alert).where(Alert.status.in_(FEEDBACK_STATUSES), Alert.id > after_id)
+    # Rule alerts (Suricata) are never training rows: they have no model features and a rule's
+    # verdict says nothing about what the model should have predicted.
+    query = (select(Alert).where(Alert.status.in_(FEEDBACK_STATUSES), Alert.id > after_id,
+                                 ml_alerts_clause())
              .order_by(Alert.id))
     if with_features_only:
         query = query.where(Alert.features.is_not(None))

@@ -74,7 +74,7 @@ export default function Assistant() {
     const alertId = params.get("alert");
     if (alertId && /^\d{1,12}$/.test(alertId) && status?.enabled) {
       setParams({}, { replace: true });
-      void send(`Explain alert #${alertId}: why did the model flag it, is it likely a real attack, and what should I do?`, null);
+      void send(`Explain alert #${alertId}: why was it raised (by the model or a Suricata rule), is it likely a real attack, and what should I do?`, null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.enabled]);

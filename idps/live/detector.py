@@ -286,11 +286,24 @@ class LiveDetector:
                 self.metrics.add("reply_direction")
                 log.info("flow %s:%s -> %s:%s looks like a reply: the response engine gets %s",
                          row["src_ip"], row["src_port"], row["dst_ip"], row["dst_port"], offender)
-            decision = self.engine.handle(Detection(
+            detection = Detection(
                 src_ip=offender, label=pred.label, confidence=pred.confidence,
-                timestamp=row["end_ms"] / 1000.0, explanation=explanation))
+                timestamp=row["end_ms"] / 1000.0, explanation=explanation)
         except Exception as exc:  # noqa: BLE001  one bad detection must not stop the loop
             log.error("response engine failed for %s: %s: %s", row["src_ip"],
+                      type(exc).__name__, exc)
+            self.metrics.add("response_errors")
+            return
+        self.respond(detection)
+
+    def respond(self, detection: Detection) -> None:
+        """Hand one detection to the response engine and report what it decided (a block, a
+        would-block in dry-run, or a suppression). Used for the model's detections and, from the
+        rule forwarder's thread, for rules explicitly allowed to block; never raises."""
+        try:
+            decision = self.engine.handle(detection)
+        except Exception as exc:  # noqa: BLE001  one bad detection must not stop the loop
+            log.error("response engine failed for %s: %s: %s", detection.src_ip,
                       type(exc).__name__, exc)
             self.metrics.add("response_errors")
             return

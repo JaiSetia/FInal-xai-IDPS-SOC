@@ -6,6 +6,8 @@ export type ActionKind = "block_ip" | "unblock_ip";
 export type ActionStatus = "pending" | "confirmed" | "rejected" | "executed" | "failed";
 export type CaseStatus = "open" | "investigating" | "closed";
 export type Role = "analyst" | "admin";
+/** Who raised an alert: the model, or a Suricata rule running next to it on the sensor. */
+export type AlertSource = "ml" | "rule";
 
 export const SEVERITIES: Severity[] = ["low", "medium", "high", "critical"];
 export const ALERT_STATUSES: AlertStatus[] = ["new", "acknowledged", "confirmed", "false_positive", "resolved"];
@@ -39,6 +41,21 @@ export interface Alert {
   severity: Severity;
   status: AlertStatus;
   case_id: number | null;
+  /** Missing from older SOCs: treat as "ml". */
+  source?: AlertSource;
+  /** The Suricata rule that fired; null for model alerts. */
+  rule?: RuleInfo | null;
+}
+
+export interface RuleInfo {
+  sid: number;
+  rev: number | null;
+  signature: string;
+  category: string | null;
+  /** Suricata's severity: 1 is the most severe. */
+  severity: number;
+  /** Matches folded into this alert (same rule, source, target and port within the window). */
+  count: number;
 }
 
 export interface FeatureContribution {
@@ -128,6 +145,8 @@ export interface MetricsSummary {
   alerts_per_bucket: { start: string; count: number }[];
   by_class: Record<string, number>;
   by_severity: Record<string, number>;
+  /** Missing from older SOCs. */
+  by_source?: Record<AlertSource, number>;
   top_sources: { ip: string; count: number }[];
   triaged: number;
   false_positives: number;
@@ -186,6 +205,8 @@ export interface SensorReport {
   mode: "live" | "replay";
   /** sha256 and version are missing or null from older sensors. */
   model: { name: string; checksum_ok: boolean; sha256?: string | null; version?: string | null };
+  /** Suricata next to the model; missing or null from sensors that don't send it. */
+  rules?: RulesStatus | null;
   /** Live traffic against the model's training data; missing or null from older sensors. */
   drift?: Drift | null;
   /** null for analysts: only admins see the policy and allowlists. */
@@ -201,6 +222,27 @@ export interface SensorReport {
   counters: { flows: number; alerts: number; blocked: number; would_block: number };
   sensor_version: string | null;
   sent_at: string | null;
+}
+
+export interface RulesStatus {
+  enabled: boolean;
+  eve_path: string | null;
+  alerts_sent: number;
+  dropped_engine: number;
+  dropped_info: number;
+  deduped: number;
+  dropped_invalid: number;
+  last_event_at: string | null;
+  error: string | null;
+  include_info: boolean;
+  dedupe_seconds: number;
+  /** How many rules may block on their own. */
+  block_sids: number;
+  /** Rule alerts over the per-minute limit (not queued); missing from older sensors. */
+  rate_limited?: number;
+  /** Hits of rules allowed to block that were kept from the response engine. */
+  block_skipped?: number;
+  max_per_minute?: number;
 }
 
 export type DriftLevel = "ok" | "watch" | "drift" | "unknown";

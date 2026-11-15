@@ -28,6 +28,9 @@ class LiveSettings(BaseSettings):
     # SOC outbox (only used when a SOC is configured): in memory, saved to outbox_file.
     outbox_max_alerts: int = Field(default=5_000, ge=1, le=1_000_000)
     outbox_file: str = "data/processed/live_outbox.json"
+    # Rule (Suricata) alerts have their own cap, on top of the one above: a rule flood drops the oldest
+    # RULE alerts and never a model alert.
+    outbox_max_rule_alerts: int = Field(default=1_000, ge=1, le=1_000_000)
     # Without a SOC, alerts are appended here as JSON lines.
     alerts_file: str = "data/processed/live_alerts.jsonl"
 

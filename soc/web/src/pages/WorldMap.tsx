@@ -7,7 +7,7 @@ import type { GeometryCollection, Topology } from "topojson-specification";
 import countriesTopo from "world-atlas/countries-110m.json";
 import { api, query } from "../api/client";
 import { SEVERITIES, type Alert, type GeoLocation, type LiveAlert, type LiveBlockEvent, type Severity } from "../api/types";
-import { Card, ErrorText, Pill, SeverityBadge, useLoad, useNow } from "../components/common";
+import { Card, ErrorText, Pill, SeverityBadge, SourceTag, useLoad, useNow } from "../components/common";
 import { endpoint, oneLine } from "../format";
 import { useLiveBlocks } from "../live";
 import { useBlockMarks, useReducedMotion, type BlockMark } from "../liveBlocks";
@@ -343,6 +343,7 @@ export function LiveFeed({ items, paused, missed, now }: { items: FeedItem[]; pa
                 <span className="feed-time">{ago(i.at, now)}</span>
                 <span>
                   <Link to={`/alerts/${i.alert.id}`}><b>{oneLine(i.alert.predicted_class, 40)}</b></Link>{" "}
+                  <SourceTag source={i.alert.source} />{" "}
                   <SeverityBadge severity={SEVERITIES.includes(i.alert.severity) ? i.alert.severity : "low"} />
                   <span className="mono feed-flow">{i.alert.src_ip} → {endpoint(i.alert.dst_ip, i.alert.dst_port, i.alert.protocol)}</span>
                   {!i.located && <span className="muted small-text"> (not on the map: no known location)</span>}

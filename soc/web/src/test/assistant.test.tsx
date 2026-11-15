@@ -384,7 +384,7 @@ describe("?alert=", () => {
     show("/assistant?alert=12");
     await waitFor(() => expect(h.stream).toHaveBeenCalledTimes(1));
     expect(h.stream.mock.calls[0][1]).toEqual({
-      message: "Explain alert #12: why did the model flag it, is it likely a real attack, and what should I do?",
+      message: "Explain alert #12: why was it raised (by the model or a Suricata rule), is it likely a real attack, and what should I do?",
     });
     await waitFor(() => expect(screen.getByTestId("loc").textContent).toBe("/assistant"));
     await act(async () => {});

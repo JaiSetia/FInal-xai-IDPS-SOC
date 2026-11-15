@@ -43,6 +43,19 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lab_unseen as lu  # noqa: E402
+# The eve.json parsing and the engine / informational classification live in the package, where the
+# sensor's rule forwarder uses them too (idps/rules/eve.py); re-exported here under the old names.
+from idps.rules.eve import (  # noqa: E402,F401
+    ENGINE_PREFIX,
+    INFO_CATEGORIES,
+    INFO_PREFIXES,
+    PROTO,
+    eve_timestamp_ms,
+    is_engine_event,
+    is_informational,
+    parse_alert_line,
+    proto_number,
+)
 
 ROOT = lu.ROOT
 IMAGE = "jasonish/suricata:7.0.10"
@@ -59,13 +72,11 @@ PROCESSED = ROOT / "data" / "processed"
 DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday"]
 HOME_NETS = {"lab": ["10.10.2.0/24"], "cic": ["192.168.10.0/24"]}
 SLACK_MS = 1000            # an alert may be this far outside the flow's [start, end]
-ENGINE_PREFIX = "SURICATA "
 BENIGN = lu.BENIGN
 TOP_SIGNATURES = 5
 TOP_BENIGN_SIGNATURES = 10
 LOG_TAIL_LINES = 40
 RUN_TIMEOUT = 4 * 3600
-PROTO = {"TCP": 6, "UDP": 17, "ICMP": 1, "IPV6-ICMP": 58, "ICMPV6": 58, "SCTP": 132, "GRE": 47}
 M_ALERTS, M_LOG, M_END = "@@ALERTS", "@@LOG", "@@END"
 M_META = "@@META "
 
@@ -84,62 +95,8 @@ def home_net_args(nets: list[str]) -> list[str]:
             "--set", "vars.address-groups.EXTERNAL_NET=any"]
 
 
-def is_engine_event(signature: str) -> bool:
-    """Suricata's own protocol/decoder/stream events, not attack signatures."""
-    return str(signature).startswith(ENGINE_PREFIX)
-
-
-def eve_timestamp_ms(text: str) -> int:
-    """Epoch milliseconds of an eve.json timestamp such as 2017-07-07T11:59:50.315123+0000. Suricata
-    writes the local UTC offset, so the offset is applied; a timestamp without one is refused."""
-    dt = datetime.fromisoformat(text)
-    if dt.tzinfo is None:
-        raise ValueError(f"eve timestamp without a UTC offset: {text!r}")
-    return round(dt.timestamp() * 1000)
-
-
-def proto_number(value) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    s = str(value).strip().upper()
-    return int(s) if s.isdigit() else PROTO.get(s)
-
-
-# Informational alerts: policy or inventory notes rather than attack indications. An alert is
-# informational when its message starts with one of these prefixes or its category is one of these.
-INFO_PREFIXES = ("ET INFO ", "ET POLICY ", "GPL ICMP_INFO", "GPL INFO ", "GPL POLICY ")
-INFO_CATEGORIES = {"Not Suspicious Traffic", "Misc activity", "Potential Corporate Privacy Violation"}
-
 ALERT_COLUMNS = ["ts_ms", "src_ip", "src_port", "dst_ip", "dst_port", "protocol", "signature", "sid",
                  "category", "severity", "engine", "informational"]
-
-
-def is_informational(signature: str, category: str | None) -> bool:
-    """Informational (ET INFO / ET POLICY / GPL ICMP_INFO style) alert, decided by the message prefix
-    or the category. Engine events are a separate group and are not called informational."""
-    sig = str(signature)
-    return not is_engine_event(sig) and (sig.startswith(INFO_PREFIXES) or (category or "") in INFO_CATEGORIES)
-
-
-def parse_alert_line(line: str) -> dict | None:
-    """One eve.json line -> alert dict, or None if it is not an alert event. Ports are 0 when absent
-    (ICMP), as in the flow table."""
-    line = line.strip()
-    if not line.startswith("{"):
-        return None
-    ev = json.loads(line)
-    if ev.get("event_type") != "alert":
-        return None
-    a = ev.get("alert") or {}
-    sig = str(a.get("signature", ""))
-    cat = a.get("category")
-    return {"ts_ms": eve_timestamp_ms(ev["timestamp"]), "src_ip": ev.get("src_ip"),
-            "src_port": int(ev.get("src_port") or 0), "dst_ip": ev.get("dest_ip"),
-            "dst_port": int(ev.get("dest_port") or 0), "protocol": proto_number(ev.get("proto")),
-            "signature": sig, "sid": a.get("signature_id"), "category": cat, "severity": a.get("severity"),
-            "engine": is_engine_event(sig), "informational": is_informational(sig, cat)}
 
 
 def alerts_frame(lines) -> pd.DataFrame:
