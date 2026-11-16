@@ -18,5 +18,6 @@ Optional flow extractors (can be hard to install on macOS): `pip install -e ".[c
 
 ## Docs
 
+- Install and run it (Docker Compose, `deploy/install.sh`): [docs/deploy.md](docs/deploy.md)
 - Project plan: [docs/PLAN.md](docs/PLAN.md)
 - Lab network and attack scripts: [lab/README.md](lab/README.md)

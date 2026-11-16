@@ -40,3 +40,13 @@ cloud_state/
 # MaxMind GeoLite2 database (licence forbids redistribution)
 data/geoip/
 *.mmdb
+
+# Deployment (deploy/install.sh): secrets, enrolment bundles and the generated environment
+deploy/.env
+deploy/.env.sensor
+deploy/secrets/
+deploy/sensors/
+deploy/sensor-data/
+deploy/soc.env
+deploy/sensor.extra.env
+deploy/caddy-root.crt

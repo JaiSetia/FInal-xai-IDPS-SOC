@@ -1,8 +1,13 @@
 """Admin CLI for the SOC API.
 
     python -m soc.api create-user <username> --role admin|analyst   (asks for the password)
+    python -m soc.api create-user <username> --role admin|analyst --password-file PATH
+                                     (scripted: reads the password from PATH, never prints it)
     python -m soc.api create-sensor <name>                           (prints the token once)
     python -m soc.api sensor-ca --out-dir DIR                (mutual TLS: a CA for sensor certs)
+    python -m soc.api server-cert --dir DIR [--ca-dir CADIR] --san NAME_OR_IP [--san ...]
+                                     (the TLS certificate of the sensor port, from its own CA kept
+                                     in CADIR (default DIR); reused while valid)
     python -m soc.api sensor-cert <name> --ca-dir DIR --out-dir OUT   (a sensor's certificate)
     python -m soc.api mfa-reset <username>          (lost phone and recovery codes; logs them out)
     python -m soc.api mfa-enrol <username> --secret-file PATH   (scripted accounts: writes the
@@ -36,10 +41,19 @@ def _session():
 
 
 def _create_user(args) -> int:
-    password = getpass.getpass(f"Password for {args.username}: ")
-    if password != getpass.getpass("Repeat password: "):
-        print("passwords don't match", file=sys.stderr)
-        return 1
+    if args.password_file:
+        try:
+            with open(args.password_file, encoding="utf-8") as fh:
+                # one trailing newline is the file's, not the password's
+                password = fh.read().removesuffix("\n")
+        except OSError as exc:  # the path is not secret; the content never is printed
+            print(f"error: cannot read {args.password_file}: {exc.strerror}", file=sys.stderr)
+            return 1
+    else:
+        password = getpass.getpass(f"Password for {args.username}: ")
+        if password != getpass.getpass("Repeat password: "):
+            print("passwords don't match", file=sys.stderr)
+            return 1
     with _session() as db:
         try:
             auth.create_user(db, args.username, password, Role(args.role))
@@ -137,6 +151,49 @@ def _sensor_ca(args) -> int:
     pki.write_public(out / "sensor-ca.pem", pki.cert_pem(cert))
     print(f"sensor CA written to {out}: give sensor-ca.pem to the SOC (--sensor-ca); keep "
           "sensor-ca.key offline")
+    return 0
+
+
+def _server_cert(args) -> int:
+    """The sensor port's TLS certificate, signed by a CA of its own that stays in --dir (sensors
+    trust server-ca.pem). Reused while it covers exactly the given names and has 30+ days left."""
+    from datetime import UTC, datetime, timedelta
+    from pathlib import Path
+
+    from cryptography import x509
+
+    from soc.api import pki
+
+    out = Path(args.dir)
+    out.mkdir(parents=True, exist_ok=True)
+    ca_dir = Path(args.ca_dir) if args.ca_dir else out
+    ca_dir.mkdir(parents=True, exist_ok=True)
+    sans = list(dict.fromkeys(args.san))
+    try:
+        if (ca_dir / "server-ca.key").exists():
+            ca_key, ca_cert = pki.load_ca(ca_dir, "server-ca")
+        else:
+            ca_key, ca_cert = pki.make_ca("IDPS SOC server CA", days=3650)
+            pki.write_private(ca_dir / "server-ca.key", pki.key_pem(ca_key))
+            pki.write_public(ca_dir / "server-ca.pem", pki.cert_pem(ca_cert))
+        if ca_dir != out:  # the certificate (public) goes next to the server key
+            pki.write_public(out / "server-ca.pem", pki.cert_pem(ca_cert))
+        try:
+            cur = x509.load_pem_x509_certificate((out / "server.pem").read_bytes())
+            if ((out / "server.key").exists() and cur.issuer == ca_cert.subject
+                    and pki.cert_sans(cur) == set(sans)
+                    and cur.not_valid_after_utc - datetime.now(UTC) > timedelta(days=30)):
+                print(f"server certificate in {out} is current")
+                return 0
+        except (OSError, ValueError):
+            pass
+        key, cert = pki.issue_server_cert(ca_key, ca_cert, sans[0], sans, days=args.days)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    pki.write_private(out / "server.key", pki.key_pem(key))
+    pki.write_public(out / "server.pem", pki.cert_pem(cert))
+    print(f"server certificate for {', '.join(sans)} written to {out}")
     return 0
 
 
@@ -277,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
     u = sub.add_parser("create-user")
     u.add_argument("username")
     u.add_argument("--role", choices=[r.value for r in Role], required=True)
+    u.add_argument("--password-file", metavar="PATH", default=None,
+                   help="read the password from this file instead of asking")
     u.set_defaults(fn=_create_user)
     s = sub.add_parser("create-sensor")
     s.add_argument("name")
@@ -285,6 +344,12 @@ def main(argv: list[str] | None = None) -> int:
     ca.add_argument("--out-dir", required=True)
     ca.add_argument("--days", type=int, default=3650)
     ca.set_defaults(fn=_sensor_ca)
+    sv = sub.add_parser("server-cert", help="TLS certificate for the sensor port")
+    sv.add_argument("--dir", required=True)
+    sv.add_argument("--ca-dir", default=None, help="where the CA key lives (default: --dir)")
+    sv.add_argument("--san", action="append", required=True, metavar="NAME_OR_IP")
+    sv.add_argument("--days", type=int, default=365)
+    sv.set_defaults(fn=_server_cert)
     sc = sub.add_parser("sensor-cert", help="issue a sensor's client certificate")
     sc.add_argument("name", help="the sensor's name at the SOC")
     sc.add_argument("--ca-dir", required=True)

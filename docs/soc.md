@@ -42,6 +42,9 @@ Notification, syslog and reputation settings (`NOTIFY_*`, `WEBHOOK_*`, `SLACK_*`
 The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep their own
 (`IDPS_ALLOWLIST`) as a second, independent check; set both.
 
+For a production install (PostgreSQL, a TLS proxy serving the dashboard, certificates and secrets
+generated for you), use `deploy/install.sh`: see [deploy.md](deploy.md).
+
 ## Endpoints
 
 "User" means a logged-in analyst or admin. Lists use keyset pagination: `limit` (1 to 500) and
@@ -309,7 +312,12 @@ On the sensor: `IDPS_SOC_URL=https://soc:8444`, `IDPS_SOC_CLIENT_CERT=certs/edge
 - With `IDPS_SOC_SENSOR_MTLS_REQUIRED=true`, sensor requests on the main port get 401.
 - To cut a sensor off, revoke its token (Admin page); its certificate alone is not enough.
   There is no certificate revocation list.
-- The SOC must terminate TLS itself (`soc.api.serve`). Behind a TLS-terminating proxy, such as the
+- `soc.api.serve` gives the sensor listener its own certificate (`--sensor-ssl-keyfile`,
+  `--sensor-ssl-certfile`; default: `--ssl-keyfile`/`--ssl-certfile`) and always requires TLS
+  there. The main listener may run without TLS (omit both `--ssl-*` options) behind a proxy, with
+  `--proxy-headers --forwarded-allow-ips`: that is how [deploy.md](deploy.md) runs it, with the
+  sensor port published directly and the main port reachable only by the proxy.
+- The sensor port must be served by `soc.api.serve` itself. Behind a TLS-terminating proxy, such as the
   Caddy of the AWS deployment (`infra/`), the client certificate never reaches the SOC: there,
   leave `IDPS_SOC_SENSOR_MTLS_REQUIRED` off.
 - uvicorn does not pass client certificates to applications, so the sensor listener uses a small

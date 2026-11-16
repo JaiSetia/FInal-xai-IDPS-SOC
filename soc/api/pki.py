@@ -64,6 +64,39 @@ def issue_client_cert(ca_key, ca_cert: x509.Certificate, cn: str, days: int = 36
     return key, cert
 
 
+def issue_server_cert(ca_key, ca_cert: x509.Certificate, cn: str, sans: list[str],
+                      days: int = 365):
+    """A TLS server certificate (serverAuth only) valid for the names/IP addresses in `sans`."""
+    import ipaddress
+
+    if not sans:
+        raise ValueError("at least one name or address is needed")
+    entries: list[x509.GeneralName] = []
+    for san in sans:
+        try:
+            entries.append(x509.IPAddress(ipaddress.ip_address(san)))
+        except ValueError:
+            if not san or len(san) > 253 or any(c in san for c in " /@\\"):
+                raise ValueError(f"not a host name or address: {san!r}") from None
+            entries.append(x509.DNSName(san))
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(UTC)
+    cert = (x509.CertificateBuilder().subject_name(_name(cn)).issuer_name(ca_cert.subject)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=5)).not_valid_after(now + timedelta(days=days))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.KeyUsage(
+                digital_signature=True, content_commitment=False, key_encipherment=False,
+                data_encipherment=False, key_agreement=False, key_cert_sign=False, crl_sign=False,
+                encipher_only=False, decipher_only=False), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+            .add_extension(x509.SubjectAlternativeName(entries), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+                           critical=False)
+            .sign(ca_key, hashes.SHA256()))
+    return key, cert
+
+
 def cert_pem(cert: x509.Certificate) -> bytes:
     return cert.public_bytes(serialization.Encoding.PEM)
 
@@ -93,10 +126,20 @@ def write_public(path: Path, data: bytes) -> None:
     os.replace(tmp, path)
 
 
-def load_ca(ca_dir: Path):
-    cert = x509.load_pem_x509_certificate((ca_dir / "sensor-ca.pem").read_bytes())
-    key = serialization.load_pem_private_key((ca_dir / "sensor-ca.key").read_bytes(), None)
+def load_ca(ca_dir: Path, name: str = "sensor-ca"):
+    cert = x509.load_pem_x509_certificate((ca_dir / f"{name}.pem").read_bytes())
+    key = serialization.load_pem_private_key((ca_dir / f"{name}.key").read_bytes(), None)
     return key, cert
+
+
+def cert_sans(cert: x509.Certificate) -> set[str]:
+    """The names and addresses of a certificate's subjectAltName, as strings."""
+    try:
+        ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    except x509.ExtensionNotFound:
+        return set()
+    return {str(v) for v in ext.get_values_for_type(x509.DNSName)} | {
+        str(v) for v in ext.get_values_for_type(x509.IPAddress)}
 
 
 def common_name(cert: x509.Certificate) -> str | None:

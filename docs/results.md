@@ -602,3 +602,39 @@ The IDPS now protects itself, not only the network: admins need a second factor,
 who they are with certificates bound to their names, and the sensor refuses any model that is not
 signed by the person who approved it, so a tampered model cannot quietly blind detection.
 
+## Packaging: images, install script and upgrades (16 November 2026)
+
+Roadmap step 12. Built by a Sonnet implementer; reviewed twice by an Opus reviewer; checked in
+the browser by this session.
+
+### What a fresh machine gets
+
+`deploy/install.sh soc` builds (or loads) three versioned images: `idps-soc` (610 MB),
+`idps-proxy` (Caddy plus the built dashboard, 89 MB) and `idps-sensor` (1.52 GB, 0.4 GB less
+after dropping unused GPU libraries). It generates the secrets into 0600 files, starts
+PostgreSQL, the SOC and Caddy, issues the sensor-port certificates and creates the first admin,
+whose password goes only to a file. The admin must set up two-factor sign-in at the first login.
+`install.sh add-sensor NAME` makes an enrolment bundle; `install.sh sensor` installs a sensor on
+another host. `upgrade`, `rollback`, `restore`, `renew-sensor`, `status` and `uninstall` cover the
+rest (docs/deploy.md).
+
+### Checks
+
+| Test | Result |
+|---|---|
+| Fresh install from a clean copy, on a host that had never pulled the database image | 42/42 checks: dashboard over HTTPS (verified against Caddy's root), security headers, `/api` works, port 8000 unpublished, admin asked to enrol MFA, sensor port refuses a client without a certificate and accepts one with it, secrets 0600 and never printed, a second run changes nothing |
+| Every dashboard page under the production Content-Security-Policy | No violations (this session, in the browser) |
+| Upgrade 0.1.0 to 0.2.0 | 57/57 checks: database migrated from revision 0001 to 0002, data and MFA kept, backup taken first with the old version; a broken new version is rolled back automatically; `rollback` refuses when the old version cannot read the newer schema; `restore` puts back a backup and refuses a damaged one; `renew-sensor` |
+
+The reviews found, among others, that a truly fresh machine never got PostgreSQL, that a sensor
+capability allowed reading host files from a compromised sensor, and that the documented restore
+deleted its own backup; all were fixed and are covered by the scripts above.
+
+Not tested: the `--domain` (Let's Encrypt) path, a real Linux host, and live capture by the
+packaged sensor. The "0.1.0" of the upgrade test is the step 11 code with the new packaging, since
+that release had no installer. A Helm chart is not provided.
+
+### Tests
+
+2,043 Python tests passed (29 skipped, PostgreSQL-only), 981 dashboard tests passed.
+

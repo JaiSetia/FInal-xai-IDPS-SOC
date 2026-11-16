@@ -3,6 +3,11 @@
     python -m soc.api.serve --port 8443 --ssl-keyfile K --ssl-certfile C \\
         --sensor-port 8444 --sensor-ca sensor-ca.pem
 
+Without --ssl-keyfile/--ssl-certfile the main listener serves plain HTTP, for a deployment behind a
+TLS-terminating proxy (deploy/, docs/deploy.md; add --proxy-headers and --forwarded-allow-ips).
+The sensor listener always needs TLS: --sensor-ssl-keyfile/--sensor-ssl-certfile (default: the
+main ones; an error when neither pair is given).
+
 Both listeners serve ONE application in ONE process (the live feed and the throttles are
 in-process). The sensor listener:
 
@@ -108,7 +113,10 @@ def sensor_config(app, host: str, port: int, keyfile: str, certfile: str, ca: st
         SensorOnly(app), host=host, port=port, http=MtlsH11Protocol, ws="none",
         lifespan="off",  # the main listener runs the app's start-up and shut-down
         ssl_keyfile=keyfile, ssl_certfile=certfile, ssl_ca_certs=ca,
-        ssl_cert_reqs=ssl.CERT_REQUIRED, ssl_version=ssl.PROTOCOL_TLS_SERVER, **kw)
+        ssl_cert_reqs=ssl.CERT_REQUIRED, ssl_version=ssl.PROTOCOL_TLS_SERVER,
+        # sensors connect directly: never trust X-Forwarded-For from them (it would let a sensor
+        # choose the address the SOC records)
+        **{"proxy_headers": False, **kw})
 
 
 def make_servers(main_cfg: uvicorn.Config,
@@ -133,36 +141,78 @@ async def serve(main_cfg: uvicorn.Config, sensor_cfg: uvicorn.Config | None,
         raise SystemExit(1)
 
 
-def main(argv: list[str] | None = None) -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse and validate the command line (exit status 2 with one line on a bad combination)."""
     p = argparse.ArgumentParser(prog="python -m soc.api.serve")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8443)
-    p.add_argument("--ssl-keyfile", required=True)
-    p.add_argument("--ssl-certfile", required=True)
+    p.add_argument("--ssl-keyfile", default=None,
+                   help="TLS private key of the main listener (omit both --ssl-* options to serve "
+                        "plain HTTP, only behind a TLS-terminating proxy such as Caddy)")
+    p.add_argument("--ssl-certfile", default=None)
     p.add_argument("--sensor-port", type=int, default=None,
                    help="mutual-TLS listener for sensors (off when not given)")
     p.add_argument("--sensor-ca", default=None,
                    help="CA certificate (PEM) that signs the sensors' client certificates")
+    p.add_argument("--sensor-ssl-keyfile", default=None,
+                   help="TLS private key of the sensor listener (default: --ssl-keyfile)")
+    p.add_argument("--sensor-ssl-certfile", default=None,
+                   help="TLS certificate of the sensor listener (default: --ssl-certfile)")
     p.add_argument("--ws-max-size", type=int, default=65536)
-    p.add_argument("--proxy-headers", action="store_true")
+    p.add_argument("--proxy-headers", action="store_true",
+                   help="trust X-Forwarded-For/-Proto from --forwarded-allow-ips (main listener)")
+    p.add_argument("--forwarded-allow-ips", default=None,
+                   help="comma-separated proxy addresses whose forwarded headers are trusted "
+                        "(uvicorn's default: 127.0.0.1). '*' trusts every peer: only when the "
+                        "port is reachable by the proxy alone")
     args = p.parse_args(argv)
+    if (args.ssl_keyfile is None) != (args.ssl_certfile is None):
+        p.error("--ssl-keyfile and --ssl-certfile go together")
     if (args.sensor_port is None) != (args.sensor_ca is None):
         p.error("--sensor-port and --sensor-ca go together")
+    if (args.sensor_ssl_keyfile is None) != (args.sensor_ssl_certfile is None):
+        p.error("--sensor-ssl-keyfile and --sensor-ssl-certfile go together")
+    if args.sensor_port is None and args.sensor_ssl_keyfile is not None:
+        p.error("--sensor-ssl-keyfile/--sensor-ssl-certfile need --sensor-port")
+    if args.sensor_port is not None:
+        if args.sensor_ssl_keyfile is None:
+            args.sensor_ssl_keyfile, args.sensor_ssl_certfile = args.ssl_keyfile, args.ssl_certfile
+        if args.sensor_ssl_keyfile is None:  # the sensor listener never runs without TLS
+            p.error("--sensor-port needs a TLS certificate: give --sensor-ssl-keyfile and "
+                    "--sensor-ssl-certfile (or --ssl-keyfile and --ssl-certfile)")
+    return args
+
+
+def build_configs(args: argparse.Namespace, app) -> tuple[uvicorn.Config, uvicorn.Config | None]:
+    """uvicorn configs for the main listener (TLS only when a certificate is given) and, when
+    --sensor-port is set, the sensor listener (always TLS with a required client certificate)."""
+    kw: dict = {}
+    if args.ssl_keyfile:
+        kw.update(ssl_keyfile=args.ssl_keyfile, ssl_certfile=args.ssl_certfile)
+    if args.forwarded_allow_ips is not None:
+        kw["forwarded_allow_ips"] = args.forwarded_allow_ips
+    main_cfg = uvicorn.Config(app, host=args.host, port=args.port, ws_max_size=args.ws_max_size,
+                              proxy_headers=args.proxy_headers, **kw)
+    sensor_cfg = None
+    if args.sensor_port is not None:
+        sensor_cfg = sensor_config(app, args.host, args.sensor_port, args.sensor_ssl_keyfile,
+                                   args.sensor_ssl_certfile, args.sensor_ca)
+    return main_cfg, sensor_cfg
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     logging.basicConfig(level=logging.INFO)
     from soc.api.main import create_app
 
     app = create_app()
-    main_cfg = uvicorn.Config(app, host=args.host, port=args.port, ssl_keyfile=args.ssl_keyfile,
-                              ssl_certfile=args.ssl_certfile, ws_max_size=args.ws_max_size,
-                              proxy_headers=args.proxy_headers)
-    sensor_cfg = None
-    if args.sensor_port is not None:
-        sensor_cfg = sensor_config(app, args.host, args.sensor_port, args.ssl_keyfile,
-                                   args.ssl_certfile, args.sensor_ca)
-    elif app.state.settings.sensor_mtls_required:
+    if app.state.settings.sensor_mtls_required and args.sensor_port is None:
         print("error: IDPS_SOC_SENSOR_MTLS_REQUIRED is on but no --sensor-port is given",
               file=sys.stderr)
         return 1
+    main_cfg, sensor_cfg = build_configs(args, app)
+    if not args.ssl_keyfile:
+        log.warning("the main listener serves plain HTTP: keep it behind a TLS proxy")
     asyncio.run(serve(main_cfg, sensor_cfg))
     return 0
 

@@ -264,5 +264,5 @@ def test_lab_sensor_certificate_is_issued_once_and_reissued_when_needed(tmp_path
 def test_cloud_soc_installs_the_security_packages():
     text = (ROOT / "infra/templates/soc-user-data.sh.tftpl").read_text()
     install = re.search(r"pip install[^&]*", text).group(0)
-    for package in ("cryptography", "segno", "alembic", "pyjwt", "argon2-cffi"):
+    for package in ("cryptography", "segno", "alembic", "pyjwt", "argon2-cffi", "pandas"):
         assert package in install, package
