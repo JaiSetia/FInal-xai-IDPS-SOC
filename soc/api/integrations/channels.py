@@ -194,8 +194,13 @@ class EmailChannel(Channel):
                 else:
                     client = smtplib.SMTP(timeout=timeout)
                 dog.target = client
-                client.connect(s.smtp_host, s.smtp_port_effective)
-                with client:
+                # smtplib only records the host name when it is given to the constructor, and both
+                # STARTTLS and SMTP_SSL read it (self._host) as the name the server's certificate
+                # must match; without it TLS fails with "check_hostname requires server_hostname".
+                # It is always the configured host, never anything the server says.
+                client._host = s.smtp_host
+                try:
+                    client.connect(s.smtp_host, s.smtp_port_effective)
                     client.ehlo()
                     if s.smtp_security == "starttls":
                         # Not offered: starttls() raises. No plaintext fallback, ever.
@@ -205,6 +210,14 @@ class EmailChannel(Channel):
                         client.login(s.smtp_username,
                                      s.smtp_password.get_secret_value() if s.smtp_password else "")
                     client.send_message(msg, from_addr=s.smtp_from, to_addrs=list(s.smtp_to))
+                    try:  # sent: a failed goodbye changes nothing
+                        client.quit()
+                    except (OSError, smtplib.SMTPException):
+                        pass
+                finally:
+                    # Not `with client:`: its QUIT on the way out of an error would replace the
+                    # real error with a confusing one (e.g. "SMTP error -1" after a TLS failure).
+                    client.close()
             except smtplib.SMTPNotSupportedError as exc:
                 raise DeliveryError("the server does not offer STARTTLS; refusing to send "
                                     "without TLS", retryable=False) from exc
@@ -215,6 +228,9 @@ class EmailChannel(Channel):
             except smtplib.SMTPResponseException as exc:
                 if dog.expired:
                     raise DeliveryError("timed out") from exc
+                if exc.smtp_code < 0:  # smtplib's code for a reply it could not read
+                    raise DeliveryError("SMTP: unreadable reply from the server",
+                                        retryable=False) from exc
                 # 4xx replies are transient (try again); 5xx are permanent.
                 raise DeliveryError(f"SMTP error {exc.smtp_code}",
                                     retryable=exc.smtp_code < 500) from exc

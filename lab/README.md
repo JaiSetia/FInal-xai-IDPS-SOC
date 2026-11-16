@@ -37,6 +37,13 @@ Instead:
     resolve to. Each address gets a /32 route (still no default route), private answers are
     refused, names are looked up again every 2 minutes and an address expires an hour after it
     was last seen. If the names can't be resolved the SOC still starts, with nothing allowed.
+  - **Email exception:** when `LAB_SMTP_HOST` is a public mail server (for example
+    `smtp.gmail.com`), the SOC may reach that one host on `LAB_SMTP_PORT` (25, 465 or 587;
+    default 587, or 465 with `LAB_SMTP_SECURITY=ssl`), in a separate rule refreshed the same
+    way. A local test receiver (127.0.0.1) needs nothing. A host or port it can't use leaves
+    email blocked (logged by `soc-net`), never the SOC down. The rule follows `.env`, so change
+    the mail server there, not only in the SOC. Same accepted risk: other services on that
+    provider's addresses and port.
   - **Accepted risks when it is on:** the rule is per address, so other sites behind the same
     CDN addresses are reachable too, and a compromised SOC (it holds the API keys and the
     webhook) could send data out that way. It is meant for trying the integrations, not for a
@@ -170,8 +177,10 @@ open outbound connections** (see "How the lab is isolated"), so you try them aga
 inside the SOC's own container, on its loopback address: nothing leaves the lab and no real
 Slack, mail server or SIEM is involved. To use a real HTTPS service instead (AbuseIPDB, Slack, an
 HTTPS webhook), put its key or URL in `.env`, list its host in `LAB_SOC_EGRESS_HOSTS` and run
-`docker compose up -d --no-build --force-recreate soc-net soc-db soc`. Email (SMTP) and syslog
-use other ports and stay blocked.
+`docker compose up -d --no-build --force-recreate soc-net soc-db soc`. For real email, set the
+`LAB_SMTP_*` lines for your provider (Gmail: `smtp.gmail.com`, port 587, `starttls`, and an App
+Password, not your normal password); the SOC may then reach that mail server and no other. Syslog
+stays blocked.
 
 1. In `lab/.env` set (placeholders; `.env` is git-ignored):
 

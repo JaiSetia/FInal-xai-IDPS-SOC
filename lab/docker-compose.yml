@@ -139,6 +139,11 @@ services:
     cap_add: [NET_ADMIN]
     environment:
       SOC_EGRESS_HOSTS: ${LAB_SOC_EGRESS_HOSTS:-}
+      # Email: the SOC may reach its configured mail server on its configured port (and nothing
+      # else on that port). Blank LAB_SMTP_HOST = no email, no exception.
+      SOC_EGRESS_SMTP_HOST: ${LAB_SMTP_HOST:-}
+      SOC_EGRESS_SMTP_PORT: ${LAB_SMTP_PORT:-}
+      SOC_EGRESS_SMTP_SECURITY: ${LAB_SMTP_SECURITY:-}  # blank port + ssl means 465
     ports:
       - "127.0.0.1:8443:8443"   # the dashboard, from this machine only
     networks:

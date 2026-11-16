@@ -16,6 +16,10 @@
 #   Accepted risks (see lab/README.md): the rule is per address, so other sites on the same CDN
 #   addresses are reachable too, and a compromised SOC could send data out through them; DNS
 #   queries already reach the internet through Docker's resolver.
+# - Optional exception for email (SOC_EGRESS_SMTP_HOST and SOC_EGRESS_SMTP_PORT, from LAB_SMTP_HOST
+#   and LAB_SMTP_PORT in lab/.env, so the SOC can reach exactly the mail server it is configured
+#   for): that one port (25, 465 or 587) to the public addresses of that one host, in its own set,
+#   refreshed the same way. Nothing else changes: HTTPS stays limited to SOC_EGRESS_HOSTS.
 set -eu
 set -f            # no globbing of SOC_EGRESS_HOSTS
 trap 'exit 0' TERM INT
@@ -49,14 +53,20 @@ resolve() {  # dotted-quad A records of $1 (two lookups, to catch rotating answe
     | awk '$1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print $1}' | sort -u | head -n "$MAX_PER_HOST"
 }
 
-allowed_now() {  # addresses currently in the set
-  nft list set inet socguard egress4 | sed -n '/elements/,$p' \
+allowed_now() {  # addresses currently in set $1 (default egress4)
+  nft list set inet socguard "${1:-egress4}" | sed -n '/elements/,$p' \
     | grep -oE '([0-9]+\.){3}[0-9]+' | sort -u || true
 }
 
-refresh() {  # returns 1, changing nothing, when no host gave a public address or nft/ip failed
+refresh() {  # the HTTPS set (egress4) from $HOSTS
+  refresh_set egress4 HTTPS "$HOSTS"
+}
+
+refresh_set() {  # $1 set, $2 label for the log, $3 host names. Returns 1, changing nothing, when
+  # no host gave a public address or nft/ip failed.
+  set_name=$1; label=$2; set_hosts=$3
   found=""
-  for h in $HOSTS; do
+  for h in $set_hosts; do
     got=""
     for a in $(resolve "$h"); do
       if public_ipv4 "$a"; then got="$got $a"; else
@@ -71,17 +81,45 @@ refresh() {  # returns 1, changing nothing, when no host gave a public address o
   for a in $found; do ip route replace "$a/32" via "$GW" proto 99 || return 1; done
   elems=""
   for a in $found; do elems="$elems${elems:+, }$a timeout $KEEP"; done
-  printf 'add element inet socguard egress4 { %s }\n' "$elems" | nft -f - || return 1
-  # Drop the routes of addresses that have expired from the set.
-  keep=$(allowed_now)
+  printf 'add element inet socguard %s { %s }\n' "$set_name" "$elems" | nft -f - || return 1
+  # Drop the routes of addresses that have expired from every set (routes are shared).
+  keep=$(allowed_now "$set_name")
+  [ -z "${SMTP_HOST:-}" ] || [ "$set_name" = egress_smtp4 ] \
+    || keep=$(printf '%s\n%s\n' "$keep" "$(allowed_now egress_smtp4)" | sort -u)
+  [ "$set_name" = egress4 ] || keep=$(printf '%s\n%s\n' "$keep" "$(allowed_now egress4)" | sort -u)
   for r in $(ip -4 route show proto 99 | awk '{print $1}'); do
     printf '%s\n' "$keep" | grep -qxF "$r" || ip route del "$r/32" via "$GW" proto 99 || true
   done
-  now="$(printf '%s' "$keep" | tr '\n' ' ')"
-  if [ "$now" != "${LAST_ALLOWED:-}" ]; then  # log changes only
-    echo "soc-net: HTTPS allowed to $HOSTS ($now)" >&2
-    LAST_ALLOWED=$now
+  now="$(allowed_now "$set_name" | tr '\n' ' ')"
+  eval "last=\${LAST_$set_name:-}"
+  if [ "$now" != "$last" ]; then  # log changes only
+    echo "soc-net: $label allowed to $set_hosts ($now)" >&2
+    eval "LAST_$set_name=\$now"
   fi
+}
+
+refresh_all() {  # every configured set; 1 only if all of them failed (one working is enough to
+  # leave the fast start-up retries; the others are retried on the normal schedule)
+  ok=0; tried=0
+  if [ -n "$HOSTS" ]; then tried=1; if refresh; then ok=1; else
+    echo "soc-net: HTTPS hosts not resolved: $HOSTS" >&2; fi; fi
+  if [ -n "${SMTP_HOST:-}" ]; then tried=1
+    if refresh_set egress_smtp4 "SMTP port $SMTP_PORT" "$SMTP_HOST"; then ok=1; else
+      echo "soc-net: mail server not resolved: $SMTP_HOST" >&2; fi; fi
+  [ "$tried" = 0 ] || [ "$ok" = 1 ]
+}
+
+local_mail_host() {  # true for blank, localhost or a non-public IPv4 literal: nothing to open
+  case "$1" in
+    ""|localhost|*.localhost) return 0 ;;
+    *[!0-9.]*) return 1 ;;  # a name: resolved and checked later
+  esac
+  ! public_ipv4 "$1"
+}
+
+valid_smtp_port() {  # only the mail submission and relay ports
+  case "$1" in 25|465|587) return 0 ;; esac
+  return 1
 }
 
 [ "${NETGUARD_LIB:-}" = 1 ] && return 0 2>/dev/null  # sourced by tests: functions only
@@ -92,6 +130,25 @@ HOSTS="$*"
 for h in $HOSTS; do
   valid_host "$h" || { echo "soc-net: bad host name in SOC_EGRESS_HOSTS: $h" >&2; exit 1; }
 done
+SMTP_HOST=$(printf '%s' "${SOC_EGRESS_SMTP_HOST:-}" | tr -d ' ')
+SMTP_PORT=${SOC_EGRESS_SMTP_PORT:-}
+if [ -z "$SMTP_PORT" ]; then  # the SOC's own default: 465 for implicit TLS, else 587
+  case "${SOC_EGRESS_SMTP_SECURITY:-}" in ssl|SSL) SMTP_PORT=465 ;; *) SMTP_PORT=587 ;; esac
+fi
+if local_mail_host "$SMTP_HOST"; then
+  # A test receiver inside the SOC's own container (lab/README.md): loopback needs no exception.
+  [ -z "$SMTP_HOST" ] || echo "soc-net: mail server $SMTP_HOST is local; no SMTP exception" >&2
+  SMTP_HOST=""
+fi
+# The email exception is optional: a value it can't use leaves email blocked, never the SOC down.
+if [ -n "$SMTP_HOST" ] && ! valid_host "$SMTP_HOST"; then
+  echo "soc-net: LAB_SMTP_HOST is not a plain host name; no SMTP exception, email stays blocked" >&2
+  SMTP_HOST=""
+fi
+if [ -n "$SMTP_HOST" ] && ! valid_smtp_port "$SMTP_PORT"; then
+  echo "soc-net: LAB_SMTP_PORT must be 25, 465 or 587 for the SMTP exception; email stays blocked" >&2
+  SMTP_HOST=""
+fi
 
 GW=$(ip -4 route show default | awk '{print $3; exit}')
 ip route del default 2>/dev/null || true
@@ -99,6 +156,7 @@ ip route del default 2>/dev/null || true
 nft -f - <<'NFT'
 table inet socguard {
   set egress4 { type ipv4_addr; flags timeout; }
+  set egress_smtp4 { type ipv4_addr; flags timeout; }
   chain input {
     type filter hook input priority 0; policy drop;
     iif lo accept
@@ -114,9 +172,12 @@ table inet socguard {
   }
 }
 NFT
+if [ -n "$SMTP_HOST" ]; then  # the port is validated above (25, 465 or 587)
+  nft add rule inet socguard output ip daddr @egress_smtp4 tcp dport "$SMTP_PORT" accept
+fi
 
-if [ -n "$HOSTS" ] && [ -z "$GW" ]; then
-  echo "soc-net: no Docker gateway for SOC_EGRESS_HOSTS" >&2; exit 1
+if { [ -n "$HOSTS" ] || [ -n "$SMTP_HOST" ]; } && [ -z "$GW" ]; then
+  echo "soc-net: no Docker gateway for SOC_EGRESS_HOSTS / SOC_EGRESS_SMTP_HOST" >&2; exit 1
 fi
 if ip route | grep -q '^default'; then
   echo "soc-net: default route still present, refusing to start" >&2
@@ -124,15 +185,16 @@ if ip route | grep -q '^default'; then
 fi
 touch /tmp/ready  # the SOC starts either way; the exception is optional
 
-if [ -z "$HOSTS" ]; then
+if [ -z "$HOSTS" ] && [ -z "$SMTP_HOST" ]; then
   while :; do sleep 3600 & wait $!; done
 fi
-# Until the first success (DNS down at start, say) retry often; nothing is allowed meanwhile.
-until refresh; do
-  echo "soc-net: could not resolve $HOSTS yet; nothing allowed, retrying in ${RETRY_SECONDS}s" >&2
+# Until the first success (DNS down at start, say) retry often; what failed stays closed meanwhile.
+until refresh_all; do
+  echo "soc-net: nothing resolved yet; retrying in ${RETRY_SECONDS}s" >&2
   sleep "$RETRY_SECONDS" & wait $!
 done
 while :; do
   sleep "$REFRESH_SECONDS" & wait $!
-  refresh || echo "soc-net: refresh failed; addresses already allowed expire after $KEEP" >&2
+  refresh_all || echo "soc-net: refresh failed; addresses already allowed expire after $KEEP" >&2
+  # (a set that failed while another worked has logged its own line above)
 done

@@ -73,13 +73,16 @@ esac
 [ ! -f "$FAKE/ip_fails" ]
 """
 FAKE_NFT = """#!/bin/sh
-# `nft -f -` adds the addresses it is given to $FAKE/set; `nft list set ...` prints them.
+# `nft -f -` adds the addresses it is given to the named set's file ($FAKE/set for egress4,
+# $FAKE/set_<name> for others); `nft list set inet socguard NAME` prints them.
+file_of() { if [ "$1" = egress4 ]; then echo "$FAKE/set"; else echo "$FAKE/set_$1"; fi; }
 case "$1" in
   -f) [ ! -f "$FAKE/nft_fails" ] || exit 1
       cat > "$FAKE/last_nft"
-      grep -oE '([0-9]+\\.){3}[0-9]+' "$FAKE/last_nft" >> "$FAKE/set"; sort -u "$FAKE/set" -o "$FAKE/set" ;;
-  list) echo "table inet socguard {"; echo "  set egress4 {"
-        printf '    elements = { %s }\\n' "$(sed 's/$/ timeout 1h expires 59m/' "$FAKE/set" 2>/dev/null | paste -sd, -)"
+      f=$(file_of "$(awk '{print $5; exit}' "$FAKE/last_nft")")
+      grep -oE '([0-9]+\\.){3}[0-9]+' "$FAKE/last_nft" >> "$f"; sort -u "$f" -o "$f" ;;
+  list) f=$(file_of "$5"); echo "table inet socguard {"; echo "  set $5 {"
+        printf '    elements = { %s }\\n' "$(sed 's/$/ timeout 1h expires 59m/' "$f" 2>/dev/null | paste -sd, -)"
         echo "  }"; echo "}" ;;
 esac
 """
@@ -165,3 +168,100 @@ def test_routes_of_expired_addresses_are_removed(fake):
     (fake / "routes").write_text("1.2.3.4\n")  # an address no longer in the set
     ok, _ = _refresh(fake, "api.example.com")
     assert ok and _lines(fake / "routes") == ["104.26.12.38"]
+
+
+# --- the email exception: one host, one port, its own set --------------------------------------
+
+def _refresh_all(fake, hosts, smtp_host, smtp_port="587"):
+    env = {**os.environ, "FAKE": str(fake), "PATH": f"{fake / 'bin'}:{os.environ['PATH']}"}
+    cmd = (f'NETGUARD_LIB=1; . "{SCRIPT}" || exit 9; HOSTS="$1"; SMTP_HOST="$2"; SMTP_PORT="$3"; '
+           'GW=10.0.0.1; if refresh_all; then echo OK; else echo FAIL; fi')
+    r = subprocess.run([SH, "-c", cmd, "sh", hosts, smtp_host, smtp_port], capture_output=True,
+                       text=True, env=env)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    return r.stdout.strip().splitlines()[-1] == "OK", r.stderr
+
+
+@pytest.mark.parametrize("port,ok", [("25", True), ("465", True), ("587", True), ("443", False),
+                                     ("22", False), ("5870", False), ("", False), ("58 7", False)])
+def test_only_mail_ports_are_accepted(port, ok):
+    assert _call("valid_smtp_port", port) is ok
+
+
+def test_the_mail_server_goes_in_its_own_set_not_the_https_one(fake):
+    _dns(fake, "api.example.com", "104.26.12.38")
+    _dns(fake, "smtp.example.com", "142.250.4.108", "10.1.1.1")
+    ok, err = _refresh_all(fake, "api.example.com", "smtp.example.com")
+    assert ok
+    assert _lines(fake / "set") == ["104.26.12.38"]  # HTTPS set unchanged by email
+    assert _lines(fake / "set_egress_smtp4") == ["142.250.4.108"]  # private answer refused
+    assert _lines(fake / "routes") == ["104.26.12.38", "142.250.4.108"]  # both keep their routes
+    assert "SMTP port 587 allowed to smtp.example.com" in err
+
+
+def test_email_only_works_without_https_hosts(fake):
+    _dns(fake, "smtp.example.com", "142.250.4.108")
+    ok, _ = _refresh_all(fake, "", "smtp.example.com")
+    assert ok and _lines(fake / "set") == [] and _lines(fake / "set_egress_smtp4") == ["142.250.4.108"]
+
+
+def test_an_unresolvable_mail_server_does_not_hold_up_https(fake):
+    _dns(fake, "api.example.com", "104.26.12.38")
+    ok, err = _refresh_all(fake, "api.example.com", "missing.example.com")
+    assert ok  # one set working ends the fast start-up retries
+    assert _lines(fake / "set") == ["104.26.12.38"] and _lines(fake / "set_egress_smtp4") == []
+    assert "mail server not resolved: missing.example.com" in err
+
+
+def test_nothing_resolved_at_all_fails(fake):
+    ok, _ = _refresh_all(fake, "missing.example.com", "nomail.example.com")
+    assert not ok
+
+
+@pytest.mark.parametrize("host,local", [("", True), ("localhost", True), ("127.0.0.1", True),
+                                        ("10.10.3.5", True), ("smtp.gmail.com", False),
+                                        ("142.250.4.108", False)])
+def test_a_local_test_mail_server_needs_no_exception(host, local):
+    assert _call("local_mail_host", host) is local
+
+
+def _run(fake, script):
+    env = {**os.environ, "FAKE": str(fake), "PATH": f"{fake / 'bin'}:{os.environ['PATH']}"}
+    r = subprocess.run([SH, "-c", f'NETGUARD_LIB=1; . "{SCRIPT}" || exit 9; GW=10.0.0.1; {script}'],
+                       capture_output=True, text=True, env=env)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    return r.stderr
+
+
+def test_an_https_refresh_keeps_the_mail_route_and_vice_versa(fake):
+    _dns(fake, "api.example.com", "104.26.12.38")
+    _dns(fake, "smtp.example.com", "142.250.4.108")
+    (fake / "set_egress_smtp4").write_text("142.250.4.108\n")
+    (fake / "routes").write_text("142.250.4.108\n")
+    _run(fake, 'HOSTS=api.example.com; SMTP_HOST=smtp.example.com; refresh')
+    assert _lines(fake / "routes") == ["104.26.12.38", "142.250.4.108"]
+    _run(fake, 'HOSTS=api.example.com; SMTP_HOST=smtp.example.com; '
+               'refresh_set egress_smtp4 SMTP smtp.example.com')
+    assert _lines(fake / "routes") == ["104.26.12.38", "142.250.4.108"]
+
+
+def test_a_stale_mail_route_is_removed_and_a_shared_one_kept(fake):
+    _dns(fake, "smtp.example.com", "142.250.4.108")
+    (fake / "set").write_text("104.26.12.38\n")  # also an HTTPS address
+    (fake / "routes").write_text("104.26.12.38\n9.9.9.9\n")  # 9.9.9.9 is in no set
+    _run(fake, 'HOSTS=""; SMTP_HOST=smtp.example.com; refresh_set egress_smtp4 SMTP smtp.example.com')
+    assert _lines(fake / "routes") == ["104.26.12.38", "142.250.4.108"]
+
+
+def test_the_allowed_log_line_is_written_once(fake):
+    _dns(fake, "smtp.example.com", "142.250.4.108")
+    err = _run(fake, 'HOSTS=""; SMTP_HOST=smtp.example.com; SMTP_PORT=587; '
+                     'refresh_all; refresh_all')
+    assert err.count("SMTP port 587 allowed") == 1
+
+
+@pytest.mark.parametrize("host,local", [("foo.localhost", True), ("1.2", False), ("::1", False)])
+def test_more_local_host_cases(host, local):
+    # Not local: "1.2" is resolved like a name and every answer is checked by public_ipv4; "::1"
+    # is then refused by valid_host in the main section (email stays blocked, the SOC starts).
+    assert _call("local_mail_host", host) is local

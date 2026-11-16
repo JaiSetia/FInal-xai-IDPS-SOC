@@ -717,6 +717,12 @@ class StubSMTP:
     def send_message(self, msg, from_addr=None, to_addrs=None):
         self.calls.append(("send", from_addr, tuple(to_addrs)))
 
+    def quit(self):
+        self.calls.append("quit")
+
+    def close(self):
+        pass
+
 
 @pytest.mark.parametrize("mode,cls", [("starttls", "SMTP"), ("ssl", "SMTP_SSL")])
 def test_email_uses_starttls_or_ssl_and_logs_in(soc_settings, monkeypatch, mode, cls):
@@ -1884,3 +1890,143 @@ def test_a_direct_variable_wins_over_its_file(soc_settings, tmp_path, monkeypatc
     with pytest.raises(ValueError, match="cannot be read") as e:
         mk()
     assert "from-" not in str(e.value)
+
+
+# --- a real STARTTLS conversation (no stubs): the bug that made Gmail fail ----------------------
+
+class _StartTlsServer:
+    """A tiny SMTP server on 127.0.0.1 that offers STARTTLS with a certificate for "localhost",
+    accepts AUTH PLAIN and records what it got. Just enough of SMTP for smtplib."""
+
+    def __init__(self, tmp_path):
+        import socket
+        import threading
+
+        from soc.api import pki
+
+        ca_key, ca = pki.make_ca("test smtp CA")
+        key, cert = _server_cert_for(ca_key, ca, "localhost")
+        self.ca_file = tmp_path / "smtp-ca.pem"
+        pki.write_public(self.ca_file, pki.cert_pem(ca))
+        (tmp_path / "smtp.pem").write_bytes(pki.cert_pem(cert))
+        pki.write_private(tmp_path / "smtp.key", pki.key_pem(key))
+        self.ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self.ctx.load_cert_chain(tmp_path / "smtp.pem", tmp_path / "smtp.key")
+        self.sock = socket.socket()
+        self.sock.settimeout(10)  # never block a test run if the client does not connect
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(1)
+        self.port = self.sock.getsockname()[1]
+        self.got = {"tls": False, "auth": None, "rcpt": [], "data": b""}
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        try:
+            conn, _ = self.sock.accept()
+        except OSError:
+            return
+        finally:
+            self.sock.close()
+        f = conn.makefile("rwb")
+
+        def send(line):
+            f.write(line.encode() + b"\r\n")
+            f.flush()
+
+        send("220 localhost ESMTP test")
+        while True:
+            line = f.readline().decode().strip()
+            verb = line.split(" ", 1)[0].upper()
+            if verb in ("EHLO", "HELO"):
+                send("250-localhost")
+                send("250-AUTH PLAIN" if self.got["tls"] else "250-STARTTLS")
+                send("250 8BITMIME")
+            elif verb == "STARTTLS":
+                send("220 go ahead")
+                f.close()
+                conn = self.ctx.wrap_socket(conn, server_side=True)
+                f = conn.makefile("rwb")
+                self.got["tls"] = True
+            elif verb == "AUTH":
+                self.got["auth"] = line.split(" ", 2)[1:]
+                send("235 ok")
+            elif verb == "MAIL":
+                send("250 ok")
+            elif verb == "RCPT":
+                self.got["rcpt"].append(line)
+                send("250 ok")
+            elif verb == "DATA":
+                send("354 go")
+                while (chunk := f.readline()) not in (b".\r\n", b""):
+                    self.got["data"] += chunk
+                send("250 queued")
+            elif verb == "QUIT" or not line:
+                try:
+                    send("221 bye")
+                except OSError:
+                    pass
+                conn.close()
+                return
+            else:
+                send("502 no")
+
+
+def _server_cert_for(ca_key, ca, name):
+    from datetime import UTC, datetime, timedelta
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.now(UTC)
+    cert = (x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)]))
+            .issuer_name(ca.subject).public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=5)).not_valid_after(now + timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]), critical=False)
+            .sign(ca_key, hashes.SHA256()))
+    return key, cert
+
+
+def test_email_over_a_real_starttls_server_verifies_the_host_name(tmp_path, monkeypatch):
+    server = _StartTlsServer(tmp_path)
+    real = ssl.create_default_context
+    monkeypatch.setattr(channels.ssl, "create_default_context",
+                        lambda *a, **k: real(cafile=str(server.ca_file)))
+    s = mk(smtp_host="localhost", smtp_port=server.port, smtp_security="starttls",
+           smtp_username="user@example.com", smtp_password="app pass word xyzw",
+           smtp_from="idps@example.com", smtp_to="oncall@example.org")
+    r = runner_for(channels.EmailChannel, s)
+    r.process(ev())
+    status = r.status()
+    assert status["sent"] == 1, status
+    assert server.got["tls"] and server.got["auth"][0] == "PLAIN"
+    assert any("oncall@example.org" in x for x in server.got["rcpt"])
+
+
+@pytest.mark.parametrize("configured_host", ["127.0.0.1", "smtp.other.test"])
+def test_email_refuses_a_certificate_for_another_host_name(tmp_path, monkeypatch, configured_host):
+    """The certificate is for "localhost": a SOC configured with any other name must refuse it
+    (TLS error) and send nothing, never fall back to unverified TLS or plaintext."""
+    server = _StartTlsServer(tmp_path)
+    real = ssl.create_default_context
+    monkeypatch.setattr(channels.ssl, "create_default_context",
+                        lambda *a, **k: real(cafile=str(server.ca_file)))
+    real_connect = channels.smtplib.SMTP.connect
+
+    def to_loopback(self, host="localhost", port=0, source_address=None):
+        return real_connect(self, "127.0.0.1", port, source_address)  # any name -> the test server
+
+    monkeypatch.setattr(channels.smtplib.SMTP, "connect", to_loopback)
+    s = mk(smtp_host=configured_host, smtp_port=server.port, smtp_security="starttls",
+           smtp_username="user@example.com", smtp_password="app pass word xyzw",
+           smtp_from="idps@example.com", smtp_to="oncall@example.org",
+           notify_max_attempts=1)  # the test server takes one connection
+    r = runner_for(channels.EmailChannel, s)
+    r.process(ev())
+    status = r.status()
+    assert status["sent"] == 0 and "TLS error" in (status["last_error"] or ""), status
+    assert server.got["auth"] is None and server.got["data"] == b""  # no password, no mail
