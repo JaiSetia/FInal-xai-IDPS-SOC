@@ -29,9 +29,9 @@ DEFAULT_SEVERITY_BY_CLASS = {
 # (Docker/Kubernetes secrets). Blank values (docker compose passes "" for an unset ${VAR:-}) mean
 # "not set" for every integration setting.
 SECRET_FIELDS = ("webhook_url", "webhook_secret", "slack_webhook_url", "smtp_password",
-                 "abuseipdb_key")
+                 "abuseipdb_key", "mfa_key", "oidc_client_secret")
 INTEGRATION_PREFIXES = ("notify_", "webhook_", "slack_", "smtp_", "email_", "syslog_",
-                        "abuseipdb_")
+                        "abuseipdb_", "oidc_", "mfa_", "sensor_mtls_")
 # Settings where a blank value (docker compose passes "" for an unset ${VAR:-}) also means unset.
 BLANK_IS_UNSET = ("alert_retention_days", "alert_retention_keep_labelled", "audit_retention_days",
                   "assistant_retention_days", "closed_case_retention_days", "auto_migrate")
@@ -55,6 +55,36 @@ class SocSettings(BaseSettings):
     login_max_failures: int = Field(default=5, ge=1, le=100)
     login_max_failures_per_ip: int = Field(default=20, ge=1, le=1000)
     login_lockout_minutes: int = Field(default=15, ge=1, le=24 * 60)
+    # --- MFA (soc/api/mfa.py, docs/soc.md "MFA") ------------------------------------------------
+    # Admins must use an authenticator app: an admin without one is asked to enrol at login and
+    # gets no access token until they do. Analysts may turn it on themselves.
+    mfa_required_for_admins: bool = True
+    # Encrypts the stored TOTP secrets and keys the recovery-code hashes. Optional: derived from
+    # the JWT secret when unset (then changing IDPS_SOC_JWT_SECRET means everyone enrols again).
+    mfa_key: SecretStr | None = None
+    mfa_issuer: str = Field(default="IDPS SOC", min_length=1, max_length=40,
+                            pattern=r"^[A-Za-z0-9 ._-]+$")  # the name shown in the app
+    mfa_challenge_minutes: int = Field(default=10, ge=1, le=60)  # time to type the code
+    mfa_max_failures: int = Field(default=5, ge=1, le=100)  # wrong codes per user per lockout
+    # --- mutual TLS for sensors (soc/api/serve.py, docs/soc.md "Sensor certificates") -----------
+    # When on, sensor endpoints only accept requests that came in on the mutual-TLS listener with
+    # a client certificate whose common name is the sensor's name; anything else gets 401.
+    sensor_mtls_required: bool = False
+    # --- single sign-on with OpenID Connect (soc/api/oidc.py). Off unless issuer is set. ------
+    oidc_issuer: str | None = None  # e.g. https://login.example.com/realms/soc (https only)
+    oidc_client_id: str | None = None
+    oidc_client_secret: SecretStr | None = None
+    # Where the identity provider sends the browser back: the dashboard's /auth/callback page.
+    oidc_redirect_uri: str | None = None
+    oidc_scopes: str = "openid profile email"
+    # The ID token claim matched to an existing SOC username the first time; after that the
+    # account is linked to the provider's subject id and only that is used. Nobody gets an
+    # account by signing in: an admin creates it first.
+    oidc_username_claim: str = Field(default="preferred_username", pattern=r"^[A-Za-z0-9_.:-]+$")
+    oidc_button_label: str = Field(default="Sign in with single sign-on", max_length=60)
+    oidc_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    # DEV/LAB ONLY: allow an http:// issuer (a local test provider).
+    oidc_allow_http: bool = False
     # Severity = base severity of the class, lowered one level when the model is unsure.
     severity_by_class: dict[str, str] = Field(
         default_factory=lambda: dict(DEFAULT_SEVERITY_BY_CLASS))
@@ -230,6 +260,36 @@ class SocSettings(BaseSettings):
         if value is not None and not _EMAIL.match(value.strip()):
             raise ValueError("IDPS_SOC_SMTP_FROM must be a plain email address")
         return None if value is None else value.strip()
+
+    @field_validator("mfa_key")
+    @classmethod
+    def _mfa_key_long_enough(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and len(value.get_secret_value()) < MIN_SECRET_LENGTH:
+            raise ValueError(f"IDPS_SOC_MFA_KEY must be at least {MIN_SECRET_LENGTH} characters")
+        return value
+
+    @model_validator(mode="after")
+    def _oidc_complete(self) -> "SocSettings":
+        if self.oidc_issuer is None:
+            return self
+        self.oidc_issuer = self.oidc_issuer.strip().rstrip("/")
+        scheme = ("https://", "http://") if self.oidc_allow_http else ("https://",)
+        if not self.oidc_issuer.startswith(scheme) or any(c in self.oidc_issuer for c in "?# "):
+            raise ValueError("IDPS_SOC_OIDC_ISSUER must be an https:// address without a query")
+        missing = [n for n in ("oidc_client_id", "oidc_client_secret", "oidc_redirect_uri")
+                   if getattr(self, n) is None]
+        if missing:
+            raise ValueError("single sign-on needs " + ", ".join(
+                f"IDPS_SOC_{n.upper()}" for n in missing))
+        if not re.match(r"^https?://[^\s?#]+$", self.oidc_redirect_uri or ""):
+            raise ValueError("IDPS_SOC_OIDC_REDIRECT_URI must be an http(s) address")
+        if "openid" not in self.oidc_scopes.split():
+            raise ValueError("IDPS_SOC_OIDC_SCOPES must include openid")
+        return self
+
+    @property
+    def mfa_master_key(self) -> str:
+        return (self.mfa_key or self.jwt_secret).get_secret_value()
 
     @field_validator("jwt_secret")
     @classmethod

@@ -12,6 +12,8 @@ COPY idps ./idps
 COPY soc ./soc
 # Trained models are copied in because bind mounts of ~/Desktop are blocked on macOS.
 COPY models ./models
+# The public key models must be signed with, if you made one (lab/keys/README.md).
+COPY lab/keys ./keys
 
 # Install the project into a venv (Ubuntu 24.04 blocks system-wide pip installs).
 # requirements.lock pins exact versions so shap/numpy/xgboost don't drift apart.

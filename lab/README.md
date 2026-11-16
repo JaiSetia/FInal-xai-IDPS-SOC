@@ -30,7 +30,7 @@ Instead:
   with each rule bound to its interface and strict reverse-path filtering. It never forwards to
   or from `lab_mgmt`, and nothing on `mgmt_net` can open a connection to it.
 - **The SOC can't reach anything by default.** It runs with no capabilities in the namespace of
-  `soc-net` ([soc/netguard.sh](soc/netguard.sh)): no default route, inbound TCP 8443 only,
+  `soc-net` ([soc/netguard.sh](soc/netguard.sh)): no default route, inbound TCP 8443 only (and 8444 from the sensor),
   outbound replies only. Its port is published on `127.0.0.1` only, for the dashboard.
   - **Opt-in exception:** `LAB_SOC_EGRESS_HOSTS` in `.env` (for example `api.abuseipdb.com`,
     `hooks.slack.com`) allows HTTPS, TCP 443 only, to the public IPv4 addresses those names
@@ -74,6 +74,28 @@ docker compose exec attacker /attacks/replay.sh /tmp/capture.pcap
 admin user `admin` (password `LAB_SOC_ADMIN_PASSWORD` from `.env`; change it later in the
 dashboard's Admin page) and a sensor token. The certificate and the token go to a volume the
 sensor mounts read-only at `/run/idps-soc`; keys, secret and database stay in the SOC's own volume.
+
+**Step 11 security in the lab** (docs/soc.md, "Security"):
+
+- **Two-factor sign-in.** The first time `admin` signs in to the dashboard, it asks you to set up
+  an authenticator app (scan the QR code with your phone) and shows 10 recovery codes: keep them.
+  The lab check user used by the scripts was enrolled with `python -m soc.api mfa-enrol labcheck
+  --secret-file /var/lib/idps-soc/labcheck_totp`; `scripts/bench_benign.py` reads that file from
+  the SOC container (never printing it). A lost phone (both settings come from the SOC process, PID 1; without the
+  same JWT secret the CLI would encrypt with another MFA key):
+
+  ```sh
+  docker compose exec soc sh -c 'export IDPS_SOC_DATABASE_URL=$(tr "\0" "\n" </proc/1/environ | sed -n "s/^IDPS_SOC_DATABASE_URL=//p") IDPS_SOC_JWT_SECRET=$(cat /var/lib/idps-soc/jwt_secret); cd /opt/idps && python -m soc.api mfa-reset admin'
+  ```
+
+  `mfa-enrol` is run the same way.
+- **Sensor certificate.** `bootstrap.py` issues the sensor a client certificate (common name =
+  its name at the SOC) from a sensor CA whose key is deleted right after. The SOC listens on 8443
+  (dashboard) and 8444 (sensors only, certificate required; the firewall accepts 8444 only from
+  10.10.3.2), and `live.sh` uses 8444 with the certificate. `LAB_SOC_SENSOR_MTLS=false` in `.env`
+  goes back to the token alone on 8443.
+- **Signed models.** With `lab/keys/model-signing.pub` present (see [keys/README.md](keys/README.md)),
+  the sensor refuses models without a valid signature from your key.
 
 To open the dashboard, run it from `soc/web` against the published port, trusting the lab CA:
 

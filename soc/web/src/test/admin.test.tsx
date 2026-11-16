@@ -98,8 +98,9 @@ describe("auditGroup", () => {
     expect(AUDIT_GROUPS.blocks).toEqual(["ingest_blocks"]);
     expect(AUDIT_GROUPS.alerts).toEqual(["ingest_alerts", "alert_status", "reputation_lookup"]);
     expect(AUDIT_GROUPS.cases).toEqual(["case_create", "case_update", "case_delete", "case_note", "case_attach", "case_detach"]);
-    expect(AUDIT_GROUPS.users).toEqual(["user_create", "user_role", "user_disable", "user_enable", "user_reset_password", "sensor_create", "sensor_revoke",
-      "sensor_status_first", "sensor_status_changed", "integration_test"]);
+    expect(AUDIT_GROUPS.users).toEqual(["user_create", "user_role", "user_disable", "user_enable", "user_reset_password", "user_mfa_reset",
+      "user_sso_unlink", "mfa_enable", "mfa_disable", "mfa_recovery_code_used", "mfa_recovery_codes_replaced", "sso_link",
+      "sensor_create", "sensor_revoke", "sensor_status_first", "sensor_status_changed", "integration_test"]);
   });
   it.each(["action_proposed", "user_login", "assistant_chat", "case_created", "ingest_other", "alert_", "action_", "", "login_failed"])(
     "%j is other (exact names only)", (a) => { expect(auditGroup(a)).toBe("other"); });

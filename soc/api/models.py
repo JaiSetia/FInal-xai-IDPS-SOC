@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     or_,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -42,6 +43,21 @@ class User(Base):
     # Bumped on password change or disable: every token issued before it stops working.
     token_version: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    # --- MFA (soc/api/mfa.py) ---------------------------------------------------------------
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # The TOTP secret, encrypted (AES-GCM, key from IDPS_SOC_MFA_KEY or the JWT secret).
+    totp_secret: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # A secret being enrolled, until the user proves it with a code (then it becomes totp_secret).
+    totp_pending: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # The last 30-second step a code was accepted for: a code is never accepted twice.
+    totp_last_step: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # HMACs of the unused one-time recovery codes (the codes themselves are shown once).
+    recovery_codes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # --- single sign-on (soc/api/oidc.py): the identity provider account linked to this user
+    oidc_issuer: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    oidc_subject: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    __table_args__ = (Index("ux_users_oidc", "oidc_issuer", "oidc_subject", unique=True),)
 
 
 class SensorToken(Base):

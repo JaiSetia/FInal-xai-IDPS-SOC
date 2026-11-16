@@ -86,7 +86,7 @@ def test_file_mode_header_and_secret_free(tmp_path):
     lines = gzip.decompress(out.read_bytes()).split(b"\n")
     header = json.loads(lines[0])
     assert header["format"] == backup.FORMAT and header["version"] == 1
-    assert header["alembic_revision"] == migrate.BASELINE and len(header["body_sha256"]) == 64
+    assert header["alembic_revision"] == migrate.head_revision() and len(header["body_sha256"]) == 64
 
 
 def test_refusals(tmp_path):

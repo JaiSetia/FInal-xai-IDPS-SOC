@@ -92,6 +92,39 @@ def decode_access_token(token: str, *, secret: str) -> dict:
     return claims
 
 
+# --- MFA challenge tokens ---------------------------------------------------------------
+# After a correct password (or a single sign-on), a user who has MFA, or an admin who must enrol,
+# gets one of these instead of an access token. A different audience, so it can never be used as
+# an access token; it names what it is for ("verify" or "enrol") and the user's token_version.
+
+CHALLENGE_AUDIENCE = "idps-soc-mfa"
+CHALLENGE_PURPOSES = ("verify", "enrol")
+
+
+def create_challenge_token(*, user_id: int, token_version: int, purpose: str, secret: str,
+                           minutes: int) -> str:
+    if purpose not in CHALLENGE_PURPOSES:
+        raise ValueError(f"unknown challenge purpose {purpose!r}")
+    now = datetime.now(UTC)
+    claims = {"sub": str(user_id), "ver": token_version, "purpose": purpose, "iat": now,
+              "nbf": now, "exp": now + timedelta(minutes=minutes), "iss": ISSUER,
+              "aud": CHALLENGE_AUDIENCE, "jti": uuid.uuid4().hex}
+    return jwt.encode(claims, secret, algorithm=ALGORITHM)
+
+
+def decode_challenge_token(token: str, *, secret: str, purpose: str) -> dict:
+    try:
+        claims = jwt.decode(
+            token, secret, algorithms=[ALGORITHM], audience=CHALLENGE_AUDIENCE, issuer=ISSUER,
+            options={"require": ["sub", "ver", "purpose", "exp", "iat", "iss", "aud"]})
+    except jwt.PyJWTError as exc:
+        raise TokenError(str(exc)) from exc
+    if (not str(claims["sub"]).isdigit() or not isinstance(claims["ver"], int)
+            or claims["purpose"] != purpose):
+        raise TokenError("malformed or wrong-purpose challenge")
+    return claims
+
+
 # --- sensor API tokens ------------------------------------------------------------------
 
 SENSOR_TOKEN_PREFIX = "idps_sensor_"

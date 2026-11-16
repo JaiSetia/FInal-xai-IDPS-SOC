@@ -44,6 +44,17 @@ function Users({ onChanged }: { onChanged: () => void }) {
     }
   }
 
+  async function resetMfa(u: AdminUser) {
+    if (!window.confirm(`Reset two-factor sign-in for ${u.username}? They are signed out, and `
+      + (u.role === "admin" ? "must set it up again at their next sign-in." : "can sign in with their password only."))) return;
+    setNotice(null);
+    const r = await act.run(() => api<AdminUser>(`/admin/users/${u.id}/mfa/reset`, { method: "POST" }));
+    if (r) {
+      setNotice(`Two-factor sign-in reset for ${r.username}.`);
+      void reload();
+    }
+  }
+
   async function toggle(u: AdminUser) {
     const verb = u.disabled ? "Enable" : "Disable";
     if (!u.disabled && !window.confirm(`Disable ${u.username}? They are signed out and can't sign in.`)) return;
@@ -102,7 +113,15 @@ function Users({ onChanged }: { onChanged: () => void }) {
                       <option value="admin">admin</option>
                     </select>
                   </td>
-                  <td><Pill tone={u.disabled ? "danger" : "ok"}>{u.disabled ? "disabled" : "active"}</Pill></td>
+                  <td>
+                    <div className="row-actions">
+                      <Pill tone={u.disabled ? "danger" : "ok"}>{u.disabled ? "disabled" : "active"}</Pill>
+                      {u.mfa_enabled
+                        ? <Pill tone="ok">2FA on</Pill>
+                        : <Pill tone={u.role === "admin" ? "warn" : "neutral"}>2FA off</Pill>}
+                      {u.sso_linked && <Pill tone="neutral">SSO</Pill>}
+                    </div>
+                  </td>
                   <td style={{ textAlign: "right" }}>
                     <div className="row-actions" style={{ justifyContent: "flex-end", alignItems: "center" }}>
                       {/* The only way to change a password in the app, so it stays on your own row too. */}
@@ -112,6 +131,13 @@ function Users({ onChanged }: { onChanged: () => void }) {
                         aria-label={`${self ? "Change your password" : `Reset password of ${u.username}`}`}>
                         {self ? "Change password" : "Reset password"}
                       </button>
+                      {/* For a lost phone: they set it up again at their next sign-in. */}
+                      {u.mfa_enabled && !self && (
+                        <button className="small" disabled={act.busy} onClick={() => void resetMfa(u)}
+                          aria-label={`Reset two-factor sign-in of ${u.username}`}>
+                          Reset 2FA
+                        </button>
+                      )}
                       {/* Disabling or demoting yourself would lock you out of this page. */}
                       {self ? <span className="muted">you</span> : (
                         <button className={`small${u.disabled ? "" : " danger-soft"}`} disabled={act.busy}
@@ -290,7 +316,9 @@ export const AUDIT_GROUPS: Record<Exclude<AuditGroup, "all">, string[]> = {
   blocks: ["ingest_blocks"],
   alerts: ["ingest_alerts", "alert_status", "reputation_lookup"],
   cases: ["case_create", "case_update", "case_delete", "case_note", "case_attach", "case_detach"],
-  users: ["user_create", "user_role", "user_disable", "user_enable", "user_reset_password", "sensor_create", "sensor_revoke",
+  users: ["user_create", "user_role", "user_disable", "user_enable", "user_reset_password", "user_mfa_reset",
+    "user_sso_unlink", "mfa_enable", "mfa_disable", "mfa_recovery_code_used", "mfa_recovery_codes_replaced", "sso_link",
+    "sensor_create", "sensor_revoke",
     "sensor_status_first", "sensor_status_changed", "integration_test"],
 };
 

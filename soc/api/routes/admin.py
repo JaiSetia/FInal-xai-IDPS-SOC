@@ -30,6 +30,14 @@ class UserAdminOut(BaseModel):
     role: Role
     disabled: bool
     created_at: datetime
+    mfa_enabled: bool = False
+    sso_linked: bool = False  # signed in with single sign-on at least once
+
+
+def _user_out(user: User) -> "UserAdminOut":
+    out = UserAdminOut.model_validate(user)
+    out.sso_linked = user.oidc_subject is not None
+    return out
 
 
 class UserCreate(BaseModel):
@@ -102,7 +110,7 @@ _LAST_ADMIN = "refused: this would leave no enabled admin"
 
 @router.get("/users", response_model=list[UserAdminOut])
 def list_users(admin: AdminUser, db: Annotated[Session, Depends(get_db)]):
-    return [UserAdminOut.model_validate(u) for u in db.scalars(select(User).order_by(User.id))]
+    return [_user_out(u) for u in db.scalars(select(User).order_by(User.id))]
 
 
 @router.post("/users", response_model=UserAdminOut, status_code=201)
@@ -115,7 +123,7 @@ def create_user(body: UserCreate, admin: AdminUser, db: Annotated[Session, Depen
         db.rollback()
         code = 422 if isinstance(exc, PasswordPolicyError) else 409
         raise HTTPException(code, str(exc)) from exc
-    return UserAdminOut.model_validate(user)
+    return _user_out(user)
 
 
 @router.patch("/users/{user_id}/role", response_model=UserAdminOut)
@@ -129,7 +137,7 @@ def change_role(user_id: int, body: RoleChange, admin: AdminUser,
     audit(db, admin, "user_role", f"user:{user.username}",
           {"from": old.value, "to": body.role.value})
     db.commit()
-    return UserAdminOut.model_validate(user)
+    return _user_out(user)
 
 
 def _set_disabled(user_id: int, admin: User, db: Session, disabled: bool) -> UserAdminOut:
@@ -138,7 +146,7 @@ def _set_disabled(user_id: int, admin: User, db: Session, disabled: bool) -> Use
         raise HTTPException(409, _LAST_ADMIN)
     audit(db, admin, "user_disable" if disabled else "user_enable", f"user:{user.username}")
     auth.set_disabled(db, user, disabled)  # also ends the user's sessions; commits
-    return UserAdminOut.model_validate(user)
+    return _user_out(user)
 
 
 @router.post("/users/{user_id}/disable", response_model=UserAdminOut)
@@ -161,7 +169,34 @@ def reset_password(user_id: int, body: PasswordReset, admin: AdminUser,
     except PasswordPolicyError as exc:
         db.rollback()
         raise HTTPException(422, str(exc)) from exc
-    return UserAdminOut.model_validate(user)
+    return _user_out(user)
+
+
+@router.post("/users/{user_id}/mfa/reset", response_model=UserAdminOut)
+def reset_mfa(user_id: int, admin: AdminUser, db: Annotated[Session, Depends(get_db)]):
+    """For a user who lost their phone and recovery codes: removes their MFA and logs them out.
+    An admin is then asked to enrol again at their next login."""
+    user = get_or_404(db, User, user_id, "user")
+    if not user.mfa_enabled and not user.totp_pending:
+        raise HTTPException(409, "MFA is not on for this user")
+    audit(db, admin, "user_mfa_reset", f"user:{user.username}")
+    auth.clear_mfa(user)
+    db.commit()
+    return _user_out(user)
+
+
+@router.post("/users/{user_id}/sso/unlink", response_model=UserAdminOut)
+def unlink_sso(user_id: int, admin: AdminUser, db: Annotated[Session, Depends(get_db)]):
+    """Forget the identity provider account linked to this user (the next single sign-on links
+    by username again). Logs the user out."""
+    user = get_or_404(db, User, user_id, "user")
+    if user.oidc_subject is None:
+        raise HTTPException(409, "no single sign-on account is linked to this user")
+    audit(db, admin, "user_sso_unlink", f"user:{user.username}")
+    user.oidc_issuer = user.oidc_subject = None
+    user.token_version += 1
+    db.commit()
+    return _user_out(user)
 
 
 # --- sensors ----------------------------------------------------------------------------

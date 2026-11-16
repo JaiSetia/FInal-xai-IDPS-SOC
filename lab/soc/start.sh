@@ -101,7 +101,12 @@ python /opt/idps/lab/soc/bootstrap.py "$SHARED/sensor_token"
 # has no effect: change it in the dashboard's Admin page instead.)
 unset LAB_SOC_ADMIN_PASSWORD
 
-# One process: the live alert feed is an in-process broadcaster (see soc/api/main.py).
-exec uvicorn soc.api.main:app --host 0.0.0.0 --port 8443 \
-  --ws-max-size 65536 \
-  --ssl-keyfile "$DATA/server.key" --ssl-certfile "$DATA/server.pem"
+# One process, two listeners (soc/api/serve.py): 8443 for the dashboard (and, unless mutual TLS
+# is required, sensors), 8444 for sensors only, with a client certificate signed by the sensor CA
+# that bootstrap.py made. One process because the live alert feed is an in-process broadcaster.
+# LAB_SOC_SENSOR_MTLS=false lets sensors use 8443 with their token alone again.
+IDPS_SOC_SENSOR_MTLS_REQUIRED="${LAB_SOC_SENSOR_MTLS:-true}"
+export IDPS_SOC_SENSOR_MTLS_REQUIRED
+exec python -m soc.api.serve --host 0.0.0.0 --port 8443 --ws-max-size 65536 \
+  --ssl-keyfile "$DATA/server.key" --ssl-certfile "$DATA/server.pem" \
+  --sensor-port 8444 --sensor-ca "$DATA/sensor-ca.pem"

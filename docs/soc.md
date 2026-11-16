@@ -50,7 +50,11 @@ The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep thei
 | Method and path | Who | Purpose |
 |---|---|---|
 | `GET /health` | public | Liveness |
-| `POST /auth/login`, `GET /auth/me` | public, user | Login; current user |
+| `POST /auth/login`, `GET /auth/me` | public, user | Login (an access token, or an MFA step: see "Security"); current user, with `mfa_enabled` and `mfa_required` |
+| `POST /auth/mfa/verify` | MFA step token | The code (or a recovery code) after the password: an access token |
+| `POST /auth/mfa/enrol/start`, `/enrol/confirm` | user, or an admin's "enrol" step token | New secret with its QR code; turn MFA on with a code (returns the recovery codes, once) |
+| `POST /auth/mfa/disable`, `/auth/mfa/recovery-codes` | user | Turn MFA off (password and code; not where it is required); replace the recovery codes |
+| `GET /auth/oidc/config`, `POST /auth/oidc/start`, `/auth/oidc/callback` | public | Single sign-on, when configured: whether it is on, the provider address, finishing the sign-in |
 | `POST /ingest/alerts` | sensor | Batch of 1 to 500 alerts; stores and broadcasts them |
 | `GET /alerts` | user | Filters: `severity` (repeatable), `predicted_class`, `ip` (source or destination), `status`, `source` (`ml` or `rule`), `since`, `until` (timezone required) |
 | `GET /alerts/{id}`, `PATCH /alerts/{id}` | user | Detail with explanation (empty for rule alerts); set `status` (new, acknowledged, false_positive, resolved) |
@@ -73,7 +77,7 @@ The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep thei
 | `POST /cases/{id}/alerts`, `DELETE /cases/{id}/alerts/{alert_id}` | user | Attach or detach alerts (an alert is in at most one case) |
 | `GET /metrics/summary?hours=24` | user | Alerts per bucket (hourly up to 72 h, else daily), by class and severity, `by_source` (`{"ml": n, "rule": n}`, always both keys), top 10 sources, false-positive rate, detection latency p50/p95, active blocks, `would_blocks` (dry-run decisions in the window), `by_class_per_day` (cached for 60 s; last 7 UTC days whatever `hours` is: `[{day, class, count}]`, non-zero pairs only, classes beyond the top 25 as `(other)`), `anomaly_per_day` (same 7 days and cache: `[{day, count}]`, alerts the Isolation Forest also flagged, non-zero days only) |
 | `GET /topology?hours=1` | user | Nodes (host, alert count, max severity) and edges (src to dst, count, max severity) |
-| `GET/POST /admin/users`, `PATCH /admin/users/{id}/role`, `POST /admin/users/{id}/disable`, `/enable`, `/reset-password` | admin | User management |
+| `GET/POST /admin/users`, `PATCH /admin/users/{id}/role`, `POST /admin/users/{id}/disable`, `/enable`, `/reset-password`, `/mfa/reset`, `/sso/unlink` | admin | User management |
 | `GET/POST /admin/sensors`, `POST /admin/sensors/{id}/revoke` | admin | Sensors; the token is returned once, on creation |
 | `GET /admin/retention` | admin | The retention policy and the last run (time, rows deleted per table, error); see "Retention" |
 | `GET /admin/audit` | admin | Audit log, filter by `actor` and `action` (repeat `action` for several, up to 20) |
@@ -151,7 +155,7 @@ Rules worth knowing:
   sensor): by `Content-Length` when sent, and by counting streamed bytes (chunked bodies) until the
   limit. 10 MiB for `/ingest/alerts` (500 alerts x 16 KiB explanation fit), 128 KiB `/ingest/blocks`
   and `/cases`, 64 KiB `/sensor/status` and `/assistant`, 16 KiB `/actions`, `/sensor/actions` and
-  `/admin`, 4 KiB `/auth/login`, 256 KiB anything else. A malformed `Content-Length` is a 400. The
+  `/admin`, 4 KiB `/auth/login`, 8 KiB the rest of `/auth`, 256 KiB anything else. A malformed `Content-Length` is a 400. The
   Caddyfile in `infra/templates/soc-user-data.sh.tftpl` also sets `request_body { max_size 11MiB }`,
   `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`.
 - **Sensor-supplied text.** Interface, model and sensor-version names in a status report are
@@ -211,6 +215,112 @@ Rules worth knowing:
   restarts and are not shared between processes, so run one process or move them to the
   database or Redis before scaling out. Behind a reverse proxy, use uvicorn's `--proxy-headers`
   so the client IP is the real one.
+
+## Security (roadmap step 11)
+
+### Two-factor sign-in (TOTP)
+
+- **Admins must use it** (`IDPS_SOC_MFA_REQUIRED_FOR_ADMINS`, default on). An admin who has not
+  set it up gets no access token at login: the answer is `{"mfa": "enrol", "mfa_token": ...}` and
+  the dashboard walks them through it (scan a QR code with Google/Microsoft Authenticator, Authy
+  …, type a code, save the 10 recovery codes). Analysts can turn it on from the Account page.
+- **Login with MFA:** `POST /auth/login` answers `{"mfa": "verify", "mfa_token": ...}`; then
+  `POST /auth/mfa/verify {"mfa_token", "code"}` gives the access token. The `mfa_token` is a JWT
+  with its own audience (`idps-soc-mfa`): it can never be used as an access token, works for
+  `IDPS_SOC_MFA_CHALLENGE_MINUTES` (10), and stops working when the user's sessions are revoked.
+- **Codes:** RFC 6238 (6 digits, 30 s, SHA-1), one step of clock skew either way. A code is never
+  accepted twice: the last used step is stored and moved forward with a conditional UPDATE, so of
+  two requests with the same code only one wins. Wrong codes count per user (from any address):
+  after `IDPS_SOC_MFA_MAX_FAILURES` (5) the account's MFA step is locked for
+  `IDPS_SOC_LOGIN_LOCKOUT_MINUTES`. Trade-off: someone who already knows the password can keep a
+  user locked out of the MFA step by sending wrong codes (so can someone with a stolen session,
+  with wrong passwords at enrolment) (a per-address limit alone would let a
+  botnet guess codes). Treat repeated lockouts as a sign the password is stolen: change it.
+- **Recovery codes:** 10 codes of 10 characters (50 bits each), shown once. Only an HMAC-SHA256
+  of each is stored. Using one logs out the user's other sessions and is audited
+  (`mfa_recovery_code_used`, with how many are left). `POST /auth/mfa/recovery-codes` replaces them.
+- **Stored secret:** encrypted with AES-256-GCM, the user id as associated data. The key comes
+  from `IDPS_SOC_MFA_KEY` (32+ characters; `_FILE` works too), or from the JWT secret when that is
+  not set. Changing that key, or restoring a backup into a SOC with another key, means users set
+  MFA up again (an admin resets it). Backups contain the encrypted secrets, never the key.
+- **Turning it on or off** logs out every other session (`token_version`). Turning it on from a
+  signed-in session needs the password again (`enrol/start` with `password`), so a stolen session
+  token cannot put its own authenticator on the account. Analysts turn it off with their password
+  and a code (`POST /auth/mfa/disable`); admins cannot while it is required. On these signed-in
+  calls a wrong password or code is a **403**, not a 401, so a typo does not end the session.
+- **Lost phone and codes:** an admin presses *Reset 2FA* on the Admin page
+  (`POST /admin/users/{id}/mfa/reset`, audited). The last admin: `python -m soc.api mfa-reset
+  <username>` on the SOC host. Scripted accounts: `python -m soc.api mfa-enrol <user>
+  --secret-file PATH` writes the secret to a 0600 file and never prints it.
+- **Known gap:** the first enrolment of an admin is protected by the password only. Set up MFA
+  for every admin right after creating them (or pre-enrol with `mfa-enrol`), and keep the
+  password policy (12+ characters).
+
+### Single sign-on (OpenID Connect, optional)
+
+Off unless `IDPS_SOC_OIDC_ISSUER` is set (with `_CLIENT_ID`, `_CLIENT_SECRET`, `_REDIRECT_URI`
+= the dashboard's `/auth/callback`, e.g. `https://soc.example.com/auth/callback`). The login page
+then shows a *Sign in with single sign-on* button. Authorization code flow with PKCE (S256); the
+SOC is a confidential client (client secret at the token endpoint). The ID token is checked
+completely: signature with the provider's published keys (asymmetric algorithms only, never
+`none` or a shared-secret HS*), issuer, audience, `azp`, expiry, issued-at and the nonce. The
+state works once and only in the browser that started the sign-in (a binding secret kept in
+sessionStorage), which stops login CSRF.
+
+- **Nobody gets an account by signing in.** An admin creates the user first. The first sign-in
+  matches `IDPS_SOC_OIDC_USERNAME_CLAIM` (default `preferred_username`; `email` only when the
+  provider says it is verified) to the SOC username and links the provider's subject id to the
+  account (`sso_link`, audited); after that only the subject id is used. Use a claim users cannot
+  change themselves at the provider. An **admin is linked only once they have MFA**: otherwise a
+  provider account with the same name could reach the "enrol" step and register an attacker's
+  authenticator. Disabled accounts are never linked. *Unlink SSO* on the Admin page undoes a link.
+- **MFA still applies:** an admin who signs in through the provider is asked for their
+  authenticator code (or to enrol) exactly as after a password.
+- The provider's metadata and keys are cached for an hour; a token with an unknown key id makes
+  the SOC fetch the keys again once (a key the provider removes keeps working for up to that
+  hour). The SOC needs outbound HTTPS to the provider (in the lab, add its host to
+  `LAB_SOC_EGRESS_HOSTS`), and every endpoint in the provider's metadata must be https. Pending
+  sign-ins are kept in memory (one process), at most 10 per client address (older ones are
+  dropped), so a flood of starts cannot lock single sign-on out. Pass the client secret as
+  `IDPS_SOC_OIDC_CLIENT_SECRET_FILE` rather than in the environment where you can.
+
+### Sensor certificates (mutual TLS)
+
+`python -m soc.api.serve` runs the API on two listeners in one process: the main port (dashboard)
+and a **sensor port** that requires a client certificate signed by `--sensor-ca`:
+
+```sh
+python -m soc.api sensor-ca --out-dir ca/                       # once; keep ca/sensor-ca.key offline
+python -m soc.api create-sensor edge-1                          # the token
+python -m soc.api sensor-cert edge-1 --ca-dir ca/ --out-dir certs/
+IDPS_SOC_SENSOR_MTLS_REQUIRED=true python -m soc.api.serve --host 0.0.0.0 --port 8443 \
+    --ssl-keyfile server.key --ssl-certfile server.pem --sensor-port 8444 --sensor-ca ca/sensor-ca.pem
+```
+
+On the sensor: `IDPS_SOC_URL=https://soc:8444`, `IDPS_SOC_CLIENT_CERT=certs/edge-1.pem`,
+`IDPS_SOC_CLIENT_KEY=certs/edge-1.key`, plus the token as before.
+
+- A client without a certificate, or with one from another CA, fails the TLS handshake: it never
+  reaches the application.
+- The certificate's common name must be the name of the sensor whose token comes with the
+  request, so a stolen token is useless without that sensor's private key, and one sensor's
+  certificate cannot speak for another.
+- The sensor port serves only `/ingest/*`, `/sensor/*` and `/health`.
+- With `IDPS_SOC_SENSOR_MTLS_REQUIRED=true`, sensor requests on the main port get 401.
+- To cut a sensor off, revoke its token (Admin page); its certificate alone is not enough.
+  There is no certificate revocation list.
+- The SOC must terminate TLS itself (`soc.api.serve`). Behind a TLS-terminating proxy, such as the
+  Caddy of the AWS deployment (`infra/`), the client certificate never reaches the SOC: there,
+  leave `IDPS_SOC_SENSOR_MTLS_REQUIRED` off.
+- uvicorn does not pass client certificates to applications, so the sensor listener uses a small
+  subclass of uvicorn's h11 protocol (`MtlsH11Protocol`); `tests/test_soc_mtls.py` runs a real
+  server and fails if a uvicorn upgrade breaks it.
+
+### Signed models
+
+See [live.md](live.md#signed-models): the sensor refuses a model without a valid Ed25519
+signature from the configured public key, and reports the key id it checked (`model.signed_by`
+in `/sensors/status`).
 
 ## Live feed (single process)
 

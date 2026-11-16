@@ -143,7 +143,13 @@ def run(args: argparse.Namespace) -> int:
 
     model_path = args.model or settings.model_path
     try:
-        bundle = load_bundle(model_path, live_meta=meta, live_columns=FEATURE_COLUMNS)
+        public_key = None
+        if live.model_public_key:  # loaded once: the key that checks the model is the one reported
+            from idps.detect.signing import load_public_key
+
+            public_key = load_public_key(live.model_public_key)
+        bundle = load_bundle(model_path, live_meta=meta, live_columns=FEATURE_COLUMNS,
+                             public_key=public_key)
     except Exception as exc:  # noqa: BLE001  unpickling can fail in any way; all of them mean "no model"
         return _fail(f"cannot load the model {model_path}: {exc}\n"
                      "refusing to run without a model that matches this capture setup "
@@ -156,6 +162,14 @@ def run(args: argparse.Namespace) -> int:
     except (BlockerError, ValueError, OSError) as exc:
         return _fail(f"response engine: {exc}")
 
+    signed_by = None  # key id of the verified signature (load_bundle refused a bad one)
+    if public_key is not None:
+        from idps.detect.signing import key_id
+
+        signed_by = key_id(public_key)
+        log.info("model signature verified (key %s)", signed_by)
+    else:
+        log.warning("model signatures are not checked (IDPS_MODEL_PUBLIC_KEY is not set)")
     try:
         digest = read_digest(model_path)  # load_bundle verified it matches the loaded bytes
     except (OSError, ValueError):
@@ -171,7 +185,8 @@ def run(args: argparse.Namespace) -> int:
     try:
         if live.soc_configured:
             client = SocClient(live.soc_url, live.soc_token.get_secret_value(),
-                               timeout=SOC_SEND_TIMEOUT, ca_file=live.soc_ca_file)
+                               timeout=SOC_SEND_TIMEOUT, ca_file=live.soc_ca_file,
+                               client_cert=live.soc_client_cert, client_key=live.soc_client_key)
             outbox = Outbox(live.outbox_file, max_alerts=live.outbox_max_alerts, merge=True,
                             max_rule_alerts=live.outbox_max_rule_alerts)
             sink = SocSink(client.post_alerts, outbox, metrics, post_blocks=client.post_blocks)
@@ -250,7 +265,7 @@ def run(args: argparse.Namespace) -> int:
                 engine=engine, bundle=bundle, live_settings=live, metrics=metrics, sink=sink,
                 heartbeat=heartbeat, interface=args.interface,
                 faithfulness=faithfulness, model_sha256=digest, drift=drift,
-                extended=live.send_features,
+                extended=live.send_features, signed_by=signed_by,
                 rules=forwarder.status() if forwarder is not None else None),
                 interval=live.status_seconds)
             reporter.start()

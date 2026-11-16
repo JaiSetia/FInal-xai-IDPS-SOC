@@ -167,6 +167,10 @@ export interface AdminUser {
   role: Role;
   disabled: boolean;
   created_at: string;
+  /** Missing from older SOCs. */
+  mfa_enabled?: boolean;
+  /** Signed in with single sign-on at least once (linked to a provider account). */
+  sso_linked?: boolean;
 }
 
 export interface Sensor {
@@ -204,7 +208,9 @@ export interface SensorReport {
   interface: string | null;
   mode: "live" | "replay";
   /** sha256 and version are missing or null from older sensors. */
-  model: { name: string; checksum_ok: boolean; sha256?: string | null; version?: string | null };
+  model: { name: string; checksum_ok: boolean; sha256?: string | null; version?: string | null;
+    /** Key id of the verified model signature; missing when the sensor does not check them. */
+    signed_by?: string | null };
   /** Suricata next to the model; missing or null from sensors that don't send it. */
   rules?: RulesStatus | null;
   /** Live traffic against the model's training data; missing or null from older sensors. */

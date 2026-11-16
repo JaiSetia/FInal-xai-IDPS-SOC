@@ -27,6 +27,7 @@ LIMITS: tuple[tuple[str, int], ...] = (
     ("/sensor/actions", 16 * KiB),       # a result is at most 4 KiB (MAX_RESULT_BYTES)
     ("/actions", 16 * KiB),
     ("/auth/login", 4 * KiB),            # username 64 + password 256
+    ("/auth", 8 * KiB),                  # MFA steps (a 2 KiB challenge token), SSO callback
     ("/assistant", 64 * KiB),            # a 4000 character message, escaped
     ("/cases", 128 * KiB),               # a 10,000 character note, escaped; 100 alert ids
     ("/admin", 16 * KiB),

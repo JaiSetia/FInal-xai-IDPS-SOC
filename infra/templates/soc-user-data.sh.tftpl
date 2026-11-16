@@ -124,10 +124,13 @@ services:
       PYTHONPATH: /repo
       PYTHONDONTWRITEBYTECODE: "1"
     # The API needs only these packages (not the ML stack); versions come from the lock file.
+    # tests/test_soc_step11_hardening.py checks this list covers what soc.api imports.
+    # Mutual TLS for sensors is not available here: Caddy terminates TLS in front of the API
+    # (docs/soc.md, "Sensor certificates"); keep IDPS_SOC_SENSOR_MTLS_REQUIRED off.
     command: >
       sh -c "pip install --no-cache-dir -c /repo/requirements.lock
       fastapi uvicorn websockets sqlalchemy pydantic pydantic-settings pyjwt anthropic geoip2
-      argon2-cffi 'psycopg[binary]'
+      argon2-cffi 'psycopg[binary]' alembic cryptography segno
       && exec uvicorn soc.api.main:app --host 0.0.0.0 --port 8000
       --proxy-headers --forwarded-allow-ips='*' --ws-max-size 65536"
     # No published ports: only Caddy, on the same network, reaches the API.

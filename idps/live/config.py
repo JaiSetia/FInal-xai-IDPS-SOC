@@ -60,6 +60,16 @@ class LiveSettings(BaseSettings):
         validation_alias=AliasChoices("IDPS_SOC_SENSOR_TOKEN", "IDPS_SOC_TOKEN"))
     soc_ca_file: str | None = Field(
         default=None, validation_alias=AliasChoices("IDPS_SOC_CA_FILE"))
+    # Mutual TLS (a SOC with a sensor listener, soc/api/serve.py): this sensor's certificate,
+    # whose common name is the sensor's name at the SOC, and its private key.
+    soc_client_cert: str | None = Field(
+        default=None, validation_alias=AliasChoices("IDPS_SOC_CLIENT_CERT"))
+    soc_client_key: str | None = Field(
+        default=None, validation_alias=AliasChoices("IDPS_SOC_CLIENT_KEY"))
+    # Signed models (idps.detect.signing): the public key models must be signed with. When set,
+    # the sensor refuses a model without a valid `<model>.sig` from that key.
+    model_public_key: str | None = Field(
+        default=None, validation_alias=AliasChoices("IDPS_MODEL_PUBLIC_KEY"))
 
     @field_validator("soc_token", mode="before")
     @classmethod
@@ -70,7 +80,8 @@ class LiveSettings(BaseSettings):
             return validate_token(value)  # ValueError text never contains the token
         return value
 
-    @field_validator("soc_url", "soc_ca_file", "soc_token", mode="before")
+    @field_validator("soc_url", "soc_ca_file", "soc_token", "soc_client_cert", "soc_client_key",
+                     "model_public_key", mode="before")
     @classmethod
     def _blank_is_unset(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():

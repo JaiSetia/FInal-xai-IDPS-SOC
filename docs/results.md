@@ -554,3 +554,51 @@ portable, checksummed backup moves a SOC between SQLite and PostgreSQL. Old data
 schedule (alerts 180 days, audit 365, assistant chats 90; labelled alerts kept as training data),
 which step 13's privacy work builds on. Moving the lab's 1.08M alerts took under 3 minutes with no
 loss, and PostgreSQL made the dashboard summary 2–3 times faster.
+
+## Security: MFA, single sign-on, sensor certificates and signed models (16 November 2026)
+
+Roadmap step 11. Built by Opus; reviewed and security-audited by a separate Sonnet reviewer.
+
+### Lab checks
+
+| Check | Result |
+|---|---|
+| Admin signs in with password only | No access token: asked to set up an authenticator app (QR code), then 10 recovery codes |
+| Same TOTP code used twice; 8 requests with one code at once | Refused; exactly one of the 8 succeeds |
+| Recovery code | Works once, logs out other sessions, audited |
+| Sensor on the sensor port (8444) without a certificate | Cut off in the TLS handshake, before any HTTP |
+| Sensor token alone on the main port (8443) | 401 |
+| One sensor's certificate with another sensor's token | 401 (tests) |
+| Real lab sensor over mutual TLS during a port scan | 1,280 alerts delivered, outbox empty |
+| Signed model | Loads; the sensor reports the key id (`0cb723d4e5506565`) to the SOC |
+| Unsigned model / model changed by one byte (sha256 rewritten to match) | Refused before unpickling |
+| Migration 0002 on the lab's PostgreSQL (1.08M alerts) | Applied at start-up; `db check` clean |
+
+### Security audit
+
+No critical findings and no way around MFA, the certificate check or the signature check. Fixed
+before commit: the cloud SOC's package list (it lacked cryptography, segno and alembic), turning
+MFA on from a session now needs the password (a stolen session token could otherwise lock the
+owner out), atomic enrolment, provider network errors returning 500, wrong lab instructions, and a
+typo on the Account page logging the user out. Hardened: an admin is linked to a single sign-on
+account only once they have MFA; disabled users are never linked; a flood of SSO starts cannot
+lock sign-on out. Accepted and documented: someone with the password can keep a user's MFA step
+locked; a signed older model can be put back (rollback); mutual TLS needs the SOC to terminate
+TLS itself (not behind the AWS deployment's Caddy); the first enrolment of an admin is protected
+by the password only.
+
+### Tests
+
+Full suite: 1,996 Python tests passed, 29 skipped (PostgreSQL-only); 981 dashboard tests passed.
+New: TOTP vectors and replay (also concurrent), MFA flows and lockouts, 80 single sign-on cases
+against a fake provider (algorithm confusion, nonce, audience, issuer, azp, state reuse, browser
+binding, key rotation, account linking), a real two-port server for mutual TLS (no certificate,
+wrong CA, another sensor's certificate, keep-alive), 57 model-signing cases, migration 0002 up and
+down, and the dashboard's MFA and SSO screens.
+
+### Summary for the report
+
+The IDPS now protects itself, not only the network: admins need a second factor, sensors prove
+who they are with certificates bound to their names, and the sensor refuses any model that is not
+signed by the person who approved it, so a tampered model cannot quietly blind detection.
+

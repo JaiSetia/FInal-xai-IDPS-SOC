@@ -35,6 +35,34 @@ process will use (extractor from `IDPS_EXTRACTOR`, default `nfstream`, idle and 
 120 s). A missing, tampered or unreadable model, or one trained with a different extractor or
 timeouts, ends the run with exit code 2 and a message. There is no "detection without a model" mode.
 
+## Signed models
+
+Unpickling a model runs code, so the sensor must only load models you made. The `.sha256` file
+next to a bundle catches accidents, but whoever can write the bundle can write that file too. A
+signature closes the gap: the private key stays with whoever approves models (never on a sensor).
+
+```sh
+python -m idps.detect keygen --out ~/.idps/model-signing        # .key (0600) and .pub
+python -m idps.detect sign models/week_xgboost_fb1.joblib --key ~/.idps/model-signing.key
+python -m idps.detect verify models/week_xgboost_fb1.joblib --public-key ~/.idps/model-signing.pub
+IDPS_MODEL_PUBLIC_KEY=~/.idps/model-signing.pub python -m idps.live --model models/week_xgboost_fb1.joblib ...
+```
+
+With `IDPS_MODEL_PUBLIC_KEY` set, the sensor refuses to start on a model without a valid
+`<model>.sig` from that key: unsigned, signed by another key, or changed by even one byte since
+it was signed (also when the `.sha256` was rewritten to match). The check runs on the exact bytes
+that are then unpickled. `verify` checks a signature without unpickling anything. The status
+report carries the key id (`model.signed_by`), so the dashboard shows which sensors check
+signatures. Without the setting the sensor logs a warning and loads as before.
+
+- **Retrained models must be signed again.** `python -m idps.detect retrain` writes a new bundle
+  without a `.sig`; a sensor that checks signatures refuses it until you run `sign`.
+- **Rollback is not prevented.** The signature covers the bundle's bytes, not its version or a
+  date, so someone who can write the sensor's model folder could put back an older model you
+  signed. Keep that folder writable by root only, and delete the signatures of models you retire.
+- In the lab, signatures are checked only when `lab/keys/model-signing.pub` exists (it is your
+  own key, so a fresh clone has none and runs unsigned with a warning).
+
 ## Settings
 
 Shared with the rest of the IDPS: `IDPS_MODEL_PATH`, `IDPS_DRY_RUN` (default `true`),

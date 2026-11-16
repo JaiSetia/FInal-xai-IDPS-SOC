@@ -42,12 +42,12 @@ def test_a_new_database_is_migrated_and_matches_the_models(tmp_path):
 
 def test_adoption_stamps_a_matching_old_database_and_refuses_a_different_one(tmp_path):
     engine = make_engine(f"sqlite:///{tmp_path / 'old.db'}")
-    Base.metadata.create_all(engine)
-    init_db(engine)
+    migrate.baseline_metadata().create_all(engine)  # as made before migrations existed
+    init_db(engine)  # adopted (stamped 0001), then upgraded to the newest revision
     with engine.connect() as conn:
-        assert migrate.current_revision(conn) == migrate.BASELINE
+        assert migrate.current_revision(conn) == migrate.head_revision()
     other = make_engine(f"sqlite:///{tmp_path / 'odd.db'}")
-    Base.metadata.create_all(other)
+    migrate.baseline_metadata().create_all(other)
     with other.begin() as conn:
         conn.execute(text("ALTER TABLE users DROP COLUMN role"))  # a required column is gone
     with pytest.raises(migrate.SchemaError, match="users.role"):

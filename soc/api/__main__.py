@@ -2,6 +2,11 @@
 
     python -m soc.api create-user <username> --role admin|analyst   (asks for the password)
     python -m soc.api create-sensor <name>                           (prints the token once)
+    python -m soc.api sensor-ca --out-dir DIR                (mutual TLS: a CA for sensor certs)
+    python -m soc.api sensor-cert <name> --ca-dir DIR --out-dir OUT   (a sensor's certificate)
+    python -m soc.api mfa-reset <username>          (lost phone and recovery codes; logs them out)
+    python -m soc.api mfa-enrol <username> --secret-file PATH   (scripted accounts: writes the
+                                     TOTP secret to PATH, mode 0600, and never prints it)
     python -m soc.api db upgrade | current | check   [--database-url URL]
     python -m soc.api prune [--dry-run]              [--database-url URL]   (retention, once)
     python -m soc.api backup OUT.jsonl.gz            [--database-url URL]
@@ -54,6 +59,103 @@ def _create_sensor(args) -> int:
             return 1
     print("Sensor token (shown once; store it in the sensor's IDPS_SOC_SENSOR_TOKEN):")
     print(token)
+    return 0
+
+
+def _mfa_reset(args) -> int:
+    from sqlalchemy import select
+
+    from soc.api.common import audit
+    from soc.api.models import User
+
+    with _session() as db:
+        user = db.scalar(select(User).where(User.username == args.username))
+        if user is None:
+            print(f"error: no user {args.username!r}", file=sys.stderr)
+            return 1
+        auth.clear_mfa(user)
+        db.add(user)
+        audit(db, user, "user_mfa_reset", f"user:{user.username}", {"by": "cli"})
+        db.commit()
+    print(f"MFA removed for {args.username!r}; they enrol again at their next login")
+    return 0
+
+
+def _mfa_enrol(args) -> int:
+    """Enrol an account used by scripts (the lab's check user): the secret goes to a new file
+    only. The recovery codes are not kept (the account can be reset with mfa-reset)."""
+    from sqlalchemy import select
+
+    from soc.api import mfa
+    from soc.api.common import audit
+    from soc.api.models import User
+
+    settings = get_settings()
+    keys = mfa.MfaKeys(settings.mfa_master_key)
+    with _session() as db:
+        user = db.scalar(select(User).where(User.username == args.username))
+        if user is None:
+            print(f"error: no user {args.username!r}", file=sys.stderr)
+            return 1
+        if user.mfa_enabled and not args.replace:
+            print(f"error: MFA is already on for {args.username!r} (--replace to change it)",
+                  file=sys.stderr)
+            return 1
+        secret = mfa.new_secret()
+        try:
+            fd = os.open(args.secret_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        except OSError as exc:
+            print(f"error: cannot write {args.secret_file}: {exc.strerror}", file=sys.stderr)
+            return 1
+        with os.fdopen(fd, "w") as f:
+            os.fchmod(f.fileno(), 0o600)
+            f.write(secret + "\n")
+        user.totp_secret = keys.encrypt(secret, user.id)
+        user.totp_pending = None
+        user.totp_last_step = None
+        user.recovery_codes = []
+        user.mfa_enabled = True
+        user.token_version += 1
+        audit(db, user, "mfa_enable", f"user:{user.username}", {"by": "cli"})
+        db.commit()
+    print(f"MFA on for {args.username!r}; secret written to {args.secret_file}")
+    return 0
+
+
+def _sensor_ca(args) -> int:
+    from pathlib import Path
+
+    from soc.api import pki
+
+    out = Path(args.out_dir)
+    if (out / "sensor-ca.key").exists():
+        print(f"error: {out / 'sensor-ca.key'} exists; refusing to replace a CA", file=sys.stderr)
+        return 1
+    out.mkdir(parents=True, exist_ok=True)
+    key, cert = pki.make_ca(days=args.days)
+    pki.write_private(out / "sensor-ca.key", pki.key_pem(key))
+    pki.write_public(out / "sensor-ca.pem", pki.cert_pem(cert))
+    print(f"sensor CA written to {out}: give sensor-ca.pem to the SOC (--sensor-ca); keep "
+          "sensor-ca.key offline")
+    return 0
+
+
+def _sensor_cert(args) -> int:
+    from pathlib import Path
+
+    from soc.api import pki
+
+    out = Path(args.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    try:
+        ca_key, ca_cert = pki.load_ca(Path(args.ca_dir))
+        key, cert = pki.issue_client_cert(ca_key, ca_cert, args.name, days=args.days)
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    pki.write_private(out / f"{args.name}.key", pki.key_pem(key))
+    pki.write_public(out / f"{args.name}.pem", pki.cert_pem(cert))
+    print(f"certificate for sensor {args.name!r} written to {out} (IDPS_SOC_CLIENT_CERT/KEY)")
     return 0
 
 
@@ -179,6 +281,24 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("create-sensor")
     s.add_argument("name")
     s.set_defaults(fn=_create_sensor)
+    ca = sub.add_parser("sensor-ca", help="make a CA for sensor client certificates")
+    ca.add_argument("--out-dir", required=True)
+    ca.add_argument("--days", type=int, default=3650)
+    ca.set_defaults(fn=_sensor_ca)
+    sc = sub.add_parser("sensor-cert", help="issue a sensor's client certificate")
+    sc.add_argument("name", help="the sensor's name at the SOC")
+    sc.add_argument("--ca-dir", required=True)
+    sc.add_argument("--out-dir", required=True)
+    sc.add_argument("--days", type=int, default=365)
+    sc.set_defaults(fn=_sensor_cert)
+    m = sub.add_parser("mfa-reset", help="remove a user's MFA")
+    m.add_argument("username")
+    m.set_defaults(fn=_mfa_reset)
+    e = sub.add_parser("mfa-enrol", help="turn MFA on for a scripted account")
+    e.add_argument("username")
+    e.add_argument("--secret-file", required=True)
+    e.add_argument("--replace", action="store_true")
+    e.set_defaults(fn=_mfa_enrol)
     d = sub.add_parser("db", help="schema migrations")
     d.add_argument("db_cmd", choices=["upgrade", "current", "check"])
     d.set_defaults(fn=_guarded(_db))

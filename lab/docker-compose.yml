@@ -13,7 +13,7 @@
 # - The lab SOC sits on a third network, mgmt_net, shared only with the sensor
 #   (lab_mgmt). The sensor never forwards to or from it (rules bound to interfaces,
 #   strict reverse-path filtering), so attacker and victim can't reach the SOC.
-#   The SOC has no default route, accepts only TCP 8443 and opens no connections
+#   The SOC has no default route, accepts only TCP 8443 (and 8444 from the sensor) and opens no connections
 #   (soc/netguard.sh); its port is published on 127.0.0.1 only, for the dashboard.
 # - Every setup step fails closed: endpoints start only once their *-net
 #   container reports healthy.
@@ -127,7 +127,7 @@ services:
       - suricata_eve:/eve   # written by Suricata (root), read-only in the sensor
 
   soc-net:
-    # Holds the SOC's network namespace: no default route, inbound TCP 8443 only, outbound
+    # Holds the SOC's network namespace: no default route, inbound TCP 8443 (and 8444 from the sensor), outbound
     # replies only (soc/netguard.sh). The SOC itself has no capabilities to change that.
     # LAB_SOC_EGRESS_HOSTS (comma-separated host names, blank = none) opens HTTPS to just those
     # hosts, e.g. api.abuseipdb.com for IP reputation or hooks.slack.com for Slack.
@@ -188,6 +188,18 @@ services:
       LAB_SOC_ADMIN_PASSWORD: ${LAB_SOC_ADMIN_PASSWORD:-}
       # postgres (default; soc-db) or sqlite (the old soc.db file in the SOC's volume).
       LAB_SOC_DATABASE: ${LAB_SOC_DATABASE:-postgres}
+      # Sensors must use the mutual-TLS port 8444 with their certificate (lab/soc/bootstrap.py);
+      # false lets them use 8443 with the token alone.
+      LAB_SOC_SENSOR_MTLS: ${LAB_SOC_SENSOR_MTLS:-true}
+      # Admins sign in with a password and an authenticator app code (they set it up at their
+      # first sign-in). false turns that requirement off (lab only).
+      IDPS_SOC_MFA_REQUIRED_FOR_ADMINS: ${LAB_SOC_MFA_REQUIRED_FOR_ADMINS:-}
+      # Optional single sign-on (OpenID Connect); see docs/soc.md. Off while the issuer is blank.
+      # The SOC can reach the provider only if its host is in LAB_SOC_EGRESS_HOSTS.
+      IDPS_SOC_OIDC_ISSUER: ${LAB_SOC_OIDC_ISSUER:-}
+      IDPS_SOC_OIDC_CLIENT_ID: ${LAB_SOC_OIDC_CLIENT_ID:-}
+      IDPS_SOC_OIDC_CLIENT_SECRET: ${LAB_SOC_OIDC_CLIENT_SECRET:-}
+      IDPS_SOC_OIDC_REDIRECT_URI: ${LAB_SOC_OIDC_REDIRECT_URI:-}
       # Data retention (docs/soc.md, "Data retention"); blank keeps the SOC's defaults.
       IDPS_SOC_ALERT_RETENTION_DAYS: ${LAB_ALERT_RETENTION_DAYS:-}
       IDPS_SOC_AUDIT_RETENTION_DAYS: ${LAB_AUDIT_RETENTION_DAYS:-}

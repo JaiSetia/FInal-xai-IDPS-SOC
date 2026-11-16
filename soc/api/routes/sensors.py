@@ -68,6 +68,9 @@ class ModelInfo(StrictModel):
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{64}$")
     version: Text | None = Field(default=None, min_length=1, max_length=80)
     checksum_ok: StrictBool
+    # Key id of the signature the sensor checked before loading the model (idps.detect.signing);
+    # missing when the sensor does not check signatures.
+    signed_by: str | None = Field(default=None, pattern=r"^[0-9a-f]{16}$")
 
     @model_validator(mode="after")
     def _lower_sha(self):
@@ -346,6 +349,8 @@ def post_status(report: StatusReport, sensor: Sensor, request: Request,
     audit_state: SensorAuditState = request.app.state.sensor_audit
     now = datetime.now(UTC)
     payload = report.model_dump(mode="json")
+    if payload["model"].get("signed_by") is None:  # only sensors that check signatures send it
+        payload["model"].pop("signed_by", None)
     target = f"sensor:{sensor.name}"
     for attempt in (1, 2):
         # Everything that can hit the database is inside the try: with autoflush a query made

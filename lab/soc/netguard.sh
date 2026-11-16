@@ -3,7 +3,8 @@
 # capabilities, so nothing inside the SOC can change this). Fails closed like lab/netns/setup.sh.
 #
 # - No default route: the SOC reaches nothing outside 10.10.3.0/24.
-# - Inbound: only TCP 8443 (the sensor, and the dashboard through the published 127.0.0.1 port).
+# - Inbound: only TCP 8443 (the dashboard through the published 127.0.0.1 port; sensors too when
+#   mutual TLS is off) and TCP 8444 from the sensor's address 10.10.3.2 (the mutual-TLS sensor port).
 # - Outbound: only replies, by default. The SOC never opens a connection, so it can't reach the
 #   lab, the Docker host or the internet even if it were compromised.
 # - Optional exception (SOC_EGRESS_HOSTS, from LAB_SOC_EGRESS_HOSTS in lab/.env): HTTPS (TCP 443)
@@ -103,6 +104,7 @@ table inet socguard {
     iif lo accept
     ct state established,related accept
     tcp dport 8443 accept
+    ip saddr 10.10.3.2 tcp dport 8444 accept
   }
   chain output {
     type filter hook output priority 0; policy drop;

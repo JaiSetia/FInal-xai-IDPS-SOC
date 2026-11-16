@@ -307,6 +307,9 @@ function SensorHealth() {
           <dt>Model</dt>
           <dd>
             {st.model.name} {st.model.checksum_ok ? "· checksum ok" : "· checksum FAILED"}
+            {st.model.signed_by
+              ? <> · <span title={`Signature checked with key ${st.model.signed_by}`}>signed</span></>
+              : " · signature not checked"}
             {st.model.version && <><br /><span className="mono small-text">{st.model.version}</span></>}
           </dd>
           <dt>Rules</dt>

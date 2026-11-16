@@ -41,6 +41,7 @@ LAB = {"notify_allow_private": True, "notify_allow_http": True}  # local receive
 
 
 def mk(**kw) -> SocSettings:
+    kw.setdefault("mfa_required_for_admins", False)  # these tests log in with a password only
     return SocSettings(jwt_secret=TEST_SECRET, database_url="sqlite://",
                        block_allowlist=["10.10.1.1"], **kw)
 

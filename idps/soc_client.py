@@ -162,7 +162,10 @@ class SocClient:
     trust store is used and verification fails for the lab SOC. Verification is never switched off.
     """
 
-    def __init__(self, url: str, token: str, timeout: float = 15.0, ca_file: str | None = None) -> None:
+    def __init__(self, url: str, token: str, timeout: float = 15.0, ca_file: str | None = None,
+                 client_cert: str | None = None, client_key: str | None = None) -> None:
+        """`client_cert`/`client_key` (IDPS_SOC_CLIENT_CERT/KEY): the sensor's certificate and
+        private key (PEM) for a SOC that requires mutual TLS (soc/api/serve.py)."""
         parsed = urllib.parse.urlsplit(url)
         loopback = parsed.hostname in ("localhost", "127.0.0.1", "::1")
         if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
@@ -178,7 +181,17 @@ class SocClient:
                 context = ssl.create_default_context(cafile=ca_file)
             except (OSError, ssl.SSLError) as exc:
                 raise ValueError(f"cannot load IDPS_SOC_CA_FILE {ca_file!r}: {exc}") from exc
+            if (client_cert is None) != (client_key is None):
+                raise ValueError("IDPS_SOC_CLIENT_CERT and IDPS_SOC_CLIENT_KEY go together")
+            if client_cert is not None:
+                try:
+                    context.load_cert_chain(client_cert, client_key)
+                except (OSError, ssl.SSLError) as exc:  # never echo key material, only the path
+                    raise ValueError(f"cannot load the sensor certificate {client_cert!r} / key "
+                                     f"{client_key!r}: {type(exc).__name__}") from exc
             handlers.append(urllib.request.HTTPSHandler(context=context))
+        elif client_cert is not None:
+            raise ValueError("a client certificate needs an https:// IDPS_SOC_URL")
         self._opener = urllib.request.build_opener(*handlers)
 
     def post_alerts(self, alerts: list[dict]) -> dict:

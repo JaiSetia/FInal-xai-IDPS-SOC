@@ -12,7 +12,10 @@ from soc.api import __main__ as cli
 from soc.api import migrate
 from soc.api.db import Base, init_db, make_engine
 
+OLD = migrate.baseline_metadata  # the schema of every pre-migration database (0001)
+
 BASE = migrate.BASELINE
+HEAD = migrate.head_revision()  # what a fresh or adopted database ends at
 
 
 def _versions(engine):
@@ -32,7 +35,7 @@ def test_migration_matches_models_exactly(any_engine):
         assert compare_metadata(ctx, Base.metadata) == []
         conn.rollback()
     assert migrate.check(any_engine) == []
-    assert _versions(any_engine) == [BASE]
+    assert _versions(any_engine) == [HEAD]
 
 
 def test_db_check_cli_exit_codes(tmp_path, capsys):
@@ -41,7 +44,7 @@ def test_db_check_cli_exit_codes(tmp_path, capsys):
     assert "head" in capsys.readouterr().err
     assert cli.main(["db", "upgrade", "--database-url", url]) == 0
     assert cli.main(["db", "current", "--database-url", url]) == 0
-    assert BASE in capsys.readouterr().out
+    assert HEAD in capsys.readouterr().out
     assert cli.main(["db", "check", "--database-url", url]) == 0
     engine = make_engine(url)
     with engine.begin() as conn:
@@ -65,7 +68,7 @@ def test_downgrade_to_base_then_upgrade(any_engine):
 
 def _old_db(engine, drop_cols=(), drop_tables=()):
     """A database as before step 10: create_all, then rebuild some tables without columns."""
-    Base.metadata.create_all(engine)
+    OLD().create_all(engine)
     with engine.begin() as conn:
         for t in drop_tables:
             conn.execute(text(f"DROP TABLE {t}"))
@@ -86,7 +89,7 @@ def test_adoption_of_a_pre_step_10_database_keeps_data(any_engine):
                           "'2026-01-01 00:00:00')"))
     assert "model_versions" not in tables_in(any_engine)
     init_db(any_engine)
-    assert _versions(any_engine) == [BASE]
+    assert _versions(any_engine) == [HEAD]
     assert "model_versions" in tables_in(any_engine)
     cols = {c["name"] for c in inspect(any_engine).get_columns("alerts")}
     assert {"features", "model_version", "model_sha256", "rule"} <= cols
@@ -105,7 +108,7 @@ def test_adoption_refuses_a_missing_non_nullable_column(any_engine):
 def test_adoption_adds_a_missing_index(any_engine):
     # The old temporary upgrade only indexed columns it added, so old databases lack some of the
     # declared indexes on older columns (the lab had no ix_alerts_received_class_anomaly).
-    Base.metadata.create_all(any_engine)
+    OLD().create_all(any_engine)
     with any_engine.begin() as conn:
         conn.execute(text("DROP INDEX ix_alerts_dst_ip"))
         conn.execute(text("DROP INDEX ix_alerts_received_class_anomaly"))
@@ -113,11 +116,13 @@ def test_adoption_adds_a_missing_index(any_engine):
         "index ix_alerts_dst_ip", "index ix_alerts_received_class_anomaly"]
     names = {i["name"] for i in inspect(any_engine).get_indexes("alerts")}
     assert {"ix_alerts_dst_ip", "ix_alerts_received_class_anomaly"} <= names
+    with any_engine.begin() as conn:  # adoption stamps the baseline; later revisions follow
+        migrate.upgrade(conn)
     assert migrate.check(any_engine) == []
 
 
 def test_adoption_refuses_a_missing_required_column_with_a_one_line_error(any_engine):
-    Base.metadata.create_all(any_engine)
+    OLD().create_all(any_engine)
     with any_engine.begin() as conn:
         conn.execute(text("ALTER TABLE users DROP COLUMN role"))
     with pytest.raises(migrate.SchemaError, match="users.role") as exc:
@@ -137,7 +142,7 @@ def test_adoption_via_cli_reports_a_clear_error(tmp_path, capsys):
 def test_auto_migrate_off_behind_refused_empty_still_migrates(tmp_path, monkeypatch):
     empty = make_engine(f"sqlite:///{tmp_path / 'e.db'}")
     init_db(empty, auto_migrate=False)  # empty database: migrates anyway
-    assert _versions(empty) == [BASE]
+    assert _versions(empty) == [HEAD]
     monkeypatch.setattr(migrate, "head_revision", lambda: "0002_next")
     with pytest.raises(migrate.SchemaError, match="db upgrade"):
         init_db(empty, auto_migrate=False)
@@ -157,7 +162,7 @@ def test_a_database_with_no_model_tables_is_treated_as_empty(tmp_path):
         conn.execute(text("CREATE TABLE IF NOT EXISTS alembic_version "
                           "(version_num VARCHAR(32) NOT NULL PRIMARY KEY)"))
     init_db(engine, auto_migrate=False)  # no revision, no model tables: treated as empty
-    assert _versions(engine) == [BASE]
+    assert _versions(engine) == [HEAD]
 
 
 @needs_pg
@@ -178,13 +183,13 @@ def test_concurrent_ensure_schema_on_postgres(pg_engine):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert errors == []
-    assert _versions(pg_engine) == [BASE]
+    assert _versions(pg_engine) == [HEAD]
     assert migrate.check(pg_engine) == []
 
 
 @needs_pg
 def test_concurrent_adoption_on_postgres(pg_engine):
-    Base.metadata.create_all(pg_engine)
+    OLD().create_all(pg_engine)
     errors, barrier = [], threading.Barrier(3)
 
     def go():
@@ -201,7 +206,7 @@ def test_concurrent_adoption_on_postgres(pg_engine):
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert errors == []
-    assert _versions(pg_engine) == [BASE]
+    assert _versions(pg_engine) == [HEAD]
 
 
 @needs_pg
@@ -214,20 +219,13 @@ def test_advisory_lock_is_released(pg_engine):
 
 
 def test_adoption_refuses_when_a_missing_unique_index_breaks_on_the_data(any_engine):
-    from datetime import UTC, datetime
-
-    from sqlalchemy.orm import Session
-
-    from soc.api.models import Role, User
-
-    Base.metadata.create_all(any_engine)
+    OLD().create_all(any_engine)
     with any_engine.begin() as conn:
         conn.execute(text("DROP INDEX ix_users_username"))
-    now = datetime.now(UTC)
-    with Session(any_engine) as db:
-        for _ in range(2):
-            db.add(User(username="dup", password_hash="x", role=Role.ANALYST, created_at=now))
-        db.commit()
+        for _ in range(2):  # raw SQL: the old schema has no MFA columns for the ORM to fill
+            conn.execute(text("INSERT INTO users (username, password_hash, role, disabled, "
+                              "token_version, created_at) VALUES ('dup', 'x', 'analyst', false, "
+                              "0, '2026-01-01 00:00:00')"))
     with pytest.raises(migrate.SchemaError, match="ix_users_username") as exc:
         migrate.adopt(any_engine)
     assert "\n" not in str(exc.value)

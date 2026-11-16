@@ -33,7 +33,8 @@ def _version() -> str | None:
 def build_status(*, engine, bundle, live_settings, metrics, sink, heartbeat=None,
                  interface: str | None, checksum_ok: bool = True,
                  faithfulness: dict | None = None, model_sha256: str | None = None,
-                 drift=None, extended: bool = True, rules: dict | None = None) -> dict:
+                 drift=None, extended: bool = True, rules: dict | None = None,
+                 signed_by: str | None = None) -> dict:
     """The body of POST /sensor/status.
 
     `checksum_ok` is True because load_bundle() refuses to start on a bundle whose sha256 does
@@ -42,7 +43,8 @@ def build_status(*, engine, bundle, live_settings, metrics, sink, heartbeat=None
     `model_sha256` is the digest load_bundle verified. `drift` is an idps.detect.drift monitor
     (DriftMonitor or NoDrift); its report goes out as `drift`. `extended=False` leaves out the
     model digest/version, the drift and `rules` (an older SOC refuses unknown fields).
-    `rules` is idps.rules.forward's status (RuleForwarder.status or disabled_status)."""
+    `rules` is idps.rules.forward's status (RuleForwarder.status or disabled_status).
+    `signed_by` is the key id of the model signature checked at start-up (None: not checked)."""
     policy = engine.policy
     stats = metrics.status()
     payload = {
@@ -73,6 +75,8 @@ def build_status(*, engine, bundle, live_settings, metrics, sink, heartbeat=None
     if extended:
         payload["model"] |= {"sha256": model_sha256,
                              "version": clean(model_version(bundle, model_sha256))[:80]}
+        if signed_by is not None:  # the key id the model's signature was verified with
+            payload["model"]["signed_by"] = signed_by
         if drift is not None:
             payload["drift"] = drift.report()
         if rules is not None:

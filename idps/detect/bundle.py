@@ -133,9 +133,11 @@ def read_digest(path: str | Path) -> str:
     return parts[0].lower()
 
 
-def _read_verified(path: Path) -> bytes:
-    """The bundle's bytes, after checking permissions and the sha256 file. The same bytes are
-    unpickled, so the file cannot change between the check and the load."""
+def _read_verified(path: Path, public_key=None) -> bytes:
+    """The bundle's bytes, after checking permissions and the sha256 file, and (when
+    `public_key` is given: an Ed25519 public key, or a path to one) its `<bundle>.sig`
+    signature (idps.detect.signing). The same bytes are unpickled, so the file cannot change
+    between the checks and the load."""
     for p in (path, digest_path(path)):
         if p.exists() and p.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH):
             raise ValueError(f"{p} is group- or world-writable; refusing to load it "
@@ -150,21 +152,35 @@ def _read_verified(path: Path) -> bytes:
     if not hmac.compare_digest(hashlib.sha256(data).hexdigest(), expected):
         raise ValueError(f"{path} does not match {sha_file}; the model file was changed or "
                          "corrupted, refusing to load it")
+    if public_key is not None:
+        from idps.detect import signing
+
+        if not hasattr(public_key, "verify"):
+            public_key = signing.load_public_key(public_key)
+        try:
+            signing.verify_bytes(data, signing.read_signature(path), public_key)
+        except signing.SignatureError as exc:
+            raise ValueError(f"refusing to load {path}: {exc}") from None
     return data
 
 
 def load_bundle(path: str | Path = DEFAULT_MODEL_PATH, live_meta: dict | None = None,
                 live_columns: list[str] | None = None, *,
-                trust_unverified: bool = False) -> Bundle:
+                trust_unverified: bool = False, public_key=None) -> Bundle:
     """Load a bundle. Pass `live_meta` (extraction metadata of the data you will feed it) to
     refuse a mismatch immediately; `live_columns` likewise checks the model's features exist.
     Also refuses a bundle whose feature_columns layout differs from this code.
 
     Before unpickling, the sha256 file and the file permissions are checked (see the module
-    docstring). `trust_unverified=True` skips that; it exists for tests only."""
+    docstring), and with `public_key` the bundle's signature too: an unsigned bundle, or one
+    signed by another key or changed since, is refused before anything is unpickled.
+    `trust_unverified=True` skips all of that; it exists for tests only (and cannot be combined
+    with a public key)."""
     path = Path(path)
+    if trust_unverified and public_key is not None:
+        raise ValueError("trust_unverified cannot be combined with a public key")
     bundle = (joblib.load(path) if trust_unverified
-              else joblib.load(io.BytesIO(_read_verified(path))))
+              else joblib.load(io.BytesIO(_read_verified(path, public_key))))
     if not isinstance(bundle, Bundle):
         raise TypeError(f"{path} is not an IDPS model bundle")
     if bundle.format != BUNDLE_FORMAT:

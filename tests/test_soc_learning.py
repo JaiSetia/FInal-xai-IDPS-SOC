@@ -12,6 +12,7 @@ from test_soc_sensor_status import post, report
 from idps.detect.bundle import read_digest, save_bundle
 from idps.features import FEATURE_COLUMNS, MODEL_FEATURES, extraction_meta, read_features
 from soc.api import auth
+from soc.api.migrate import baseline_metadata
 from soc.api.db import Base, init_db, upgrade_schema
 from soc.api.export_feedback import build_feedback
 from soc.api.export_feedback import main as export_main
@@ -181,7 +182,7 @@ def old_schema_db(path):
     engine = create_engine(f"sqlite:///{path}")
     from soc.api import models  # noqa: F401
 
-    Base.metadata.create_all(engine)
+    baseline_metadata().create_all(engine)  # the frozen pre-migration schema (0001)
     with engine.begin() as c:
         c.execute(text("DROP TABLE model_versions"))
         c.execute(text("DROP INDEX ix_alerts_model_sha256"))
@@ -209,14 +210,14 @@ def test_init_db_upgrades_an_old_database_and_is_idempotent(tmp_path):
         assert a.predicted_class == "DDoS" and a.features is None and a.true_class is None
         a.features, a.status = FEATS, AlertStatus.CONFIRMED
         db.commit()
-    assert upgrade_schema(engine) == []  # second run: nothing to do
+    assert upgrade_schema(engine, baseline_metadata()) == []  # second run: nothing to do
     init_db(engine)
 
 
 def test_upgrade_reports_what_it_added(tmp_path):
     engine = old_schema_db(tmp_path / "old2.db")
     Base.metadata.create_all(engine)
-    assert sorted(upgrade_schema(engine)) == sorted(f"alerts.{c}" for c in NEW_ALERT_COLUMNS)
+    assert sorted(upgrade_schema(engine, baseline_metadata())) == sorted(f"alerts.{c}" for c in NEW_ALERT_COLUMNS)
 
 
 def test_the_app_starts_on_an_old_database_and_serves_it(tmp_path, soc_settings):
@@ -315,7 +316,7 @@ def test_sensors_status_shows_model_and_drift(client, sensor_headers, analyst_he
     assert post(client, sensor_headers, model_report(SHA_A, "v1", drift=drift)).status_code == 200
     (s,) = client.get("/sensors/status", headers=analyst_headers).json()["sensors"]
     assert s["status"]["model"] == {"name": "xgboost", "sha256": SHA_A, "version": "v1",
-                                    "checksum_ok": True}
+                                    "checksum_ok": True, "signed_by": None}
     assert s["status"]["drift"] == drift | {"reason": None}
 
 
@@ -601,7 +602,7 @@ def test_upgrade_tolerates_a_concurrent_duplicate_column(tmp_path, monkeypatch):
         return real(self, statement, *a, **k)
 
     monkeypatch.setattr(Connection, "execute", racing)
-    added = upgrade_schema(engine)
+    added = upgrade_schema(engine, baseline_metadata())
     assert state["raced"] and "alerts.features" not in added
     assert "alerts.true_class" in added
     monkeypatch.undo()
@@ -616,7 +617,7 @@ def test_upgrade_quotes_identifiers_with_the_dialect(tmp_path, monkeypatch):
     monkeypatch.setattr(prep, "quote", lambda name, *a: quoted.append(name) or f"<{real(name)}>")
     # the made-up quoting would break the SQL, which proves the statement is built from it
     with pytest.raises(Exception, match="syntax|unrecognized|near"):
-        upgrade_schema(engine)
+        upgrade_schema(engine, baseline_metadata())
     assert "alerts" in quoted and "features" in quoted
 
 
@@ -626,4 +627,4 @@ def test_a_missing_non_nullable_column_needs_a_real_migration(tmp_path):
         c.execute(text("DROP INDEX ix_alerts_src_ip"))
         c.execute(text("ALTER TABLE alerts DROP COLUMN src_ip"))
     with pytest.raises(RuntimeError, match="real migration"):
-        upgrade_schema(engine)
+        upgrade_schema(engine, baseline_metadata())

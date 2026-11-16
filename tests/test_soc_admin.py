@@ -13,7 +13,8 @@ def users(client, headers):
 def test_list_users_never_leaks_secrets(client, admin_headers):
     r = client.get("/admin/users", headers=admin_headers)
     assert r.status_code == 200
-    assert set(r.json()[0]) == {"id", "username", "role", "disabled", "created_at"}
+    assert set(r.json()[0]) == {"id", "username", "role", "disabled", "created_at", "mfa_enabled",
+                                "sso_linked"}  # never the TOTP secret, recovery codes or SSO ids
     assert "argon2" not in r.text and "password" not in r.text
 
 

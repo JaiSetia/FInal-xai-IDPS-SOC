@@ -8,13 +8,14 @@ See docs/soc.md for settings, endpoints and the auth model.
 """
 
 import contextlib
+import logging
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from soc.api import auth
+from soc.api import auth, oidc
 from soc.api.broadcast import AlertBroadcaster
 from soc.api.db import init_db, make_engine, make_session_factory
 from soc.api.geo import GeoLocator
@@ -76,6 +77,12 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
     app.state.login_throttle = LoginThrottle(
         settings.login_max_failures, settings.login_max_failures_per_ip,
         settings.login_lockout_minutes * 60)
+    # Single sign-on (soc/api/oidc.py): None unless IDPS_SOC_OIDC_ISSUER is set.
+    app.state.oidc = oidc.OidcClient(settings) if settings.oidc_issuer else None
+    app.state.oidc_log = logging.getLogger("soc.oidc")
+    # Wrong MFA codes, per user (see auth._CodeAttempt).
+    app.state.mfa_throttle = LoginThrottle(
+        settings.mfa_max_failures, settings.mfa_max_failures, settings.login_lockout_minutes * 60)
 
     # Added before CORS so the CORS headers are on its 413s too (the last one added is outermost).
     app.add_middleware(BodyLimitMiddleware)
@@ -97,6 +104,7 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(auth.router)
+    app.include_router(oidc.router)
     for module in (alerts, live, blocks, actions, cases, metrics, geo, assistant, admin, sensors,
                    training, integrations):
         app.include_router(module.router)

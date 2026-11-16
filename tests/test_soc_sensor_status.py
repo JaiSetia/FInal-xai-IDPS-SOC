@@ -358,7 +358,8 @@ def test_analysts_get_a_redacted_listing(client, sensor_headers, analyst_headers
     # everything else the dashboard needs is still there
     assert st["allowlist_total"] == 2 and st["mode"] == "live" and st["dry_run"] is True
     assert st["blocking_enabled"] is False and st["model"] == {
-        "name": "xgboost", "sha256": None, "version": None, "checksum_ok": True}
+        "name": "xgboost", "sha256": None, "version": None, "checksum_ok": True,
+        "signed_by": None}
     assert st["heartbeat"] == {"enabled": True, "ok": True} and st["outbox_pending"] == 3
     assert st["counters"]["would_block"] == 2 and st["faithfulness"]["model"] == "xgboost"
     text = client.get("/sensors/status", headers=analyst_headers).text

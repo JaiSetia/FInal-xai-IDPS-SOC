@@ -4,7 +4,13 @@ import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
-PUBLIC = {("GET", "/health"), ("POST", "/auth/login")}
+PUBLIC = {("GET", "/health"), ("POST", "/auth/login"),
+          # Single sign-on: whether it is on (and its button text), and its start; the callback
+          # is checked by the state + binding, not a token (tests/test_soc_oidc.py).
+          ("GET", "/auth/oidc/config"), ("POST", "/auth/oidc/start"), ("POST", "/auth/oidc/callback"),
+          # The MFA sign-in step: authenticated by its challenge token in the body
+          # (tests/test_soc_mfa.py); the other MFA routes need a bearer token as usual.
+          ("POST", "/auth/mfa/verify")}
 
 
 def flat_routes(routes, prefix=""):

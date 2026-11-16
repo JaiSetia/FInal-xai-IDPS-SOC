@@ -29,7 +29,9 @@ def soc_settings(monkeypatch):
             conn.execute(text("DROP SCHEMA public CASCADE"))
             conn.execute(text("CREATE SCHEMA public"))
         engine.dispose()
-    return SocSettings(jwt_secret=TEST_SECRET, database_url=url,
+    # MFA for admins is on by default in the SOC; the suite logs in as admin with a password only,
+    # so it is off here. tests/test_soc_mfa.py turns it on.
+    return SocSettings(jwt_secret=TEST_SECRET, database_url=url, mfa_required_for_admins=False,
                        block_allowlist=["10.10.1.1", "10.10.2.1", "10.10.1.2", "10.10.2.2"])
 
 

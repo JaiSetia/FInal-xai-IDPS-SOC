@@ -3,7 +3,10 @@
          python -m idps.detect evaluate <bundle> <labelled.parquet> [--report out.json]
          python -m idps.detect retrain --data labelled.parquet [...] --feedback feedback.parquet
                  --current models/old.joblib -o models/new.joblib [--feedback-weight W] [--tolerance T]
-         python -m idps.detect drift-reference --model models/old.joblib --data labelled.parquet [...]"""
+         python -m idps.detect drift-reference --model models/old.joblib --data labelled.parquet [...]
+         python -m idps.detect keygen --out keys/model-signing      (signing key pair; see signing.py)
+         python -m idps.detect sign models/x.joblib --key keys/model-signing.key
+         python -m idps.detect verify models/x.joblib --public-key keys/model-signing.pub"""
 
 import argparse
 import json
@@ -120,6 +123,46 @@ def _drift_reference(args: argparse.Namespace) -> int:
     return 0
 
 
+def _keygen(args: argparse.Namespace) -> int:
+    from idps.detect.signing import generate_keypair, key_id, load_public_key
+
+    priv, pub = generate_keypair(args.out)
+    print(f"signing key {priv} (keep it off the sensors; mode 0600) and public key {pub} "
+          f"(key id {key_id(load_public_key(pub))}): give the sensors {pub.name} "
+          "as IDPS_MODEL_PUBLIC_KEY", file=sys.stderr)
+    return 0
+
+
+def _sign(args: argparse.Namespace) -> int:
+    from idps.detect.signing import load_private_key, sign_bundle
+
+    key = load_private_key(args.key)
+    # Sign only what loads: the sha256 file, permissions and bundle format are checked first
+    # (that unpickles the bundle: sign only bundles you made yourself).
+    load_bundle(args.bundle)
+    out = sign_bundle(args.bundle, key)
+    print(f"signed {args.bundle} -> {out}", file=sys.stderr)
+    return 0
+
+
+def _verify(args: argparse.Namespace) -> int:
+    from idps.detect.signing import (
+        SignatureError,
+        load_public_key,
+        read_signature,
+        verify_bytes,
+    )
+
+    data = Path(args.bundle).read_bytes()
+    try:  # checks the bytes only: nothing is unpickled
+        fields = verify_bytes(data, read_signature(args.bundle), load_public_key(args.public_key))
+    except SignatureError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 1
+    print(f"OK: signed by key {fields['key_id']} at {fields['signed_at']}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m idps.detect")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -190,10 +233,22 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--allow-low-match-rate", action="store_true")
     d.set_defaults(fn=_drift_reference)
 
+    k = sub.add_parser("keygen", help="make a model signing key pair (<out>.key, <out>.pub)")
+    k.add_argument("--out", required=True)
+    k.set_defaults(fn=_keygen)
+    sg = sub.add_parser("sign", help="sign a model bundle (writes <bundle>.sig)")
+    sg.add_argument("bundle")
+    sg.add_argument("--key", required=True, help="the private key from keygen")
+    sg.set_defaults(fn=_sign)
+    v = sub.add_parser("verify", help="check a model bundle's signature (does not load it)")
+    v.add_argument("bundle")
+    v.add_argument("--public-key", required=True)
+    v.set_defaults(fn=_verify)
+
     args = parser.parse_args(argv)
     try:
         return args.fn(args)
-    except (ValueError, FileNotFoundError) as exc:
+    except (ValueError, FileNotFoundError, FileExistsError) as exc:  # not other OSErrors
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

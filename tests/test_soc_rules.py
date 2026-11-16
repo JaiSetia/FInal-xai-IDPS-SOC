@@ -10,6 +10,7 @@ from test_soc_live_map import listen
 from test_soc_sensor_status import post, report
 
 from soc.api.db import init_db, upgrade_schema
+from soc.api.migrate import baseline_metadata
 from soc.api.export_feedback import build_feedback
 from soc.api.models import Alert
 
@@ -295,13 +296,13 @@ def previous_release_db(path):
 def test_upgrade_adds_source_and_rule_to_an_old_database(tmp_path):
     engine = previous_release_db(tmp_path / "old.db")
     assert not {"source", "rule"} & {c["name"] for c in inspect(engine).get_columns("alerts")}
-    added = upgrade_schema(engine)
+    added = upgrade_schema(engine, baseline_metadata())
     assert {"alerts.source", "alerts.rule"} <= set(added)
     assert "ix_alerts_source" in {i["name"] for i in inspect(engine).get_indexes("alerts")}
     with Session(engine) as db:
         a = db.query(Alert).one()
         assert a.source is None and a.rule is None and a.predicted_class == "DDoS"
-    assert upgrade_schema(engine) == []
+    assert upgrade_schema(engine, baseline_metadata()) == []
     init_db(engine)
 
 

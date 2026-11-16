@@ -468,13 +468,29 @@ def build_table(report: dict) -> str:
 
 # ---- SOC API ----------------------------------------------------------------------------------
 
+LAB_TOTP_FILE = "/var/lib/idps-soc/labcheck_totp"  # in the SOC's own volume (lab/README.md)
+
+
+def lab_totp_secret() -> str | None:
+    """The lab check user's TOTP secret, read from the SOC container (never printed). None when
+    the check user has no MFA."""
+    r = subprocess.run(["docker", "compose", "exec", "-T", "soc", "cat", LAB_TOTP_FILE], cwd=LAB,
+                       env=bs._env(), capture_output=True, text=True, timeout=30)
+    return r.stdout.strip() or None if r.returncode == 0 else None
+
+
 class Soc:
     """The lab SOC API on the published port, trusting the lab CA (read from the sensor)."""
 
-    def __init__(self, user: str, password: str, ca_pem: str | None = None) -> None:
+    _last_step: int | None = None  # TOTP step last used by any Soc in this process (no replays)
+
+    def __init__(self, user: str, password: str, ca_pem: str | None = None,
+                 totp_secret: str | None = None) -> None:
+        """`totp_secret`: for an account with MFA on (the lab check user, see lab_totp_secret)."""
         self.ctx = ssl.create_default_context(cadata=ca_pem) if ca_pem else ssl.create_default_context()
         self.ctx.check_hostname = False  # the certificate is for the lab address, not 127.0.0.1
         self._cred = {"username": user, "password": password}
+        self._totp = totp_secret
         self.token: str | None = None
         self.truncated = False
 
@@ -488,7 +504,23 @@ class Soc:
             return json.load(r)
 
     def login(self) -> None:
-        self.token = self._req("/auth/login", self._cred)["access_token"]
+        res = self._req("/auth/login", self._cred)
+        if res.get("mfa") == "verify":
+            if not self._totp:
+                raise RuntimeError("this account has MFA on: pass totp_secret (lab_totp_secret())")
+            from soc.api import mfa
+
+            step = mfa.current_step()
+            if Soc._last_step is not None and step <= Soc._last_step:  # a code works only once
+                time.sleep((Soc._last_step + 1) * mfa.STEP_SECONDS - time.time() + 0.5)
+                step = mfa.current_step()
+            Soc._last_step = step
+            res = self._req("/auth/mfa/verify", {"mfa_token": res["mfa_token"],
+                                                 "code": mfa.code_at(self._totp, step)})
+        elif res.get("mfa") == "enrol":
+            raise RuntimeError("this admin account must enrol in MFA first: python -m soc.api "
+                               "mfa-enrol USER --secret-file /var/lib/idps-soc/labcheck_totp")
+        self.token = res["access_token"]
 
     def sensor_id(self) -> int:
         return pick_sensor_id(self._req("/sensors/status")["sensors"])

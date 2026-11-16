@@ -6,12 +6,30 @@ export interface Me {
   id: number;
   username: string;
   role: Role;
+  /** Missing from older SOCs. */
+  mfa_enabled?: boolean;
+  /** MFA can't be turned off for this account (admins, by default). */
+  mfa_required?: boolean;
+}
+
+/** POST /auth/login, /auth/mfa/verify, /auth/oidc/callback: an access token, or the MFA step
+ *  ("verify": type a code; "enrol": an admin who must set up an authenticator app first). */
+export interface LoginResult {
+  access_token: string | null;
+  expires_in: number | null;
+  mfa?: "verify" | "enrol" | null;
+  mfa_token?: string | null;
 }
 
 interface AuthState {
   me: Me | null;
   loading: boolean;
-  login: (username: string, password: string) => Promise<void>;
+  /** Checks the password. Returns an access token (pass it to `finish`) or the MFA step. */
+  login: (username: string, password: string) => Promise<LoginResult>;
+  /** Finish a sign-in with a result that has an access token. */
+  finish: (result: LoginResult) => Promise<void>;
+  /** Reload the signed-in user (after MFA changes). */
+  refresh: () => Promise<void>;
   logout: () => void;
 }
 
@@ -45,21 +63,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
   }, [loadMe]);
 
-  const login = useCallback(async (username: string, password: string) => {
-    const res = await api<{ access_token: string }>("/auth/login", {
-      method: "POST",
-      json: { username, password },
-    });
+  const finish = useCallback(async (res: LoginResult) => {
+    if (!res.access_token) throw new Error("no access token in the sign-in result");
     setToken(res.access_token);
     await loadMe();
   }, [loadMe]);
+
+  const login = useCallback(async (username: string, password: string) => {
+    return api<LoginResult>("/auth/login", {
+      method: "POST",
+      json: { username, password },
+    });
+  }, []);
 
   const logout = useCallback(() => {
     setToken(null);
     setMe(null);
   }, []);
 
-  return <AuthContext.Provider value={{ me, loading, login, logout }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ me, loading, login, finish, refresh: loadMe, logout }}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth(): AuthState {

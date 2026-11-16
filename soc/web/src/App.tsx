@@ -5,6 +5,7 @@ import { Pill } from "./components/common";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { useLiveStatus } from "./live";
 import { blockingMode, useSensors } from "./sensors";
+import Account from "./pages/Account";
 import Assistant from "./pages/Assistant";
 import Admin from "./pages/Admin";
 import AlertDetail from "./pages/AlertDetail";
@@ -80,7 +81,9 @@ export default function App() {
             <LiveBadge />
             <ModeBadge />
             <div className="userbox">
-              <span><b>{me.username}</b> ({me.role})</span>
+              <NavLink to="/account" className="userlink" title="Account and two-factor sign-in">
+                <b>{me.username}</b> ({me.role})
+              </NavLink>
               <button type="button" onClick={logout}>Sign out</button>
             </div>
           </div>
@@ -96,6 +99,7 @@ export default function App() {
               <Route path="/cases" element={<Cases />} />
               <Route path="/cases/:id" element={<Cases />} />
               <Route path="/maps" element={<Suspense fallback={loading}><Maps /></Suspense>} />
+              <Route path="/account" element={<Account />} />
               {/* Old addresses, kept so bookmarks and links in docs still work. */}
               <Route path="/metrics" element={<Redirect to="/" />} />
               <Route path="/blocks" element={<Redirect to="/response" />} />

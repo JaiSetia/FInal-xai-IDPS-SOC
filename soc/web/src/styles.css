@@ -291,6 +291,18 @@ label.field.inline { flex-direction: row; align-items: center; gap: 8px; }
 .login { width: min(380px, 100%); }
 .login h1 { margin-bottom: 20px; }
 .login form { display: flex; flex-direction: column; gap: 12px; }
+.login-or { text-align: center; font-size: 12px; }
+.login-steps { display: flex; flex-direction: column; gap: 12px; }
+.mfa-enrol { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
+.mfa-enrol .field { align-self: stretch; }
+/* The QR code keeps a white background in dark mode too, or phones can't read it. */
+.mfa-qr { background: #fff; padding: 6px; border-radius: 8px; border: 1px solid var(--border); }
+.mfa-codes { display: flex; flex-direction: column; gap: 12px; }
+.code-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px; }
+.code-list code { font-size: 14px; letter-spacing: 0.04em; }
+.stack { display: flex; flex-direction: column; gap: 12px; }
+.userlink { color: inherit; text-decoration: none; }
+.userlink:hover, .userlink.active { text-decoration: underline; }
 
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 
