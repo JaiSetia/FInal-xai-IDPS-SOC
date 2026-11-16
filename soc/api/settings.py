@@ -32,6 +32,9 @@ SECRET_FIELDS = ("webhook_url", "webhook_secret", "slack_webhook_url", "smtp_pas
                  "abuseipdb_key")
 INTEGRATION_PREFIXES = ("notify_", "webhook_", "slack_", "smtp_", "email_", "syslog_",
                         "abuseipdb_")
+# Settings where a blank value (docker compose passes "" for an unset ${VAR:-}) also means unset.
+BLANK_IS_UNSET = ("alert_retention_days", "alert_retention_keep_labelled", "audit_retention_days",
+                  "assistant_retention_days", "closed_case_retention_days", "auto_migrate")
 _EMAIL = re.compile(r"^[^@\s<>,;\"]+@[^@\s<>,;\"]+$")
 
 
@@ -72,6 +75,19 @@ class SocSettings(BaseSettings):
     # Dry-run "would block" records older than this are deleted (see routes/blocks.py). Real
     # blocks are never pruned.
     would_block_retention_days: int = Field(default=7, ge=1, le=365)
+    # Schema migrations at start-up (docs/soc.md, "Database"): when on (default), the SOC brings
+    # an older database to the current schema itself; when off, it refuses to start unless the
+    # database is already at the current revision (run `python -m soc.api db upgrade` first).
+    auto_migrate: bool = True
+    # Retention (soc/api/retention.py), run in the background once an hour. 0 = keep forever.
+    alert_retention_days: int = Field(default=180, ge=0, le=36_500)
+    # Alerts an analyst judged (confirmed / false_positive) that carry model features are the
+    # training rows for export_feedback and retraining: kept past alert_retention_days when on.
+    # Privacy trade-off: their IP addresses and features then stay until you turn this off.
+    alert_retention_keep_labelled: bool = True
+    audit_retention_days: int = Field(default=365, ge=0, le=36_500)
+    assistant_retention_days: int = Field(default=90, ge=0, le=36_500)  # by last update
+    closed_case_retention_days: int = Field(default=0, ge=0, le=36_500)  # by last update
     # Attack world map. GeoLite2 City database path (free MaxMind account needed); without it,
     # public addresses can't be placed. geo_demo gives lab (private) addresses made-up,
     # clearly labelled locations for demonstrations. home_* is where the protected site is.
@@ -161,7 +177,8 @@ class SocSettings(BaseSettings):
         data = dict(data)
         for key in list(data):
             blank = isinstance(data[key], str) and not data[key].strip()
-            if blank and (key.startswith(INTEGRATION_PREFIXES) or key == "public_url"):
+            if blank and (key.startswith(INTEGRATION_PREFIXES) or key == "public_url"
+                          or key in BLANK_IS_UNSET):
                 del data[key]  # blank = unset (the default applies)
         for name in SECRET_FIELDS:
             path = os.environ.get(f"IDPS_SOC_{name.upper()}_FILE", "").strip()

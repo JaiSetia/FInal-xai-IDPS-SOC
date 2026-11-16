@@ -36,7 +36,64 @@ if [ ! -s "$DATA/jwt_secret" ]; then
 fi
 IDPS_SOC_JWT_SECRET=$(cat "$DATA/jwt_secret")
 export IDPS_SOC_JWT_SECRET
-export IDPS_SOC_DATABASE_URL="sqlite:///$DATA/soc.db"
+SQLITE_URL="sqlite:///$DATA/soc.db"
+MOVED="$DATA/soc.db.moved-to-postgres"
+case "${LAB_SOC_DATABASE:-postgres}" in
+  sqlite)
+    if [ -e "$MOVED" ] && [ ! -e "$DATA/soc.db" ]; then
+      echo "soc: warning: this SOC's history is in PostgreSQL ($MOVED was moved there);" \
+           "LAB_SOC_DATABASE=sqlite starts an empty SQLite database" >&2
+    fi
+    IDPS_SOC_DATABASE_URL=$SQLITE_URL ;;
+  postgres)
+    # soc-db makes the password on its first start (lab/soc/db-start.sh). Never printed.
+    if [ ! -s /run/idps-db/password ]; then
+      echo "soc: no database password in /run/idps-db; is soc-db running?" >&2; exit 1
+    fi
+    IDPS_SOC_DATABASE_URL="postgresql+psycopg://idps:$(cat /run/idps-db/password)@127.0.0.1:5432/idps" ;;
+  *)
+    echo "soc: LAB_SOC_DATABASE must be postgres or sqlite" >&2; exit 1 ;;
+esac
+export IDPS_SOC_DATABASE_URL
+
+# One-time move of an older lab SOC's SQLite data into PostgreSQL: a portable backup of soc.db,
+# restored into the empty database. Each stage leaves a mark, so a start that was interrupted
+# carries on where it stopped instead of failing:
+#   $DATA/move.backup    names the finished, verified backup (reused, not made again)
+#   $DATA/move.restored  the restore committed; only the rename of soc.db is left
+# The backup stays in the volume (0600) as the way back; soc.db is renamed, never deleted.
+if [ "${LAB_SOC_DATABASE:-postgres}" = postgres ] && [ -s "$DATA/soc.db" ]; then
+  # Never overwrite the copy kept from an earlier move.
+  if [ -e "$MOVED" ]; then MOVED="$MOVED-$(date -u +%Y%m%dT%H%M%SZ)"; fi
+  if [ ! -e "$DATA/move.restored" ]; then
+    echo "soc: moving $DATA/soc.db into PostgreSQL (one time)" >&2
+    if [ -s "$DATA/move.backup" ] && [ -s "$(cat "$DATA/move.backup")" ]; then
+      MOVE=$(cat "$DATA/move.backup")
+      echo "soc: reusing the backup made by an earlier start: $MOVE" >&2
+    else
+      rm -f "$DATA"/*.body.tmp  # left by a backup that was killed
+      MOVE="$DATA/sqlite-to-postgres-$(date -u +%Y%m%dT%H%M%SZ).jsonl.gz"
+      python -m soc.api db upgrade --database-url "$SQLITE_URL"
+      python -m soc.api backup --database-url "$SQLITE_URL" "$MOVE"
+      printf '%s\n' "$MOVE" > "$DATA/move.backup"
+    fi
+    if ! python -m soc.api restore "$MOVE"; then
+      echo "soc: the move did not happen and soc.db is untouched. If PostgreSQL already holds" \
+           "this SOC's data, rename $DATA/soc.db yourself; otherwise see the error above" >&2
+      exit 1
+    fi
+    : > "$DATA/move.restored"
+  fi
+  for side in -wal -shm; do  # SQLite's side files belong with the database they came from
+    if [ -e "$DATA/soc.db$side" ]; then mv "$DATA/soc.db$side" "$MOVED$side"; fi
+  done
+  mv "$DATA/soc.db" "$MOVED"
+  rm -f "$DATA/move.restored" "$DATA/move.backup"
+  echo "soc: moved into PostgreSQL. Kept: $MOVED and the backup" \
+       "$(ls -1t "$DATA"/sqlite-to-postgres-*.jsonl.gz 2>/dev/null | head -1)" >&2
+fi
+# Data retention runs hourly in the SOC (alerts 180 days, audit 365 by default; 0 = forever):
+# set LAB_ALERT_RETENTION_DAYS / LAB_AUDIT_RETENTION_DAYS in lab/.env to change it.
 
 python /opt/idps/lab/soc/bootstrap.py "$SHARED/sensor_token"
 # The admin password is only needed for the first start; keep it out of the server's environment.

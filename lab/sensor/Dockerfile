@@ -16,7 +16,7 @@ COPY models ./models
 # Install the project into a venv (Ubuntu 24.04 blocks system-wide pip installs).
 # requirements.lock pins exact versions so shap/numpy/xgboost don't drift apart.
 RUN python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir -c /opt/idps/requirements.lock /opt/idps
+    && /opt/venv/bin/pip install --no-cache-dir -c /opt/idps/requirements.lock '/opt/idps[postgres]'
 ENV PATH="/opt/venv/bin:$PATH"
 # Capture on the attack-side interface; start.sh gives it this fixed name.
 ENV IDPS_INTERFACE=lab_attack

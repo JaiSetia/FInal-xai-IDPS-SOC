@@ -392,3 +392,26 @@ export interface LiveBlockEvent {
   reason: string;
   geo: GeoLocation | null;
 }
+
+// GET /admin/retention (admin only): the data retention policy (0 = keep forever) and the last run.
+export interface RetentionPolicy {
+  alert_retention_days: number;
+  alert_retention_keep_labelled: boolean;
+  audit_retention_days: number;
+  assistant_retention_days: number;
+  closed_case_retention_days: number;
+  would_block_retention_days: number;
+}
+
+export interface RetentionRun {
+  at: string;
+  // rows deleted per table (alerts, case_notes, cases, audit_log, assistant_conversations, would_blocks)
+  counts: Record<string, number>;
+  error: string | null;
+  duration_seconds: number | null;
+}
+
+export interface RetentionStatus {
+  policy: RetentionPolicy;
+  last_run: RetentionRun | null;
+}

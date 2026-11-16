@@ -19,7 +19,8 @@ The networks are **not** Docker `internal` networks: Docker drops packets on int
 networks whose destination is outside the subnet, which would stop the sensor routing.
 Instead:
 
-- **No default route anywhere.** No container can send traffic out of the lab.
+- **No default route anywhere.** No container can send traffic out of the lab (the one opt-in
+  exception is the SOC's HTTPS to listed hosts, below).
 - **Endpoints can't change their own network.** `attacker`, `victim` and `dvwa` have no
   `NET_ADMIN`. Each shares the network namespace of a small `*-net` container
   ([netns/setup.sh](netns/setup.sh)) that sets the routes and firewall rules and then idles.
@@ -28,9 +29,20 @@ Instead:
 - **The sensor forwards only lab-to-lab traffic** ([sensor/nftables.conf](sensor/nftables.conf)),
   with each rule bound to its interface and strict reverse-path filtering. It never forwards to
   or from `lab_mgmt`, and nothing on `mgmt_net` can open a connection to it.
-- **The SOC can't reach anything.** It runs with no capabilities in the namespace of
+- **The SOC can't reach anything by default.** It runs with no capabilities in the namespace of
   `soc-net` ([soc/netguard.sh](soc/netguard.sh)): no default route, inbound TCP 8443 only,
   outbound replies only. Its port is published on `127.0.0.1` only, for the dashboard.
+  - **Opt-in exception:** `LAB_SOC_EGRESS_HOSTS` in `.env` (for example `api.abuseipdb.com`,
+    `hooks.slack.com`) allows HTTPS, TCP 443 only, to the public IPv4 addresses those names
+    resolve to. Each address gets a /32 route (still no default route), private answers are
+    refused, names are looked up again every 2 minutes and an address expires an hour after it
+    was last seen. If the names can't be resolved the SOC still starts, with nothing allowed.
+  - **Accepted risks when it is on:** the rule is per address, so other sites behind the same
+    CDN addresses are reachable too, and a compromised SOC (it holds the API keys and the
+    webhook) could send data out that way. It is meant for trying the integrations, not for a
+    hostile-SOC threat model. Separately, and with it off too, the SOC's DNS queries reach the
+    internet through Docker's resolver on its loopback (a slow covert channel; the endpoints
+    block it, the SOC does not).
 - **Fails closed.** If any setup step fails, that container exits and the containers that
   depend on it never start.
 
@@ -95,13 +107,49 @@ echo 'LAB_SOC_GEOIP_DB=/var/lib/idps-soc/GeoLite2-City.mmdb' >> .env
 docker compose up -d soc && ./check_isolation.sh
 ```
 
+## The SOC's database (PostgreSQL)
+
+The lab SOC keeps its data in PostgreSQL 16 (`soc-db`), which shares the SOC's network namespace:
+it listens on the SOC's loopback only, nothing is published, and netguard drops everything else.
+On its first start `soc-db` makes a random password into the `soc_db_secret` volume (root-owned,
+0600, mounted read-only in the SOC only), so there is nothing to type or put in `lab/.env`. The
+SOC logs in as `idps`, an ordinary role that owns the `idps` database, not as the superuser.
+
+- **Moving an older lab SOC.** If the SOC's volume still has a `soc.db` (SQLite), the first start
+  copies it into PostgreSQL once: `db upgrade` (adopts the old database), `backup`, then
+  `restore` into the empty PostgreSQL. `soc.db` is renamed `soc.db.moved-to-postgres`, and the
+  backup (`sqlite-to-postgres-<time>.jsonl.gz`, 0600) stays in the volume as the way back. An
+  interrupted start carries on where it stopped. 1.08 million alerts took under 3 minutes; the
+  SOC's health check allows 30 minutes for it.
+- **Staying on SQLite.** Set `LAB_SOC_DATABASE=sqlite` in `lab/.env`. After a move that starts an
+  empty SQLite database (the history is in PostgreSQL), and the SOC warns about it.
+- **Backups.** From the SOC container, with the SOC running:
+
+  ```sh
+  docker compose exec soc sh -c 'export IDPS_SOC_DATABASE_URL=$(tr "\0" "\n" </proc/1/environ | sed -n "s/^IDPS_SOC_DATABASE_URL=//p"); python -m soc.api backup /var/lib/idps-soc/backup-$(date -u +%Y%m%d).jsonl.gz'
+  ```
+
+  Restore only goes into an empty database (`python -m soc.api restore FILE`). A backup holds
+  password and token hashes and the alerts' IP addresses: keep it encrypted and delete it with
+  the same retention as the data.
+- **Retention.** The SOC deletes old data hourly: alerts after 180 days (alerts an analyst
+  confirmed or marked false positive are kept as training rows), audit entries after 365 days.
+  `LAB_ALERT_RETENTION_DAYS` / `LAB_AUDIT_RETENTION_DAYS` in `lab/.env` change it (0 = forever).
+  Admins see the policy and the last run at `GET /admin/retention`; `python -m soc.api prune
+  --dry-run` shows what a run would delete.
+- **Starting over.** `docker compose down -v` deletes the database with the other lab volumes.
+  Removing `soc_db_secret` alone is refused (the new password would not match the database).
+
 ## Trying the integrations (notifications, syslog, reputation)
 
 The SOC can send high and critical alerts to a webhook, Slack and email and export a syslog/CEF
-stream (see [../docs/soc.md](../docs/soc.md), "Integrations"). The lab SOC **cannot open outbound
-connections** (see "How the lab is isolated"; this is not relaxed for integrations), so in the lab
-you try them against receivers inside the SOC's own container, on its loopback address. Nothing
-leaves the lab and no real Slack, mail server or SIEM is involved.
+stream (see [../docs/soc.md](../docs/soc.md), "Integrations"). By default the lab SOC **cannot
+open outbound connections** (see "How the lab is isolated"), so you try them against receivers
+inside the SOC's own container, on its loopback address: nothing leaves the lab and no real
+Slack, mail server or SIEM is involved. To use a real HTTPS service instead (AbuseIPDB, Slack, an
+HTTPS webhook), put its key or URL in `.env`, list its host in `LAB_SOC_EGRESS_HOSTS` and run
+`docker compose up -d --no-build --force-recreate soc-net soc-db soc`. Email (SMTP) and syslog
+use other ports and stay blocked.
 
 1. In `lab/.env` set (placeholders; `.env` is git-ignored):
 

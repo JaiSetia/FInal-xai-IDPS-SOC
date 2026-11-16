@@ -15,11 +15,21 @@ ANALYST_PW = "analyst-password-123"
 
 @pytest.fixture
 def soc_settings(monkeypatch):
+    url = __import__("os").environ.get("IDPS_TEST_DATABASE_URL", "sqlite://")  # read before the purge
     # Tests must not depend on IDPS_* variables in the developer's shell.
     for name in [n for n in __import__("os").environ if n.startswith("IDPS_")]:
         monkeypatch.delenv(name)
     # The block allowlist is required for blocking; tests use the lab's gateways and sensor.
-    return SocSettings(jwt_secret=TEST_SECRET, database_url="sqlite://",
+    if not url.startswith("sqlite"):
+        # Run the SOC tests against a real PostgreSQL (a throwaway one: this wipes its schema).
+        from sqlalchemy import create_engine, text
+
+        engine = create_engine(url)
+        with engine.begin() as conn:
+            conn.execute(text("DROP SCHEMA public CASCADE"))
+            conn.execute(text("CREATE SCHEMA public"))
+        engine.dispose()
+    return SocSettings(jwt_secret=TEST_SECRET, database_url=url,
                        block_allowlist=["10.10.1.1", "10.10.2.1", "10.10.1.2", "10.10.2.2"])
 
 

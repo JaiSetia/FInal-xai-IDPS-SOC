@@ -21,6 +21,7 @@ from soc.api.geo import GeoLocator
 from soc.api.integrations.manager import NotificationManager
 from soc.api.integrations.reputation import ReputationService
 from soc.api.limits import BodyLimitMiddleware
+from soc.api.retention import RetentionRunner
 from soc.api.routes import (
     actions,
     admin,
@@ -48,15 +49,18 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
+        app.state.retention.start()  # first pass shortly after start, then hourly
         yield
+        app.state.retention.stop()
         app.state.notifier.close()  # stop the notification workers
 
     app = FastAPI(title="IDPS SOC API", lifespan=lifespan, **docs)
     app.state.settings = settings
     engine = make_engine(settings.database_url)
-    init_db(engine)
+    init_db(engine, settings.auto_migrate)
     app.state.engine = engine
     app.state.session_factory = make_session_factory(engine)
+    app.state.retention = RetentionRunner(app.state.session_factory, settings)
     app.state.geo = GeoLocator(settings.geoip_db, settings.geo_demo)
     # The assistant is off (None) when no Anthropic credentials are configured.
     from soc.assistant.llm import make_llm

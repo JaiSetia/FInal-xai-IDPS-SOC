@@ -42,6 +42,8 @@ networks:
 volumes:
   soc_data: {}     # SOC only: database, JWT secret, TLS keys
   soc_shared: {}   # ca.pem and the sensor token; read-only in the sensor
+  soc_pg: {}       # the SOC's PostgreSQL data (soc-db)
+  soc_db_secret: {} # the database password soc-db makes on first start; read-only in the SOC
   suricata_eve: {} # Suricata's alert log (eve.json): written by `suricata`, read-only in the sensor
   idps-suricata:
     # The ET Open rules, made by scripts/suricata_compare.py's setup (docs/live.md, "Suricata
@@ -127,17 +129,49 @@ services:
   soc-net:
     # Holds the SOC's network namespace: no default route, inbound TCP 8443 only, outbound
     # replies only (soc/netguard.sh). The SOC itself has no capabilities to change that.
+    # LAB_SOC_EGRESS_HOSTS (comma-separated host names, blank = none) opens HTTPS to just those
+    # hosts, e.g. api.abuseipdb.com for IP reputation or hooks.slack.com for Slack.
     build:
       context: .
       dockerfile: soc/Dockerfile.net
     container_name: idps-soc-net
     hostname: soc
     cap_add: [NET_ADMIN]
+    environment:
+      SOC_EGRESS_HOSTS: ${LAB_SOC_EGRESS_HOSTS:-}
     ports:
       - "127.0.0.1:8443:8443"   # the dashboard, from this machine only
     networks:
       mgmt_net:
         ipv4_address: 10.10.3.10
+
+  soc-db:
+    # The SOC's PostgreSQL (roadmap step 10). It joins soc-net's network namespace, so it is
+    # reachable only on the SOC's own loopback (127.0.0.1:5432): netguard.sh drops anything else,
+    # and nothing is published. It makes its own password on first start (soc/db-start.sh).
+    # LAB_SOC_DATABASE=sqlite in lab/.env keeps the SOC on SQLite instead.
+    build:
+      context: .
+      dockerfile: soc/Dockerfile.db
+    container_name: idps-soc-db
+    network_mode: service:soc-net
+    cap_drop: [ALL]
+    # The official entrypoint fixes the data directory's owner as root, then drops to postgres.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID]
+    security_opt: ["no-new-privileges:true"]
+    shm_size: 256m
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "idps", "-d", "idps"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+      start_period: 2m
+    volumes:
+      - soc_pg:/var/lib/postgresql/data
+      - soc_db_secret:/run/idps-db
+    depends_on:
+      soc-net: {condition: service_healthy}
 
   soc:
     # Same image as the sensor (it already holds idps/ and soc/), different command. Rebuild
@@ -152,6 +186,11 @@ services:
     security_opt: ["no-new-privileges:true"]
     environment:
       LAB_SOC_ADMIN_PASSWORD: ${LAB_SOC_ADMIN_PASSWORD:-}
+      # postgres (default; soc-db) or sqlite (the old soc.db file in the SOC's volume).
+      LAB_SOC_DATABASE: ${LAB_SOC_DATABASE:-postgres}
+      # Data retention (docs/soc.md, "Data retention"); blank keeps the SOC's defaults.
+      IDPS_SOC_ALERT_RETENTION_DAYS: ${LAB_ALERT_RETENTION_DAYS:-}
+      IDPS_SOC_AUDIT_RETENTION_DAYS: ${LAB_AUDIT_RETENTION_DAYS:-}
       # Analysts can't confirm a block of these (the lab gateways, sensor, victims, SOC).
       IDPS_SOC_BLOCK_ALLOWLIST: 10.10.1.1,10.10.1.2,10.10.2.0/24,10.10.3.0/24
       # Made-up, clearly labelled map locations for the lab's private addresses.
@@ -190,11 +229,15 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+      # The first start after step 10 copies an old soc.db into PostgreSQL (minutes for 1M alerts).
+      start_period: 30m
     volumes:
       - soc_data:/var/lib/idps-soc
       - soc_shared:/run/idps-soc
+      - soc_db_secret:/run/idps-db:ro
     depends_on:
       soc-net: {condition: service_healthy}
+      soc-db: {condition: service_healthy}
 
   attacker-net:
     build: ./netns

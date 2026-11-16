@@ -127,7 +127,12 @@ def test_connection_closes_when_the_user_is_disabled(client, soc_app, analyst_he
 def test_connection_cap(soc_settings, soc_app):
     app = create_app(soc_settings.model_copy(update={"ws_max_connections": 1}))
     with app.state.session_factory() as db:
-        auth.create_user(db, "admin", ADMIN_PW, Role.ADMIN)
+        # SQLite: the second app has its own in-memory database; PostgreSQL: it shares the
+        # database of soc_app, where this admin already exists.
+        try:
+            auth.create_user(db, "admin", ADMIN_PW, Role.ADMIN)
+        except ValueError:
+            pass
     client = TestClient(app)
     token = client.post("/auth/login", json={"username": "admin", "password": ADMIN_PW}
                         ).json()["access_token"]

@@ -481,3 +481,76 @@ Delivery never slows alert ingest: each channel has a bounded queue and one work
 **Security review.** The review checked the outbound requests most closely, because a webhook URL is a way to make the SOC open connections. Webhook and Slack URLs must be https and resolve only to public addresses (IPv4 inside IPv6 forms such as NAT64 and 6to4 are decoded and checked); the SOC connects to the address it checked, never follows redirects and ignores proxy settings; every exchange has an overall deadline, so a server that answers one byte at a time can't freeze a channel. Attacker-influenced text (rule signatures, class names) is escaped for Slack, email headers and HTML, and CEF. Private destinations and plain http need an explicit lab-only flag.
 
 **Lab note.** The lab SOC container blocks all outbound connections by design, so it can't reach Slack, a mail server or a SIEM. Trying the channels in the lab uses receivers inside the SOC container (`lab/README.md`, "Trying the integrations").
+
+## Production database: PostgreSQL, migrations, retention and backup (15 November 2026)
+
+The SOC now runs on PostgreSQL as well as SQLite. Its schema is managed by Alembic migrations
+(revision `0001_initial` is the schema as it stood before this step), old data is deleted on a
+schedule, and a portable backup can be restored into either database. The lab SOC was moved
+from its SQLite file onto PostgreSQL 16 with all of its data.
+
+### The lab move
+
+| | |
+|---|---|
+| Data moved | 1,093,056 rows: 1,076,526 alerts, 16,472 audit entries, users, sensor token, blocks, would-blocks, model versions |
+| Row counts after the move | identical in all 12 tables |
+| Time for the whole move (adopt, back up, restore) | 2 min 40 s |
+| Backup file (gzip JSON lines) | 21 MB, from an 894 MB SQLite file |
+| PostgreSQL database after the move | 844 MB |
+| Backup of the running PostgreSQL SOC | 30 s; restored into a new SQLite file in 39 s, identical counts |
+| Schema check after the move (`db check`) | at head, matches the models |
+
+The first attempt was refused, without changing the data, because the old lab database lacked
+an index the models declare (`ix_alerts_received_class_anomaly`; the old temporary upgrade only
+indexed columns it added itself). Adoption now adds missing declared indexes, and refuses
+anything that is not purely additive before it changes anything.
+
+### Live check on PostgreSQL
+
+With the sensor live and the attacker running the port scan, 1,024 PortScan alerts reached the
+PostgreSQL SOC, with explanations and the model version. New alert ids carried on from the
+restored ones (1,076,527 on), so the sequences were reset correctly, and the sensor's outbox
+drained to 0. The SOC logs in as an ordinary database role, not as the superuser.
+
+### Speed with a million alerts
+
+Dashboard summary (`/metrics/summary`), same data, inside the SOC container:
+
+| Window | SQLite | PostgreSQL |
+|---|---|---|
+| 24 hours (≈490k alerts) | 18.9 s | 9.7 s |
+| 7 days (≈1.08M alerts) | 29.7 s | 9.5 s |
+
+PostgreSQL is 2–3 times faster at this size. Both are too slow for a dashboard that refreshes
+often; this is the existing grouped query over every alert in the window, not something the move
+introduced. Counting alerts per hour as they arrive, instead of on every request, would fix it.
+
+Retention, after the reviews' fixes (keyset batches, a plan that scans by id on SQLite, indexes
+on the alert links, case-then-alert lock order): deleting 200,000 old alerts took 2.25 s on SQLite
+(24.5 s before the fixes) and 14.9 s on PostgreSQL; 1 million took 14.7 s on SQLite, close to
+linear. 20,000 alerts with 20,000 linked blocks and would-blocks took 2.2 s on PostgreSQL (17.4 s
+before the link indexes). The first retention pass over the lab's 1.08M alerts took 8.5 s and correctly
+deleted nothing, as all of them are younger than 180 days.
+
+### Tests
+
+Full suite on SQLite: 1,686 passed, 24 skipped (the PostgreSQL-only tests). SOC tests on
+PostgreSQL 16: 850 passed, 1 skipped (SQLite-only). New
+tests cover: migration 0001 equals the models on both databases, downgrade and upgrade, adoption
+of old databases (additive changes only, refusals change nothing), four processes migrating at
+once on PostgreSQL, backup and restore of every table and type (timezones, JSON null versus SQL
+null, enums, large integers) across SQLite and PostgreSQL in both directions, refusals (non-empty
+target, tampered file, existing output), ingest continuing during a SQLite backup (WAL), every
+retention rule at its boundary, on PostgreSQL an analyst attaching an alert or reopening a case
+while a prune runs (no deletion against the rules, no deadlock), a manual prune not starving
+alert intake on SQLite, and partial runs being audited.
+
+### Summary for the report
+
+The SOC can run on a production database and be upgraded safely: migrations replace the
+add-columns stop-gap, an old database is adopted only when the change is purely additive, and a
+portable, checksummed backup moves a SOC between SQLite and PostgreSQL. Old data is deleted on a
+schedule (alerts 180 days, audit 365, assistant chats 90; labelled alerts kept as training data),
+which step 13's privacy work builds on. Moving the lab's 1.08M alerts took under 3 minutes with no
+loss, and PostgreSQL made the dashboard summary 2–3 times faster.

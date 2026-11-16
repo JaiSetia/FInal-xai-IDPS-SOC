@@ -28,6 +28,12 @@ Settings (environment variables, prefix `IDPS_SOC_`):
 | `WS_MAX_CONNECTIONS` / `WS_QUEUE_SIZE` | 50 / 200 | Live feed limits |
 | `ENABLE_DOCS` | false | Serves `/docs` and `/openapi.json` (unauthenticated, so off by default) |
 | `WOULD_BLOCK_RETENTION_DAYS` | 7 | Dry-run would-block records older than this are deleted (1 to 365) |
+| `AUTO_MIGRATE` | true | Upgrade the database schema at start-up; when false, refuse to start unless it is already at the current revision (see "Database") |
+| `ALERT_RETENTION_DAYS` | 180 | Delete alerts older than this many days; 0 = keep forever (see "Retention") |
+| `ALERT_RETENTION_KEEP_LABELLED` | true | Keep alerts an analyst confirmed or marked false positive that carry features (training rows), whatever their age |
+| `AUDIT_RETENTION_DAYS` | 365 | Delete audit entries older than this; 0 = keep forever |
+| `ASSISTANT_RETENTION_DAYS` | 90 | Delete assistant conversations not updated for this long; 0 = keep forever |
+| `CLOSED_CASE_RETENTION_DAYS` | 0 | Delete closed cases and their notes not updated for this long; 0 = keep forever (the default) |
 | `BLOCK_ALLOWLIST` | **empty: blocking refused** | Comma-separated addresses/networks the SOC must never ask to block: gateways, DNS, the SOC host, the sensors, the analysts. Required before any block request is accepted |
 
 Notification, syslog and reputation settings (`NOTIFY_*`, `WEBHOOK_*`, `SLACK_*`, `SMTP_*`, `SYSLOG_*`,
@@ -69,6 +75,7 @@ The SOC owns its block allowlist (`IDPS_SOC_BLOCK_ALLOWLIST`). Sensors keep thei
 | `GET /topology?hours=1` | user | Nodes (host, alert count, max severity) and edges (src to dst, count, max severity) |
 | `GET/POST /admin/users`, `PATCH /admin/users/{id}/role`, `POST /admin/users/{id}/disable`, `/enable`, `/reset-password` | admin | User management |
 | `GET/POST /admin/sensors`, `POST /admin/sensors/{id}/revoke` | admin | Sensors; the token is returned once, on creation |
+| `GET /admin/retention` | admin | The retention policy and the last run (time, rows deleted per table, error); see "Retention" |
 | `GET /admin/audit` | admin | Audit log, filter by `actor` and `action` (repeat `action` for several, up to 20) |
 
 Rules worth knowing:
@@ -513,14 +520,146 @@ JSON.
 
 ## Database
 
-SQLite (`sqlite:///./soc.db`) for development; PostgreSQL in deployment. Tables are created
-with `create_all` at start-up (`soc.api.db.init_db`), which adds missing tables but does not
-alter existing ones. Schema migrations (Alembic) are a later step, so until then a model change
-means recreating the development database. Timestamps are stored and returned as timezone-aware
-UTC.
+SQLite (`sqlite:///./soc.db`) for development and small labs; PostgreSQL for deployment:
 
-Tables: `users`, `sensor_tokens`, `alerts`, `blocks`, `actions`, `cases`, `case_notes`,
-`audit_log`, `would_blocks`, `sensor_status`, `model_versions`.
+```bash
+pip install -e ".[postgres]"        # the psycopg 3 driver
+export IDPS_SOC_DATABASE_URL='postgresql+psycopg://idps:PASSWORD@db-host:5432/idps'
+```
+
+Timestamps are stored and returned as timezone-aware UTC. Tables: `users`, `sensor_tokens`,
+`alerts`, `blocks`, `actions`, `cases`, `case_notes`, `audit_log`, `would_blocks`,
+`sensor_status`, `model_versions`, `assistant_conversations`, and Alembic's `alembic_version`.
+
+### Migrations
+
+The schema is made by Alembic migrations (`soc/api/migrations/versions/`, shipped with the
+package), not by `create_all`. Revision `0001_initial` is the schema as of roadmap step 10 and is
+written out by hand: it never imports the models, so later model changes cannot alter it.
+
+At start-up (`python -m soc.api ...` commands and the API) the SOC looks at the database:
+
+| Database | What happens |
+|---|---|
+| empty | `upgrade head` |
+| has tables, no `alembic_version` (made before step 10) | **adopted**, see below, then `upgrade head` |
+| versioned, `AUTO_MIGRATE=true` (default) | `upgrade head` |
+| versioned, `AUTO_MIGRATE=false` | refuses to start unless already at head, naming `python -m soc.api db upgrade` |
+| versioned at a revision this version does not know | refuses to start (the database is newer than the SOC) |
+
+On PostgreSQL the migration runs under `pg_advisory_lock`, so two processes starting together
+cannot both migrate (the second waits, then finds nothing to do), and each migration is one
+transaction. Set `AUTO_MIGRATE=false` when several SOC versions may start against one database or
+you want to run the upgrade yourself as a deployment step.
+
+```bash
+python -m soc.api db upgrade     # empty / adopt / upgrade to head (also with --database-url URL)
+python -m soc.api db current     # prints the revision
+python -m soc.api db check       # exit 1 if not at head, or the schema differs from the models
+```
+
+**Adopting a database made before step 10.** Such a database has the tables but no
+`alembic_version`. The SOC first runs the old temporary `compare_metadata` check of the
+database against revision 0001 (its own table definitions, not the live models) **before changing
+anything**. Only plain additions an older release could lack are allowed: a missing nullable
+column, a missing table, a missing non-unique declared index (the old stop-gap only indexed the
+columns it added). Anything else (a missing NOT NULL column, a different type or nullability, a
+missing unique index) makes the SOC refuse to start with a one-line message saying what differs,
+and **nothing has been changed**; fix it by hand or restore a backup. Extra tables and indexes the
+SOC does not know are ignored. If only additions are needed, they are made (`soc.api.db.upgrade_schema`
+for columns, `CREATE TABLE`/`CREATE INDEX` for the rest), the result is checked again, and the SOC
+stamps `0001_initial` and upgrades to head. Take a backup first (below).
+
+**Making a new migration** (developers): change `soc/api/models.py`, then
+
+```bash
+export IDPS_SOC_JWT_SECRET=... IDPS_SOC_DATABASE_URL=sqlite:///./dev.db   # a database at head
+alembic revision --autogenerate --rev-id 0002 -m "what changed"          # uses ./alembic.ini
+```
+
+and **review the file**: autogenerate misses renames (it writes a drop and an add, which loses
+data), server defaults and some type changes, and a new NOT NULL column on a table with rows needs
+a default or a backfill. Migrations run in batch mode on SQLite (`render_as_batch`), which rebuilds
+the table; constraints in the models that have no name cannot be dropped in batch mode, so give
+new constraints a name. Do not edit a migration that has been released. Then run `db check` on a
+copy of production data, and `python -m pytest`.
+
+### Retention
+
+A background thread (started with the API, first pass about 30 seconds after start, then hourly;
+never on a request) deletes old rows in batches of 500, one transaction per batch, so writers are
+not blocked for long. Errors are logged and never stop the app. `0` keeps a kind of data forever.
+
+| Setting | Default | Deletes |
+|---|---|---|
+| `ALERT_RETENTION_DAYS` | 180 | alerts by `received_at` |
+| `ALERT_RETENTION_KEEP_LABELLED` | true | exception: confirmed / false-positive alerts that carry features |
+| `AUDIT_RETENTION_DAYS` | 365 | audit entries |
+| `ASSISTANT_RETENTION_DAYS` | 90 | assistant conversations, by last update |
+| `CLOSED_CASE_RETENTION_DAYS` | 0 | closed cases and their notes, by last update; their alerts stay (unlinked) unless old enough themselves |
+| `WOULD_BLOCK_RETENTION_DAYS` | 7 | would-block records (also pruned on the block ingest path, as before) |
+
+Rules: an alert linked to a case that is **open or investigating** is never deleted. Blocks and
+actions are never deleted; when an alert goes, the `alert_id` of its blocks and would-blocks is set
+to NULL. Every run that deleted something writes one audit entry `retention_prune` (actor
+`system`/`retention`) with the per-table counts; that entry is itself only subject to
+`AUDIT_RETENTION_DAYS`. `GET /admin/retention` (admin) shows the policy and the last run.
+Deletes recheck the rules under a row lock, so an alert an analyst attaches to an open case (or a
+case reopened) while a run is in progress is not deleted. A run that fails part-way still writes
+its audit entry (with the counts so far and an `error` field), and `GET /admin/retention` shows
+them. The first run after start logs the active policy as a warning. `python -m soc.api prune
+--dry-run` prints what would go; `prune` runs one pass now. Both need the database at head (`db
+upgrade` first), but not the JWT secret.
+
+Privacy trade-off of `ALERT_RETENTION_KEEP_LABELLED`: analyst-judged alerts are the training rows
+for `python -m soc.api.export_feedback` and retraining, so they are kept past the alert retention.
+They contain source and destination IP addresses and flow features, for as long as you run the SOC.
+Set it to `false` if your retention promise to the people whose traffic this is must be absolute;
+you then lose that training data once alerts age out (export it first).
+
+### Backup and restore
+
+```bash
+export IDPS_SOC_DATABASE_URL='sqlite:///./soc.db'      # or the PostgreSQL URL
+python -m soc.api backup  /secure/soc-2026-11-15.jsonl.gz
+python -m soc.api restore /secure/soc-2026-11-15.jsonl.gz     # empty database only
+```
+
+Both take `--database-url URL` too (to back up one database and restore into another from one
+shell), but prefer the environment variable: a URL on the command line, with its password, shows
+up in `ps` and in your shell history.
+
+A **portable logical backup**: a gzip of JSON lines. Line 1 is a header (format, version,
+Alembic revision, creation time, dialect, rows per table, sha256 of the rest), then every table's
+rows in foreign-key order with lossless values (datetimes with time zone, JSON, bytes as base64).
+Backup reads everything in one transaction (a single read transaction on SQLite, `REPEATABLE READ`
+on PostgreSQL), so it is consistent while the SOC runs, and it streams: memory use does not grow
+with the database (progress per table goes to stderr). The SOC opens file-based SQLite databases
+in **WAL mode** with a 5 s busy timeout, so a backup's read snapshot does not block ingest (the
+writer keeps going; the backup simply does not see rows written after it began; the `-wal` and
+`-shm` files next to `soc.db` are part of the database, copy them together or use `backup`). WAL
+needs a local filesystem. The file is written with mode 0600 through a
+temporary file and renamed into place; an existing file is never overwritten. Nothing outside the
+database goes in: not the JWT secret, not the environment.
+
+Restore refuses unless the target has no SOC rows (an empty, freshly migrated database is fine),
+checks the sha256 before touching it, migrates to the backup's revision, inserts in batches, resets
+PostgreSQL id sequences, then upgrades to head, all in one transaction on PostgreSQL (a failed
+restore leaves it empty). SQLite cannot roll schema changes back, so after a failed restore the
+tables the restore itself created are dropped again and the database is empty. If a restore is
+killed outright (SIGKILL, power loss) on SQLite, the database may be left with empty SOC tables and
+no revision; restore treats exactly that (only SOC tables, all empty, no `alembic_version`) as an
+empty target, drops them and starts over. Any rows, or any table that is not the SOC's, make it
+refuse.
+
+**Moving from SQLite to PostgreSQL:** stop the SOC, `backup` from the SQLite URL, create an empty
+PostgreSQL database, `restore` into it with the PostgreSQL URL, point `DATABASE_URL` at it, start
+the SOC. The same works the other way.
+
+A backup holds **personal data** (IP addresses, usernames, analyst notes, assistant conversations)
+and **password and sensor-token hashes**. Store it encrypted, keep access to the people who
+administer the SOC, and delete old backups on the same schedule as the retention above: a backup
+outlives retention for as long as it exists.
 
 ## Maps
 
@@ -583,16 +722,11 @@ correct block proposals, and response time.
 
 ## Upgrading an existing database
 
-Tables are created with `create_all`, which adds missing tables but **not** new columns on
-existing tables (proper migrations with Alembic are a later step, roadmap step 10). As a
-**temporary** stop-gap, `init_db` also runs `soc.api.db.upgrade_schema` at start-up: it issues
-`ALTER TABLE ... ADD COLUMN` for every nullable column the models have and the database lacks
-(SQLite and PostgreSQL), and does nothing when there is nothing to add. It adds plain columns only
-(no defaults or constraints; it also creates the indexes the models declare on those columns),
-tolerates another process adding the same column at the same moment, never drops or retypes anything, and refuses (start-up
-error) a missing column that is not nullable. Older changes that are not covered by it can still be
-added by hand, for example:
-
-```sh
-sqlite3 soc.db "ALTER TABLE assistant_conversations ADD COLUMN busy_since DATETIME;"
-```
+Start the new SOC against it: a database made before roadmap step 10 is adopted automatically
+(see "Database", "Adopting a database made before step 10"), after which every later change is an
+Alembic migration. Back it up first with `python -m soc.api backup` once adopted, or `pg_dump`; to copy the SQLite
+file instead, copy `soc.db` together with its `-wal` and `-shm` files (SQLite may hold recent writes
+there), with the SOC stopped: `backup` needs a
+database that has been adopted already (`python -m soc.api db upgrade` does that). `python -m soc.api db
+check` afterwards confirms the schema. The temporary `ALTER TABLE` stop-gap that earlier releases
+ran at every start-up now runs once, during adoption only.

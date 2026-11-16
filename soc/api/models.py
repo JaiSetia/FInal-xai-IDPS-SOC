@@ -157,7 +157,7 @@ class Alert(Base):
     case_id: Mapped[int | None] = mapped_column(ForeignKey("cases.id"), nullable=True, index=True)
     # Learning from analysts: the flow's model features and which model scored it (sent by
     # sensors that know how), and the analyst's corrected class. All nullable: older alerts and
-    # older sensors have none. Existing databases get these columns from db.upgrade_schema.
+    # older sensors have none. Existing databases get them from migrations (soc/api/migrations).
     features: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     model_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     model_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
@@ -188,7 +188,8 @@ class Block(Base):
     ip: Mapped[str] = mapped_column(String(45), index=True)
     reason: Mapped[str] = mapped_column(String(500), default="")
     source: Mapped[BlockSource] = mapped_column(_enum(BlockSource))
-    alert_id: Mapped[int | None] = mapped_column(ForeignKey("alerts.id"), nullable=True)
+    alert_id: Mapped[int | None] = mapped_column(ForeignKey("alerts.id"), nullable=True,
+                                                  index=True)
     blocked_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     unblocked_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
@@ -256,7 +257,8 @@ class WouldBlock(Base):
     ip: Mapped[str] = mapped_column(String(45), index=True)
     reason: Mapped[str] = mapped_column(String(500), default="")
     source: Mapped[BlockSource] = mapped_column(_enum(BlockSource))
-    alert_id: Mapped[int | None] = mapped_column(ForeignKey("alerts.id"), nullable=True)
+    alert_id: Mapped[int | None] = mapped_column(ForeignKey("alerts.id"), nullable=True,
+                                                  index=True)
     at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, index=True)
     ttl_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 

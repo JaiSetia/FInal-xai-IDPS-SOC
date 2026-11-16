@@ -3,12 +3,12 @@
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from soc.api import auth
+from soc.api import auth, retention
 from soc.api.auth import AdminUser
 from soc.api.common import Cursor, Limit, Page, audit, get_or_404, paginate
 from soc.api.db import get_db
@@ -211,3 +211,34 @@ def list_audit(admin: AdminUser, db: Annotated[Session, Depends(get_db)],
     rows, next_cursor = paginate(list(db.scalars(query)), limit)
     return Page[AuditOut](items=[AuditOut.model_validate(r) for r in rows],
                           next_cursor=next_cursor)
+
+
+# --- retention --------------------------------------------------------------------------
+
+class RetentionRun(BaseModel):
+    at: datetime
+    counts: dict[str, int]
+    error: str | None = None
+    duration_seconds: float | None = None
+
+
+class RetentionOut(BaseModel):
+    policy: dict[str, int | bool]
+    last_run: RetentionRun | None = None
+
+
+@router.get("/retention", response_model=RetentionOut)
+def get_retention(admin: AdminUser, request: Request, db: Annotated[Session, Depends(get_db)]):
+    """The retention policy and the last run: in-memory since this process started, else the
+    last `retention_prune` audit entry (a run that deleted something)."""
+    state = request.app.state.retention.state
+    last = None
+    if state.at is not None:
+        last = RetentionRun(at=state.at, counts=state.counts, error=state.error,
+                            duration_seconds=state.duration_seconds)
+    else:
+        entry = db.scalar(select(AuditEntry).where(AuditEntry.action == "retention_prune")
+                          .order_by(AuditEntry.id.desc()).limit(1))
+        if entry is not None:
+            last = RetentionRun(at=entry.at, counts=(entry.details or {}).get("counts", {}))
+    return RetentionOut(policy=retention.policy(request.app.state.settings), last_run=last)
