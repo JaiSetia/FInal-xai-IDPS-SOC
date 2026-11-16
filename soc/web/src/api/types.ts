@@ -421,3 +421,84 @@ export interface RetentionStatus {
   policy: RetentionPolicy;
   last_run: RetentionRun | null;
 }
+
+// --- Step 13: weekly report and privacy (soc/api/reports.py, soc/api/privacy.py) -------------
+
+export interface ReportWeek {
+  /** ISO week, e.g. "2026-W46". */
+  week: string;
+  start: string;
+  end: string;
+  alerts: number;
+  /** An email was attempted for this week. */
+  run: boolean;
+  emailed: boolean;
+  emailed_at: string | null;
+  recipients_count: number;
+  error: string | null;
+}
+
+export interface ReportWeeks {
+  default_week: string;
+  email_enabled: boolean;
+  email_configured: boolean;
+  weeks: ReportWeek[];
+}
+
+export interface ReportEmailResult {
+  week: string;
+  /** How many recipients (never the addresses). */
+  recipients: number;
+  emailed_at: string;
+  size_bytes: number;
+}
+
+export interface ErasePreview {
+  ip: string;
+  subject_fp: string;
+  /** Rows or fields per table, every key always present. */
+  counts: Record<string, number>;
+  total: number;
+  /** Found but not rewritten (account and sensor names): an admin changes them by hand. */
+  manual_review: Record<string, number>;
+  warnings: string[];
+  /** Active blocks of the address: erasing needs `force` then (the sensor's rule stays). */
+  active_blocks: number;
+}
+
+export interface EraseResult extends ErasePreview {
+  record_id: number;
+  erased_at: string;
+}
+
+export interface ErasureRecord {
+  id: number;
+  at: string;
+  requested_by: string;
+  reason: string;
+  subject_fp: string;
+  counts: Record<string, number>;
+}
+
+export interface AccessEntry {
+  id: number;
+  at: string;
+  user_id: number | null;
+  username: string;
+  action: string;
+  target_type: string | null;
+  target: string | null;
+  /** Fingerprint of the address read (never the address); null when none was involved. */
+  subject_fp: string | null;
+}
+
+export interface PrivacyNotice {
+  controller: { name: string | null; contact_email: string | null; grievance_officer: string | null };
+  data_categories: { category: string; description: string }[];
+  purposes: string[];
+  rights: { right: string; description: string }[];
+  retention: Record<string, number | boolean | string | null>;
+  recipients: { name: string; description: string }[];
+  how_to_exercise: string;
+  note: string;
+}

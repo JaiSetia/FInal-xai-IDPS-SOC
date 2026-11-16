@@ -179,7 +179,7 @@ def test_batches_more_than_one(db, monkeypatch):
     counts = run(db, alert_retention_days=180, alert_retention_keep_labelled=False,
                  closed_case_retention_days=30)
     assert counts == {"alerts": 30, "case_notes": 14, "cases": 14, "audit_log": 23,
-                      "assistant_conversations": 15, "would_blocks": 16}
+                      "assistant_conversations": 15, "would_blocks": 16, "access_log": 0}
     assert ids(db, Alert) == {s.id for s in survivors}
     assert db.query(Block).count() == 15 and all(b.alert_id is None for b in db.query(Block))
 
@@ -337,7 +337,8 @@ def test_endpoint_auth_policy_and_last_run(soc_app, client, admin_headers, analy
     assert body["policy"] == {
         "alert_retention_days": 180, "alert_retention_keep_labelled": True,
         "audit_retention_days": 365, "assistant_retention_days": 90,
-        "closed_case_retention_days": 0, "would_block_retention_days": 7}
+        "closed_case_retention_days": 0, "would_block_retention_days": 7,
+        "access_log_retention_days": 365}
     assert body["last_run"] is None
     with soc_app.state.session_factory() as db:
         db.add(AuditEntry(actor_type="system", actor_name="retention", action="retention_prune",

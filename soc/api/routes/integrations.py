@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from soc.api import access_log
 from soc.api.auth import AdminUser, AnyUser
 from soc.api.common import audit, get_or_404
 from soc.api.db import get_db
@@ -104,5 +105,7 @@ def alert_reputation(alert_id: int, user: AnyUser, request: Request,
     if sent:  # a real third-party lookup (not a cache hit): who sent which address where
         audit(db, user, "reputation_lookup", f"alert:{alert.id}",
               {"ip": alert.src_ip, "available": result["available"]})
-        db.commit()
+    # one commit for the audit row (if any) and the access row; nothing is returned unlogged
+    access_log.log_access(db, request.app.state.settings, user, "reputation_view",
+                          target_type="alert", target=str(alert.id), ips=[alert.src_ip])
     return Reputation(**result)

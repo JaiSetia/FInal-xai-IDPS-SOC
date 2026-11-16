@@ -88,6 +88,87 @@ def test_tools_validate_arguments_and_label_data(soc_app, client, sensor_headers
         assert err
 
 
+def test_tools_that_return_addresses_are_access_logged(soc_app, client, sensor_headers):
+    from soc.api import access_log
+    from soc.api.models import AccessLog, Block, BlockSource
+
+    ids = ingest(client, sensor_headers, alert_payload(src_ip="203.0.113.7", dst_ip="10.10.1.5"))
+    with soc_app.state.session_factory() as db:
+        db.add(Block(sensor_id=1, ip="198.51.100.9", reason="r", source=BlockSource.AUTO))
+        db.commit()
+        user = db.query(User).filter_by(username="analyst").one()
+        settings = soc_app.state.settings
+        calls = [("search_alerts", {}), ("get_alert", {"alert_id": ids[0]}),
+                 ("top_attackers", {}), ("list_blocks", {})]
+        for name, args in calls:
+            _, err, _ = run_tool(name, args, db=db, user=user, settings=settings)
+            assert not err, name
+        rows = db.query(AccessLog).order_by(AccessLog.id).all()
+        fp = lambda ip: access_log.fingerprint(settings, ip)  # noqa: E731
+        by_action = {}
+        for r in rows:
+            by_action.setdefault(r.action, set()).add(r.subject_fp)
+        assert by_action == {
+            "assistant_search_alerts": {fp("203.0.113.7"), fp("10.10.1.5")},
+            "assistant_get_alert": {fp("203.0.113.7"), fp("10.10.1.5")},
+            "assistant_top_attackers": {fp("203.0.113.7")},
+            "assistant_list_blocks": {fp("198.51.100.9")}}
+        assert all(r.username == "analyst" and r.target_type == "assistant" for r in rows)
+        before = len(rows)
+        run_tool("get_alert", {"alert_id": 999}, db=db, user=user, settings=settings)  # nothing read
+        run_tool("metrics_summary", {}, db=db, user=user, settings=settings)
+        assert db.query(AccessLog).count() == before
+
+
+def test_ipv6_endpoints_are_bracketed_and_still_logged(soc_app, client, sensor_headers):
+    from soc.api import access_log
+    from soc.api.models import AccessLog
+    from soc.assistant.tools import _host, hostport
+
+    assert hostport("2001:db8::1", 443) == "[2001:db8::1]:443"
+    assert hostport("10.0.0.1", 443) == "10.0.0.1:443"
+    for text, host in (("[2001:db8::1]:443", "2001:db8::1"), ("10.0.0.1:443", "10.0.0.1"),
+                       ("2001:db8::1", "2001:db8::1")):
+        assert _host(text) == host
+    ids = ingest(client, sensor_headers, alert_payload(src_ip="2001:db8::7", dst_ip="10.10.1.5"))
+    with soc_app.state.session_factory() as db:
+        user = db.query(User).filter_by(username="analyst").one()
+        out, err, data = run_tool("get_alert", {"alert_id": ids[0]}, db=db, user=user,
+                                  settings=soc_app.state.settings)
+        assert not err and data["src"] == "[2001:db8::7]:51514"
+        fps = {r.subject_fp for r in db.query(AccessLog)}
+        assert access_log.fingerprint(soc_app.state.settings, "2001:db8::7") in fps
+
+
+def test_a_search_by_address_is_logged_even_when_it_finds_nothing(soc_app, client):
+    from soc.api import access_log
+    from soc.api.models import AccessLog
+
+    with soc_app.state.session_factory() as db:
+        user = db.query(User).filter_by(username="analyst").one()
+        out, err, data = run_tool("search_alerts", {"ip": "192.0.2.77"}, db=db, user=user,
+                                  settings=soc_app.state.settings)
+        assert not err and data["count"] == 0
+        (row,) = db.query(AccessLog).all()
+        assert row.action == "assistant_search_alerts"
+        assert row.subject_fp == access_log.fingerprint(soc_app.state.settings, "192.0.2.77")
+        run_tool("search_alerts", {}, db=db, user=user, settings=soc_app.state.settings)
+        assert db.query(AccessLog).count() == 1  # no address, nothing returned: nothing to log
+
+
+def test_a_tool_result_is_withheld_if_the_access_log_cannot_be_written(soc_app, client,
+                                                                       sensor_headers, monkeypatch):
+    from soc.api import access_log
+
+    ingest(client, sensor_headers, alert_payload(src_ip="203.0.113.7"))
+    monkeypatch.setattr(access_log, "fingerprint", lambda *a: (_ for _ in ()).throw(OSError("x")))
+    with soc_app.state.session_factory() as db:
+        user = db.query(User).filter_by(username="analyst").one()
+        out, err, data = run_tool("search_alerts", {}, db=db, user=user,
+                                  settings=soc_app.state.settings)
+    assert err and "203.0.113.7" not in out and data == {}
+
+
 # --- chat ----------------------------------------------------------------------------------
 
 def test_assistant_is_off_without_credentials(client, soc_app, analyst_headers):

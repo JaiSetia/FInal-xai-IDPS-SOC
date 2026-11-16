@@ -11,7 +11,7 @@ COPY requirements.lock pyproject.toml README.md ./
 RUN python -m venv /opt/venv && /opt/venv/bin/pip install --retries 10 --timeout 60 \
         -c requirements.lock \
         fastapi uvicorn websockets sqlalchemy pydantic pydantic-settings pyjwt anthropic geoip2 \
-        argon2-cffi 'psycopg[binary]' alembic cryptography segno pandas
+        argon2-cffi 'psycopg[binary]' alembic cryptography segno pandas reportlab
 COPY idps ./idps
 COPY soc ./soc
 RUN /opt/venv/bin/pip install --retries 10 --timeout 60 --no-deps .

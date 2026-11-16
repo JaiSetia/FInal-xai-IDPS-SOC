@@ -34,6 +34,10 @@ Settings (environment variables, prefix `IDPS_SOC_`):
 | `AUDIT_RETENTION_DAYS` | 365 | Delete audit entries older than this; 0 = keep forever |
 | `ASSISTANT_RETENTION_DAYS` | 90 | Delete assistant conversations not updated for this long; 0 = keep forever |
 | `CLOSED_CASE_RETENTION_DAYS` | 0 | Delete closed cases and their notes not updated for this long; 0 = keep forever (the default) |
+| `ACCESS_LOG_RETENTION_DAYS` | 365 | Delete access-log rows (who looked at personal data) older than this; 0 = keep forever (see "Privacy") |
+| `PRIVACY_CONTROLLER_NAME` / `PRIVACY_CONTACT_EMAIL` / `PRIVACY_GRIEVANCE_OFFICER` | unset | Who the public privacy notice names; blank = unset (see "Privacy") |
+| `REPORT_MASK_IPS` | false | Weekly report shows source addresses with the last octet hidden (see "Reports") |
+| `REPORT_EMAIL_ENABLED` / `REPORT_EMAIL_WEEKDAY` / `REPORT_EMAIL_HOUR_UTC` / `REPORT_EMAIL_TO` | false / 0 (Monday) / 6 / `SMTP_TO` | Email the weekly report once a week (see "Reports") |
 | `BLOCK_ALLOWLIST` | **empty: blocking refused** | Comma-separated addresses/networks the SOC must never ask to block: gateways, DNS, the SOC host, the sensors, the analysts. Required before any block request is accepted |
 
 Notification, syslog and reputation settings (`NOTIFY_*`, `WEBHOOK_*`, `SLACK_*`, `SMTP_*`, `SYSLOG_*`,
@@ -83,6 +87,14 @@ generated for you), use `deploy/install.sh`: see [deploy.md](deploy.md).
 | `GET/POST /admin/users`, `PATCH /admin/users/{id}/role`, `POST /admin/users/{id}/disable`, `/enable`, `/reset-password`, `/mfa/reset`, `/sso/unlink` | admin | User management |
 | `GET/POST /admin/sensors`, `POST /admin/sensors/{id}/revoke` | admin | Sensors; the token is returned once, on creation |
 | `GET /admin/retention` | admin | The retention policy and the last run (time, rows deleted per table, error); see "Retention" |
+| `GET /reports/weekly?week=2026-W45` | user | The weekly report as a PDF attachment (default: the last complete ISO week, UTC); access-logged; 422 for a bad or future week, 429 when two are already being built; see "Reports" |
+| `GET /reports/weeks` | user | `{default_week, email_enabled, email_configured, weeks: [{week, start, end, alerts, run, emailed, emailed_at, recipients_count, error}]}`: the last 12 complete weeks, newest first |
+| `POST /admin/reports/weekly/email?week=` | admin | Email that week's report now to the configured recipients: `{week, recipients, emailed_at, size_bytes}`; audited; 409 when email is not configured, 502 when sending fails, 413 over 10 MB |
+| `GET /privacy/notice` | **public** | The privacy notice for the people whose traffic is monitored: controller, data categories, purposes, the retention periods in force, recipients (channel names only), rights; see "Privacy" |
+| `POST /admin/privacy/erase/preview` | admin | `{ip}`: what erasing the address would remove or rewrite, per table and field (`{ip, subject_fp, counts, total, active_blocks, manual_review, warnings}`); changes nothing; access-logged |
+| `POST /admin/privacy/erase` | admin | `{ip, reason, force?}` (reason 1 to 500 characters, must not contain the address): erase the address everywhere in one transaction; same shape plus `record_id`, `erased_at`; 422 for an invalid address or a CIDR; 409 while the address has an active block (unless `force: true`) or while any assistant reply is running |
+| `GET /admin/privacy/erasures` | admin | Erasure records, newest first (`id, at, requested_by, reason, subject_fp, counts`); no addresses; `ip` filter ("was this address erased?") |
+| `GET /admin/privacy/access-log` | admin | Who looked at personal data: filters `ip` (fingerprinted by the server), `username`, `action`, `since`, `until` (timezone required); rows `{id, at, user_id, username, action, target_type, target, subject_fp}` |
 | `GET /admin/audit` | admin | Audit log, filter by `actor` and `action` (repeat `action` for several, up to 20) |
 
 Rules worth knowing:
@@ -158,7 +170,7 @@ Rules worth knowing:
   sensor): by `Content-Length` when sent, and by counting streamed bytes (chunked bodies) until the
   limit. 10 MiB for `/ingest/alerts` (500 alerts x 16 KiB explanation fit), 128 KiB `/ingest/blocks`
   and `/cases`, 64 KiB `/sensor/status` and `/assistant`, 16 KiB `/actions`, `/sensor/actions` and
-  `/admin`, 4 KiB `/auth/login`, 8 KiB the rest of `/auth`, 256 KiB anything else. A malformed `Content-Length` is a 400. The
+  `/admin` (4 KiB `/admin/privacy`, 1 KiB `/admin/reports`), 4 KiB `/auth/login`, 8 KiB the rest of `/auth`, 256 KiB anything else. A malformed `Content-Length` is a 400. The
   Caddyfile in `infra/templates/soc-user-data.sh.tftpl` also sets `request_body { max_size 11MiB }`,
   `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`.
 - **Sensor-supplied text.** Interface, model and sensor-version names in a status report are
@@ -716,6 +728,7 @@ not blocked for long. Errors are logged and never stop the app. `0` keeps a kind
 | `ASSISTANT_RETENTION_DAYS` | 90 | assistant conversations, by last update |
 | `CLOSED_CASE_RETENTION_DAYS` | 0 | closed cases and their notes, by last update; their alerts stay (unlinked) unless old enough themselves |
 | `WOULD_BLOCK_RETENTION_DAYS` | 7 | would-block records (also pruned on the block ingest path, as before) |
+| `ACCESS_LOG_RETENTION_DAYS` | 365 | access-log rows (who looked at personal data) |
 
 Rules: an alert linked to a case that is **open or investigating** is never deleted. Blocks and
 actions are never deleted; when an alert goes, the `alert_id` of its blocks and would-blocks is set
@@ -778,6 +791,77 @@ A backup holds **personal data** (IP addresses, usernames, analyst notes, assist
 and **password and sensor-token hashes**. Store it encrypted, keep access to the people who
 administer the SOC, and delete old backups on the same schedule as the retention above: a backup
 outlives retention for as long as it exists.
+
+## Reports (roadmap step 13)
+
+A weekly PDF: `GET /reports/weekly?week=YYYY-Www` (any signed-in user; default the last complete ISO
+week, Monday 00:00 to Monday 00:00 UTC; the current week gives a report marked partial; a future or
+nonexistent week is 422). `GET /reports/weeks` lists the last 12 complete weeks with their alert
+counts and whether a run or email exists. Every download is access-logged (see "Privacy").
+
+Contents (`soc/api/reports.py`, reportlab): title block (week, generated at, SOC version), headline
+numbers (alerts by severity, model versus rule alerts, blocks, would-blocks, false-positive rate,
+detection latency p50 and p95), an alerts-per-day chart, a by-class table, the top 10 source
+addresses, blocks and would-blocks, analyst triage (alert statuses, cases opened and closed), model
+health (models seen that week, each sensor's online state, model and version, drift level,
+explanation faithfulness and outbox size as of generation time), and a footer on every page with the
+page number and "Contains personal data (IP addresses): handle under the SOC privacy notice".
+`IDPS_SOC_REPORT_MASK_IPS=true` hides the last octet of the addresses shown (IPv6: keeps the first
+48 bits). Text that came from sensors (class names, model names) is escaped, never read as markup.
+
+Speed: everything is aggregated in SQL over the week's window (the `received_at` index), two passes
+over that week's alerts, seven index-only counts for the chart and a sample of the newest 20,000 for
+the latency percentiles. No alert is loaded into memory. On a synthetic SQLite database of 1.08 million alerts
+(668,000 of them in the week) the report took 2.6 s; at most two reports are built at once per process (a third
+request gets 429). Would-block records only exist for `WOULD_BLOCK_RETENTION_DAYS` (7), so an older
+week shows fewer than were made (the report says so).
+
+Emailing is off by default. With `IDPS_SOC_REPORT_EMAIL_ENABLED=true` and the SMTP settings (see
+"Integrations"), a background thread (`ReportRunner`, like retention) checks every 5 minutes and, once
+`REPORT_EMAIL_WEEKDAY` (0 = Monday) and `REPORT_EMAIL_HOUR_UTC` after the end of the last complete week
+have passed, emails that week's PDF as one attachment (at most 10 MB) to `REPORT_EMAIL_TO` (default
+`SMTP_TO`) through the same SMTP code as the alert email (STARTTLS or SSL, never plaintext with a
+password). The week is claimed first by inserting a row in `report_runs` (the week is unique), so a
+restart or a second process never sends it twice; a claim that did not end in a sent email (the
+process died, or the server refused) is tried again after an hour, until a day after the scheduled
+time, and the error (never an address) is in `report_runs.error` and `GET /reports/weeks`.
+`POST /admin/reports/weekly/email` sends now whether or not the schedule is on; it is only audited
+(`report_email`) and never touches `report_runs`, so a manual send of an unfinished week does not
+stop the scheduled full-week email and a failed manual re-send does not undo a sent one.
+
+## Privacy (roadmap step 13)
+
+The full picture, what the admin does for a request and what erasure cannot reach, is in
+[privacy.md](privacy.md). In short:
+
+- **Privacy notice.** `GET /privacy/notice` is public (people whose traffic is monitored have no
+  SOC account). It returns the controller and contacts from `PRIVACY_CONTROLLER_NAME`,
+  `PRIVACY_CONTACT_EMAIL` and `PRIVACY_GRIEVANCE_OFFICER` (blank = null), the categories of personal
+  data, the purposes, the retention settings actually in force, the recipients (configured
+  integrations by channel name only, never a URL, host or address) and the rights with how to use them.
+- **Access log.** Individual reads of an address write rows in `access_log`, committed before the
+  answer is returned (together with the request's audit entry, if any): an alert's detail (source and
+  destination address), a search of alerts, blocks or would-blocks by `ip`, an alert's reputation, a
+  case (itself, then each attached alert's addresses, at most 100), the assistant's read tools
+  (`search_alerts`, `get_alert`, `top_attackers`, `list_blocks`, `get_case`, with the addresses they
+  returned), the training export, a report download (the addresses the PDF prints in full) and an
+  erasure preview. NOT logged: the unfiltered alert, block, case and action lists, metrics,
+  topology, the live feed and sensor status, which show many addresses at once. One row per address; the
+  address is never stored, only `subject_fp`, an HMAC-SHA256 of the normalised address under a key
+  derived (HKDF, info `access-log-subject-v1`) from `IDPS_SOC_MFA_KEY` or the JWT secret. If a row cannot
+  be written the request fails with 500 and nothing is served. `GET /admin/privacy/access-log?ip=`
+  fingerprints the question and answers "who looked at this address". Rows older than
+  `ACCESS_LOG_RETENTION_DAYS` are deleted. Rotating the secret changes every fingerprint: older rows
+  stay but stop matching a lookup.
+- **Erasure.** `POST /admin/privacy/erase/preview` then `POST /admin/privacy/erase` (admin, which
+  already needs MFA) remove an address in one transaction: the alerts it is source or destination of,
+  its blocks and would-blocks, and every textual mention elsewhere becomes `[erased]` (matched as a
+  token: `10.0.0.1` never hits `10.0.0.10`; IPv6 in any spelling and IPv4-mapped forms count).
+  `soc/api/privacy.py` lists every field it rewrites (`REDACTION_TARGETS`) and a test fails when a
+  table or column is added without deciding. A record (`erasure_records`) and an audit entry
+  `privacy_erase` keep the fingerprint and the counts, never the address. A CIDR is refused: erase
+  addresses one at a time.
+- **Migration 0003** adds `access_log`, `erasure_records` and `report_runs`.
 
 ## Maps
 

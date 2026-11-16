@@ -100,6 +100,14 @@ class GeoLocator:
             return f"GeoLite2 database could not be opened ({self._reader_error})"
         return "ok"
 
+    def forget(self, ips, *, dry_run: bool = False) -> int:
+        """Drop cached locations of these addresses (erasure on request); returns how many."""
+        hits = [ip for ip in ips if ip in self._cache]
+        if not dry_run:
+            for ip in hits:
+                self._cache.pop(ip, None)
+        return len(hits)
+
     def locate(self, ip: str) -> Location | None:
         if ip in self._cache:
             return self._cache[ip]

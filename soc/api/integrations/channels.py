@@ -13,6 +13,7 @@ import socket
 import ssl
 import threading
 import time
+from email.message import EmailMessage
 from urllib.parse import urlsplit
 
 from soc.api.integrations import formats, netguard
@@ -178,71 +179,86 @@ class EmailChannel(Channel):
 
     def send(self, item: Item) -> None:
         s = self.s
-        if s.smtp_username and s.smtp_security == "none":
-            raise DeliveryError("refusing to send a password without TLS "
-                                "(IDPS_SOC_SMTP_SECURITY is none)", retryable=False)
         msg = formats.build_email(item, s.smtp_from, s.smtp_to, s.public_url)
-        timeout = s.notify_timeout_seconds
-        client = None
-        # `timeout` is per socket operation; the watchdog bounds the whole conversation.
-        with Watchdog(timeout) as dog:
+        send_email(s, msg, list(s.smtp_to))
+
+
+def send_email(s: SocSettings, msg: EmailMessage, recipients: list[str],
+               timeout: float | None = None,
+               attachment: tuple[str, str, bytes] | None = None) -> None:
+    """Send one prepared message through the configured SMTP server (the alert channel and the
+    weekly report both use this). Raises DeliveryError, whose text never holds an address or a
+    secret. `timeout` bounds each socket operation and, through the watchdog, the whole
+    conversation; the default is notify_timeout_seconds (a report with an attachment passes more).
+    `attachment`: one file as (filename, "type/subtype", content), added to `msg`."""
+    if s.smtp_username and s.smtp_security == "none":
+        raise DeliveryError("refusing to send a password without TLS "
+                            "(IDPS_SOC_SMTP_SECURITY is none)", retryable=False)
+    timeout = timeout or s.notify_timeout_seconds
+    if attachment is not None:
+        name, mime, data = attachment
+        maintype, _, subtype = mime.partition("/")
+        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
+    client = None
+    # `timeout` is per socket operation; the watchdog bounds the whole conversation.
+    with Watchdog(timeout) as dog:
+        try:
+            # Created unconnected so the watchdog can cut the connection (and a slow
+            # greeting) short: connect() assigns the socket before it reads the greeting.
+            if s.smtp_security == "ssl":
+                client = smtplib.SMTP_SSL(timeout=timeout, context=ssl.create_default_context())
+            else:
+                client = smtplib.SMTP(timeout=timeout)
+            dog.target = client
+            # smtplib only records the host name when it is given to the constructor, and both
+            # STARTTLS and SMTP_SSL read it (self._host) as the name the server's certificate
+            # must match; without it TLS fails with "check_hostname requires server_hostname".
+            # It is always the configured host, never anything the server says.
+            client._host = s.smtp_host
             try:
-                # Created unconnected so the watchdog can cut the connection (and a slow
-                # greeting) short: connect() assigns the socket before it reads the greeting.
-                if s.smtp_security == "ssl":
-                    client = smtplib.SMTP_SSL(timeout=timeout, context=ssl.create_default_context())
-                else:
-                    client = smtplib.SMTP(timeout=timeout)
-                dog.target = client
-                # smtplib only records the host name when it is given to the constructor, and both
-                # STARTTLS and SMTP_SSL read it (self._host) as the name the server's certificate
-                # must match; without it TLS fails with "check_hostname requires server_hostname".
-                # It is always the configured host, never anything the server says.
-                client._host = s.smtp_host
-                try:
-                    client.connect(s.smtp_host, s.smtp_port_effective)
+                client.connect(s.smtp_host, s.smtp_port_effective)
+                client.ehlo()
+                if s.smtp_security == "starttls":
+                    # Not offered: starttls() raises. No plaintext fallback, ever.
+                    client.starttls(context=ssl.create_default_context())
                     client.ehlo()
-                    if s.smtp_security == "starttls":
-                        # Not offered: starttls() raises. No plaintext fallback, ever.
-                        client.starttls(context=ssl.create_default_context())
-                        client.ehlo()
-                    if s.smtp_username:
-                        client.login(s.smtp_username,
-                                     s.smtp_password.get_secret_value() if s.smtp_password else "")
-                    client.send_message(msg, from_addr=s.smtp_from, to_addrs=list(s.smtp_to))
-                    try:  # sent: a failed goodbye changes nothing
-                        client.quit()
-                    except (OSError, smtplib.SMTPException):
-                        pass
-                finally:
-                    # Not `with client:`: its QUIT on the way out of an error would replace the
-                    # real error with a confusing one (e.g. "SMTP error -1" after a TLS failure).
-                    client.close()
-            except smtplib.SMTPNotSupportedError as exc:
-                raise DeliveryError("the server does not offer STARTTLS; refusing to send "
-                                    "without TLS", retryable=False) from exc
-            except smtplib.SMTPAuthenticationError as exc:
-                raise DeliveryError("SMTP login refused", retryable=False) from exc
-            except smtplib.SMTPRecipientsRefused as exc:
-                raise DeliveryError("SMTP: recipients refused", retryable=False) from exc
-            except smtplib.SMTPResponseException as exc:
-                if dog.expired:
-                    raise DeliveryError("timed out") from exc
-                if exc.smtp_code < 0:  # smtplib's code for a reply it could not read
-                    raise DeliveryError("SMTP: unreadable reply from the server",
-                                        retryable=False) from exc
-                # 4xx replies are transient (try again); 5xx are permanent.
-                raise DeliveryError(f"SMTP error {exc.smtp_code}",
-                                    retryable=exc.smtp_code < 500) from exc
-            except ssl.SSLError as exc:
-                if dog.expired:
-                    raise DeliveryError("timed out") from exc
-                raise DeliveryError(
-                    "TLS error (certificate not trusted or handshake failed)") from exc
-            except (OSError, smtplib.SMTPException) as exc:
-                if dog.expired or isinstance(exc, TimeoutError):
-                    raise DeliveryError("timed out") from exc
-                raise DeliveryError(f"SMTP connection failed ({type(exc).__name__})") from exc
+                if s.smtp_username:
+                    client.login(s.smtp_username,
+                                 s.smtp_password.get_secret_value() if s.smtp_password else "")
+                client.send_message(msg, from_addr=s.smtp_from, to_addrs=list(recipients))
+                try:  # sent: a failed goodbye changes nothing
+                    client.quit()
+                except (OSError, smtplib.SMTPException):
+                    pass
+            finally:
+                # Not `with client:`: its QUIT on the way out of an error would replace the
+                # real error with a confusing one (e.g. "SMTP error -1" after a TLS failure).
+                client.close()
+        except smtplib.SMTPNotSupportedError as exc:
+            raise DeliveryError("the server does not offer STARTTLS; refusing to send "
+                                "without TLS", retryable=False) from exc
+        except smtplib.SMTPAuthenticationError as exc:
+            raise DeliveryError("SMTP login refused", retryable=False) from exc
+        except smtplib.SMTPRecipientsRefused as exc:
+            raise DeliveryError("SMTP: recipients refused", retryable=False) from exc
+        except smtplib.SMTPResponseException as exc:
+            if dog.expired:
+                raise DeliveryError("timed out") from exc
+            if exc.smtp_code < 0:  # smtplib's code for a reply it could not read
+                raise DeliveryError("SMTP: unreadable reply from the server",
+                                    retryable=False) from exc
+            # 4xx replies are transient (try again); 5xx are permanent.
+            raise DeliveryError(f"SMTP error {exc.smtp_code}",
+                                retryable=exc.smtp_code < 500) from exc
+        except ssl.SSLError as exc:
+            if dog.expired:
+                raise DeliveryError("timed out") from exc
+            raise DeliveryError(
+                "TLS error (certificate not trusted or handshake failed)") from exc
+        except (OSError, smtplib.SMTPException) as exc:
+            if dog.expired or isinstance(exc, TimeoutError):
+                raise DeliveryError("timed out") from exc
+            raise DeliveryError(f"SMTP connection failed ({type(exc).__name__})") from exc
 
 
 class SyslogChannel(Channel):

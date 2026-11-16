@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from soc.api import access_log
 from soc.api.common import IPAddress, audit, clean_reason
 from soc.api.models import (
     Action,
@@ -152,10 +153,16 @@ def _since(hours: int) -> datetime:
     return datetime.now(UTC) - timedelta(hours=hours)
 
 
+def hostport(ip: str, port: int) -> str:
+    """host:port, with an IPv6 address in brackets ("[2001:db8::1]:443"): bare, "2001:db8::1:443"
+    reads as one more address."""
+    return f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
+
+
 def _alert_brief(a: Alert) -> dict:
     return {"id": a.id, "received_at": a.received_at.isoformat(), "severity": a.severity.value,
             "predicted_class": a.predicted_class, "confidence": round(a.confidence, 3),
-            "src": f"{a.src_ip}:{a.src_port}", "dst": f"{a.dst_ip}:{a.dst_port}",
+            "src": hostport(a.src_ip, a.src_port), "dst": hostport(a.dst_ip, a.dst_port),
             "protocol": a.protocol, "status": a.status.value, "case_id": a.case_id,
             "sensor_id": a.sensor_id, "source": a.source or "ml", **_rule_fields(a)}
 
@@ -307,6 +314,35 @@ _HANDLERS = {
 }
 
 
+def _host(endpoint: object) -> str | None:
+    """The address of an "ip:port" string as _alert_brief writes it (IPv6 included)."""
+    if not isinstance(endpoint, str):
+        return None
+    if endpoint.startswith("["):  # [addr]:port
+        return endpoint[1:].partition("]")[0] or None
+    host, sep, port = endpoint.rpartition(":")
+    return host if sep and port.isdigit() and ":" not in host else endpoint
+
+
+def returned_addresses(name: str, data: dict) -> list[str]:
+    """The addresses a read-only tool's result exposes, for the access log (the log caps them)."""
+    found: list[str] = []
+
+    def alert(a: dict) -> None:
+        found.extend(x for x in (_host(a.get("src")), _host(a.get("dst"))) if x)
+
+    if name in ("search_alerts", "get_case"):
+        for a in data.get("alerts", []):
+            alert(a)
+    elif name == "get_alert":
+        alert(data)
+    elif name == "top_attackers":
+        found.extend(r["ip"] for r in data.get("top_sources", []))
+    elif name == "list_blocks":
+        found.extend(b["ip"] for b in data.get("blocks", []))
+    return found
+
+
 def run_tool(name: str, raw_input: Any, *, db: Session, user: User,
              settings: SocSettings) -> tuple[str, bool, dict]:
     """Run one tool call. Returns (result text for the model, is_error, result data).
@@ -327,6 +363,17 @@ def run_tool(name: str, raw_input: Any, *, db: Session, user: User,
     except ToolError as exc:
         db.rollback()
         return str(exc), True, {}
+    # Reading addresses through the assistant is an access like any other (soc/api/access_log.py):
+    # logged before the result goes to the model, and if that fails nothing is returned.
+    ips = returned_addresses(name, data)
+    if name == "search_alerts" and args.ip:
+        ips.append(args.ip)  # the address searched for, even when nothing came back
+    if ips:
+        try:
+            access_log.log_access(db, settings, user, f"assistant_{name}",
+                                  target_type="assistant", ips=ips)
+        except HTTPException:
+            return "the access log could not be written; the result is withheld", True, {}
     # Escape < and > so data can't close the <soc_data> wrapper early (an attacker controls
     # some of these strings).
     text = json.dumps(data, default=str, ensure_ascii=False).replace("<", "\\u003c") \

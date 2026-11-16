@@ -2,10 +2,11 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from soc.api import access_log
 from soc.api.auth import AdminUser
 from soc.api.common import audit
 from soc.api.db import get_db
@@ -41,7 +42,7 @@ class FeedbackPage(BaseModel):
 
 @router.get("/training/feedback", response_model=FeedbackPage)
 def training_feedback(
-    admin: AdminUser, db: Annotated[Session, Depends(get_db)],
+    admin: AdminUser, request: Request, db: Annotated[Session, Depends(get_db)],
     model_sha256: Annotated[str | None, Query(pattern=r"^[0-9a-fA-F]{64}$")] = None,
     after_id: Annotated[int, Query(ge=0, le=2**62)] = 0,
     limit: Annotated[int, Query(ge=1, le=MAX_ROWS)] = 500,
@@ -61,5 +62,7 @@ def training_feedback(
     rows = rows[:limit]
     audit(db, admin, "training_feedback_read", "training:feedback",
           {"rows": len(rows), "after_id": after_id, "model_sha256": sha})
-    db.commit()
+    # the export carries source and destination addresses: logged (with the audit row, one commit)
+    access_log.log_access(db, request.app.state.settings, admin, "training_feedback_export",
+                          target_type="training", target="feedback")
     return FeedbackPage(rows=rows, next_after_id=rows[-1].alert_id if more and rows else None)

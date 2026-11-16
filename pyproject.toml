@@ -33,6 +33,7 @@ dependencies = [
     # Step 11: model signatures (Ed25519), MFA secret encryption, sensor certificates, OIDC keys
     "cryptography",
     "segno",  # MFA enrolment QR codes, drawn locally
+    "reportlab",  # SOC weekly PDF report (soc/api/reports.py)
 ]
 
 [project.optional-dependencies]

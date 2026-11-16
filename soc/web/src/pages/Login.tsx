@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 import { api, ApiError } from "../api/client";
 import { useAuth, type LoginResult } from "../auth";
 import { CodeField, MfaEnrol, RecoveryCodes, type MfaEnabled } from "../components/Mfa";
@@ -178,6 +179,7 @@ export default function Login() {
             onDone={() => void finish(step.result).catch((err) => { setError(errorText(err)); restart(); })} />
         )}
         {step.kind !== "password" && step.kind !== "verify" && error && <div className="error" role="alert">{error}</div>}
+        <p className="muted small-text login-foot"><Link to="/privacy">Privacy notice</Link></p>
       </div>
     </div>
   );

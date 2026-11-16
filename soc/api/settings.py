@@ -31,10 +31,11 @@ DEFAULT_SEVERITY_BY_CLASS = {
 SECRET_FIELDS = ("webhook_url", "webhook_secret", "slack_webhook_url", "smtp_password",
                  "abuseipdb_key", "mfa_key", "oidc_client_secret")
 INTEGRATION_PREFIXES = ("notify_", "webhook_", "slack_", "smtp_", "email_", "syslog_",
-                        "abuseipdb_", "oidc_", "mfa_", "sensor_mtls_")
+                        "abuseipdb_", "oidc_", "mfa_", "sensor_mtls_", "privacy_", "report_")
 # Settings where a blank value (docker compose passes "" for an unset ${VAR:-}) also means unset.
 BLANK_IS_UNSET = ("alert_retention_days", "alert_retention_keep_labelled", "audit_retention_days",
-                  "assistant_retention_days", "closed_case_retention_days", "auto_migrate")
+                  "assistant_retention_days", "closed_case_retention_days", "auto_migrate",
+                  "access_log_retention_days")
 _EMAIL = re.compile(r"^[^@\s<>,;\"]+@[^@\s<>,;\"]+$")
 
 
@@ -118,6 +119,22 @@ class SocSettings(BaseSettings):
     audit_retention_days: int = Field(default=365, ge=0, le=36_500)
     assistant_retention_days: int = Field(default=90, ge=0, le=36_500)  # by last update
     closed_case_retention_days: int = Field(default=0, ge=0, le=36_500)  # by last update
+    # The access log (who looked at personal data, soc/api/access_log.py).
+    access_log_retention_days: int = Field(default=365, ge=0, le=36_500)
+    # --- privacy notice (GET /privacy/notice, docs/privacy.md) and weekly report -----------------
+    # All optional: blank = unset. The notice names whoever is responsible for the data.
+    privacy_controller_name: str | None = Field(default=None, max_length=200)
+    privacy_contact_email: str | None = None
+    privacy_grievance_officer: str | None = Field(default=None, max_length=300)
+    # Weekly PDF report (soc/api/reports.py). Masking hides the last octet of the addresses shown.
+    report_mask_ips: bool = False
+    # Emailing it (off by default) once a week through the SMTP settings below. The weekday is
+    # 0 = Monday, the hour is UTC; the report is of the last complete ISO week. Recipients default
+    # to smtp_to.
+    report_email_enabled: bool = False
+    report_email_weekday: int = Field(default=0, ge=0, le=6)
+    report_email_hour_utc: int = Field(default=6, ge=0, le=23)
+    report_email_to: Annotated[list[str], NoDecode] = Field(default_factory=list)
     # Attack world map. GeoLite2 City database path (free MaxMind account needed); without it,
     # public addresses can't be placed. geo_demo gives lab (private) addresses made-up,
     # clearly labelled locations for demonstrations. home_* is where the protected site is.
@@ -196,6 +213,10 @@ class SocSettings(BaseSettings):
     abuseipdb_max_per_day: int = Field(default=900, ge=1, le=1_000_000)  # free tier: 1000
 
     @property
+    def report_recipients(self) -> list[str]:
+        return list(self.report_email_to or self.smtp_to)
+
+    @property
     def smtp_port_effective(self) -> int:
         return self.smtp_port or (465 if self.smtp_security == "ssl" else 587)
 
@@ -240,19 +261,36 @@ class SocSettings(BaseSettings):
                 raise ValueError("IDPS_SOC_PUBLIC_URL must be an http(s) address without a query")
         return value
 
-    @field_validator("smtp_to", mode="before")
+    @field_validator("smtp_to", "report_email_to", mode="before")
     @classmethod
     def _split_recipients(cls, value: object) -> object:
         if isinstance(value, str):
             return [part.strip() for part in value.split(",") if part.strip()]
         return value
 
-    @field_validator("smtp_to")
+    @field_validator("smtp_to", "report_email_to")
     @classmethod
     def _recipients_valid(cls, value: list[str]) -> list[str]:
         if len(value) > 20 or not all(_EMAIL.match(v) for v in value):
-            raise ValueError("IDPS_SOC_SMTP_TO must be up to 20 plain email addresses")
+            raise ValueError("the recipient list must be up to 20 plain email addresses")
         return value
+
+    @field_validator("privacy_contact_email")
+    @classmethod
+    def _contact_valid(cls, value: str | None) -> str | None:
+        if value is not None and not _EMAIL.match(value.strip()):
+            raise ValueError("IDPS_SOC_PRIVACY_CONTACT_EMAIL must be a plain email address")
+        return None if value is None else value.strip()
+
+    @field_validator("privacy_controller_name", "privacy_grievance_officer")
+    @classmethod
+    def _notice_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if any(not c.isprintable() for c in value):
+            raise ValueError("privacy notice text must be plain, printable text")
+        return value or None
 
     @field_validator("smtp_from")
     @classmethod

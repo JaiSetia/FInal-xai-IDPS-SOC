@@ -115,6 +115,7 @@ def _canonical_ip(value: str) -> str:
     return str(addr)
 
 
+canonical_ip = _canonical_ip  # public name for other modules (soc/api/privacy.py)
 IPAddress = Annotated[str, AfterValidator(_canonical_ip)]
 
 

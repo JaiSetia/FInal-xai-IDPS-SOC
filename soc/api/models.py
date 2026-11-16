@@ -304,3 +304,49 @@ class ModelVersion(Base):
     version: Mapped[str] = mapped_column(String(80))
     first_seen: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
     last_seen: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+
+# --- privacy and reports (roadmap step 13) ----------------------------------------------------
+
+class AccessLog(Base):
+    """Who looked at personal data (soc/api/access_log.py). One row per subject IP address; the
+    address itself is never stored here, only `subject_fp`, a keyed HMAC-SHA256 fingerprint of it.
+    There is deliberately no foreign key to users: the log outlives account changes."""
+
+    __tablename__ = "access_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, index=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    username: Mapped[str] = mapped_column(String(64), index=True)
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    target_type: Mapped[str] = mapped_column(String(32), default="")
+    target: Mapped[str] = mapped_column(String(128), default="")
+    subject_fp: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+
+class ErasureRecord(Base):
+    """One erasure of an IP address on request (soc/api/privacy.py). Holds no address."""
+
+    __tablename__ = "erasure_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, index=True)
+    requested_by: Mapped[str] = mapped_column(String(64))
+    reason: Mapped[str] = mapped_column(String(500))
+    subject_fp: Mapped[str] = mapped_column(String(64), index=True)
+    counts: Mapped[dict] = mapped_column(JSON)
+
+
+class ReportRun(Base):
+    """The weekly report of one ISO week was claimed for emailing. `week` is unique, so a restart
+    or a second process never sends the same week twice (soc/api/reports.py)."""
+
+    __tablename__ = "report_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    week: Mapped[str] = mapped_column(String(8), unique=True, index=True)  # "2026-W45"
+    generated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    emailed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    recipients_count: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(String(300), nullable=True)

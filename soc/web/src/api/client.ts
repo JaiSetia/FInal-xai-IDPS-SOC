@@ -127,3 +127,30 @@ export async function streamNdjson(path: string, json: unknown, onEvent: (e: Rec
   buffer += decoder.decode(); // flush a multi-byte character split across chunks
   emitLine(buffer); // a last line without a trailing newline
 }
+
+/** GET a file the API serves (e.g. the weekly PDF) with the access token, and hand it to the
+ *  browser as a download. A plain link can't send the token. */
+export async function download(path: string, fallbackName: string): Promise<void> {
+  const headers = new Headers();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(BASE + path, { headers });
+  if (res.status === 401 && token) setToken(null);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new ApiError(res.status, detailMessage(text ? safeJson(text) : null, `${res.status} ${res.statusText}`));
+  }
+  if (!(res.headers.get("Content-Type") ?? "").startsWith("application/pdf")) {
+    throw new ApiError(res.status, "the SOC did not send a PDF"); // e.g. a proxy's HTML page
+  }
+  const blob = await res.blob();
+  const named = /filename="?([^";]+)"?/.exec(res.headers.get("Content-Disposition") ?? "")?.[1] ?? "";
+  const name = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}\.pdf$/.test(named) ? named : fallbackName;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}

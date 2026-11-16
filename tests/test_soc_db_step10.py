@@ -205,7 +205,9 @@ def test_a_refused_adoption_changes_nothing(tmp_path):
 
 def test_the_baseline_does_not_depend_on_the_live_models():
     meta = migrate.baseline_metadata()
-    assert set(meta.tables) == set(Base.metadata.tables)
+    # 0001 is frozen: the tables added by later migrations (0003: privacy and reports) are not in it
+    assert set(meta.tables) == set(Base.metadata.tables) - {"access_log", "erasure_records",
+                                                          "report_runs"}
     assert meta is not Base.metadata
     assert "ix_blocks_alert_id" in {i.name for i in meta.tables["blocks"].indexes}
 

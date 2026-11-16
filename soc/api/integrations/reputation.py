@@ -10,12 +10,13 @@ empty after a restart. Errors are never cached.
 from __future__ import annotations
 
 import http.client
+import ipaddress
 import json
 import ssl
 import threading
 import time
 from collections import OrderedDict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future
 from datetime import UTC, datetime
 from urllib.parse import urlencode
@@ -86,6 +87,7 @@ class ReputationService:
         self._cache: OrderedDict[str, tuple[float, dict]] = OrderedDict()  # LRU: newest last
         self._calls: deque[float] = deque()  # times of actual lookups, for the limits
         self._inflight: dict[str, Future] = {}
+        self._erased: set[str] = set()  # looked up while being erased: never cached (see forget)
         self._lock = threading.Lock()
 
     @property
@@ -128,6 +130,19 @@ class ReputationService:
         mine.set_result(result)
         return result, True
 
+    def forget(self, ips: Iterable[str], *, dry_run: bool = False) -> int:
+        """Drop the cached results for these (normalised) addresses; returns how many entries.
+        A lookup in flight for one of them is not cached when it finishes. Nothing is persisted
+        anywhere else: the cache is per process and in memory only."""
+        wanted = set(ips)
+        with self._lock:
+            hits = [k for k in self._cache if _same_address(k, wanted)]
+            if not dry_run:
+                for k in hits:
+                    del self._cache[k]
+                self._erased |= {k for k in self._inflight if _same_address(k, wanted)}
+        return len(hits)
+
     def _do_fetch(self, ip: str, now: float) -> dict:
         try:
             data = self._fetch(ip, self.s.abuseipdb_key.get_secret_value(),
@@ -146,11 +161,24 @@ class ReputationService:
         except Exception as exc:  # noqa: BLE001
             return _unavailable(ip, f"lookup failed ({type(exc).__name__})")
         with self._lock:
+            if ip in self._erased:  # erased while this lookup ran: forget it, do not cache it
+                self._erased.discard(ip)
+                return result
             self._cache[ip] = (now, result)
             self._cache.move_to_end(ip)
             while len(self._cache) > MAX_CACHE:
                 self._cache.popitem(last=False)
         return result
+
+
+def _same_address(text: str, wanted: set[str]) -> bool:
+    try:
+        addr = ipaddress.ip_address(text)
+    except ValueError:
+        return text in wanted
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return str(addr) in wanted
 
 
 def _int(value: object) -> int | None:

@@ -11,7 +11,8 @@ Policy (settings, 0 = keep forever; docs/soc.md "Retention"):
 - audit entries older than audit_retention_days, assistant conversations not updated for
   assistant_retention_days, closed cases (and their notes) not updated for
   closed_case_retention_days (their alerts stay unless old enough themselves: the link is cleared),
-  would-block records older than would_block_retention_days.
+  would-block records older than would_block_retention_days, access-log rows older than
+  access_log_retention_days.
 
 Rows go in batches of BATCH, one transaction per batch, so writers are never blocked for long.
 A run that deleted anything writes one audit entry `retention_prune` with the per-table counts.
@@ -30,6 +31,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 
 from soc.api.models import (
+    AccessLog,
     Alert,
     AlertStatus,
     AssistantConversation,
@@ -49,7 +51,7 @@ INTERVAL_SECONDS = 3600.0
 FIRST_RUN_DELAY_SECONDS = 30.0
 PAUSE_SECONDS = 0.05  # between batches of a background run, so other writers get in
 TABLES = ("alerts", "case_notes", "cases", "audit_log", "assistant_conversations",
-          "would_blocks")
+          "would_blocks", "access_log")
 
 
 def policy(settings: SocSettings) -> dict:
@@ -60,6 +62,7 @@ def policy(settings: SocSettings) -> dict:
         "assistant_retention_days": settings.assistant_retention_days,
         "closed_case_retention_days": settings.closed_case_retention_days,
         "would_block_retention_days": settings.would_block_retention_days,
+        "access_log_retention_days": settings.access_log_retention_days,
     }
 
 
@@ -241,6 +244,13 @@ def prune(db: Session, settings: SocSettings, now: datetime | None = None, *,
         else:
             _batches(db, AssistantConversation, cond, pause, counts, stop, problems,
                      _simple(db, AssistantConversation, cond))
+    if settings.access_log_retention_days and not _stopped(stop):
+        cond = AccessLog.at < cutoff(settings.access_log_retention_days)
+        if dry_run:
+            counts["access_log"] = _count(db, AccessLog, cond)
+        else:
+            _batches(db, AccessLog, cond, pause, counts, stop, problems,
+                     _simple(db, AccessLog, cond))
     if not _stopped(stop):
         cond = WouldBlock.at < cutoff(settings.would_block_retention_days)
         if dry_run:

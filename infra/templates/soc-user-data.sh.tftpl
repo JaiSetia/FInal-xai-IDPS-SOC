@@ -130,7 +130,7 @@ services:
     command: >
       sh -c "pip install --no-cache-dir -c /repo/requirements.lock
       fastapi uvicorn websockets sqlalchemy pydantic pydantic-settings pyjwt anthropic geoip2
-      argon2-cffi 'psycopg[binary]' alembic cryptography segno pandas
+      argon2-cffi 'psycopg[binary]' alembic cryptography segno pandas reportlab
       && exec uvicorn soc.api.main:app --host 0.0.0.0 --port 8000
       --proxy-headers --forwarded-allow-ips='*' --ws-max-size 65536"
     # No published ports: only Caddy, on the same network, reaches the API.

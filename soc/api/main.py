@@ -15,13 +15,14 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from soc.api import auth, oidc
+from soc.api import auth, oidc, privacy, reports
 from soc.api.broadcast import AlertBroadcaster
 from soc.api.db import init_db, make_engine, make_session_factory
 from soc.api.geo import GeoLocator
 from soc.api.integrations.manager import NotificationManager
 from soc.api.integrations.reputation import ReputationService
 from soc.api.limits import BodyLimitMiddleware
+from soc.api.reports import ReportRunner
 from soc.api.retention import RetentionRunner
 from soc.api.routes import (
     actions,
@@ -51,7 +52,9 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.retention.start()  # first pass shortly after start, then hourly
+        app.state.report_runner.start()  # only runs when weekly report email is on
         yield
+        app.state.report_runner.stop()
         app.state.retention.stop()
         app.state.notifier.close()  # stop the notification workers
 
@@ -62,6 +65,7 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
     app.state.engine = engine
     app.state.session_factory = make_session_factory(engine)
     app.state.retention = RetentionRunner(app.state.session_factory, settings)
+    app.state.report_runner = ReportRunner(app.state.session_factory, settings)
     app.state.geo = GeoLocator(settings.geoip_db, settings.geo_demo)
     # The assistant is off (None) when no Anthropic credentials are configured.
     from soc.assistant.llm import make_llm
@@ -106,7 +110,7 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
     app.include_router(auth.router)
     app.include_router(oidc.router)
     for module in (alerts, live, blocks, actions, cases, metrics, geo, assistant, admin, sensors,
-                   training, integrations):
+                   training, integrations, privacy, reports):
         app.include_router(module.router)
     return app
 

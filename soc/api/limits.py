@@ -30,6 +30,8 @@ LIMITS: tuple[tuple[str, int], ...] = (
     ("/auth", 8 * KiB),                  # MFA steps (a 2 KiB challenge token), SSO callback
     ("/assistant", 64 * KiB),            # a 4000 character message, escaped
     ("/cases", 128 * KiB),               # a 10,000 character note, escaped; 100 alert ids
+    ("/admin/privacy", 4 * KiB),         # an address and a reason of at most 500 characters
+    ("/admin/reports", 1 * KiB),         # no body: the week is a query parameter
     ("/admin", 16 * KiB),
 )
 DEFAULT_LIMIT = 256 * KiB  # everything else

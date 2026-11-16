@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from soc.api.db import Base, init_db, make_engine
 from soc.api.models import (
+    AccessLog,
     Action,
     ActionKind,
     ActionStatus,
@@ -24,7 +25,9 @@ from soc.api.models import (
     Case,
     CaseNote,
     CaseStatus,
+    ErasureRecord,
     ModelVersion,
+    ReportRun,
     Role,
     SensorStatus,
     SensorToken,
@@ -135,6 +138,11 @@ def populate(engine, now=None) -> None:
         db.add(SensorStatus(sensor_id=s1.id, payload={"cpu": 0.5}, last_seen_at=now))
         db.add(ModelVersion(sensor_id=s1.id, name="m", sha256="d" * 64, version="v1",
                             first_seen=now, last_seen=now))
+        db.add(AccessLog(at=now, user_id=admin.id, username="admin", action="alert_view",
+                         target_type="alert", target="1", subject_fp="e" * 64))
+        db.add(ErasureRecord(at=now, requested_by="admin", reason="request", subject_fp="e" * 64,
+                             counts={"alerts": 1}))
+        db.add(ReportRun(week="2026-W10", generated_at=now, emailed_at=now, recipients_count=1))
         db.commit()
     # extra float edge cases and a unicode-heavy row can not be stored in JSON portably; skip
 

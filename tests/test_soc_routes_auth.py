@@ -10,7 +10,12 @@ PUBLIC = {("GET", "/health"), ("POST", "/auth/login"),
           ("GET", "/auth/oidc/config"), ("POST", "/auth/oidc/start"), ("POST", "/auth/oidc/callback"),
           # The MFA sign-in step: authenticated by its challenge token in the body
           # (tests/test_soc_mfa.py); the other MFA routes need a bearer token as usual.
-          ("POST", "/auth/mfa/verify")}
+          ("POST", "/auth/mfa/verify"),
+          # The privacy notice is for data principals (the people whose traffic is monitored), who
+          # have no SOC account. It holds no secrets: only what the operator set for the notice,
+          # the retention periods in force and channel names, never their targets
+          # (tests/test_soc_privacy.py).
+          ("GET", "/privacy/notice")}
 
 
 def flat_routes(routes, prefix=""):
@@ -65,6 +70,9 @@ def test_public_routes_are_only_health_and_login(soc_app):
     ("POST", "/admin/users/1/disable"), ("POST", "/admin/users/1/enable"),
     ("POST", "/admin/users/1/reset-password"), ("POST", "/admin/sensors/1/revoke"),
     ("GET", "/admin/integrations"), ("POST", "/admin/integrations/webhook/test"),
+    ("POST", "/admin/privacy/erase/preview"), ("POST", "/admin/privacy/erase"),
+    ("GET", "/admin/privacy/erasures"), ("GET", "/admin/privacy/access-log"),
+    ("POST", "/admin/reports/weekly/email"),
 ])
 def test_analysts_cannot_use_admin_routes(client, analyst_headers, method, path):
     assert client.request(method, path, json={}, headers=analyst_headers).status_code == 403

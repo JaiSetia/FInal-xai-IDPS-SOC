@@ -638,3 +638,57 @@ that release had no installer. A Helm chart is not provided.
 
 2,043 Python tests passed (29 skipped, PostgreSQL-only), 981 dashboard tests passed.
 
+## Reports and privacy: weekly PDF and DPDP controls (16 November 2026)
+
+Roadmap step 13. Backend by a Sonnet implementer, reviewed three times by an Opus reviewer;
+dashboard pages (Reports, Privacy) by this session, reviewed by a Sonnet reviewer.
+
+### Weekly PDF report from the lab's data
+
+Generated from the lab's PostgreSQL database (1.08M alerts) in **1.8 s**, 6 KB, two pages:
+1,077,550 alerts in week 2026-W46 (Saturday the busiest day with 1.02M), 99.98% port scans,
+the top 10 source addresses, 10 blocks of the attacker 10.10.1.10 (9 automatic, 1 by an analyst),
+41 dry-run would-blocks, the analysts' false-positive rate (24 of 25 triaged), detection latency
+(p50 121 s), and model health (drift level 9.86 flagged, the two model versions seen). Every page
+carries a personal-data footer. It is downloadable from the Reports page and can be emailed every
+Monday through the SOC's email settings (off by default).
+
+### Erasing an address everywhere (lab, PostgreSQL)
+
+The acceptance test erased 50.63.243.230 (a CIC-IDS2017 replay address), after a backup:
+
+| Check | Before | After |
+|---|---|---|
+| Erasure preview | 7 alerts, 1 audit entry | all zero |
+| Independent scan of all 16 tables (each whole row as text) | 7 alerts, 1 audit entry | none |
+| Weekly PDF for the same week | address in the top 10 | absent |
+| Erasure record | | kept with its reason, without the address |
+
+The erasure took 4.7 s; the preview 4.9 s. Writers wait only for the short write phase (0.01 s
+for this address; about 1 s for an address with 50,000 alerts), since the scan runs outside the
+write lock. The access log keeps only keyed fingerprints of addresses, so it needs no erasure
+and still answers "who looked at this address?". What erasure cannot reach is documented in
+docs/privacy.md: notifications and SIEM copies already sent, backups until they are deleted,
+AbuseIPDB, and web server logs.
+
+### Reviews
+
+The Opus reviews found, among others: a running assistant reply that could write an erased address
+back, a manual "send now" that stopped the scheduled email, IPv6 spellings the search missed, a
+scan that blocked writes for about 19 s on SQLite, rows written during an erasure surviving it, and
+reads by the assistant's tools that were not access-logged. All were fixed and tested, on SQLite
+and on PostgreSQL. The UI review found a stale preview that could erase an address the admin had
+not retyped; fixed.
+
+### Tests
+
+2,300 Python tests passed on SQLite (34 skipped, PostgreSQL-only); the privacy, report, access-log,
+migration and assistant suites also passed on PostgreSQL 16 (257). 1,038 dashboard tests passed.
+
+### Summary for the report
+
+The SOC now documents itself to the people whose data it holds: a public privacy notice with the
+real retention periods, an access log of who viewed which address, and a verified way to erase an
+address from every table on request, as India's DPDP Act expects of a data fiduciary. A weekly PDF
+gives management the same numbers without a login to the dashboard.
+

@@ -52,8 +52,11 @@ def _old_rows(engine):
     return [tuple(r) for r in rows]
 
 
-def test_the_chain_is_0001_then_0002():
-    assert migrate.head_revision() == "0002_mfa_oidc"
+def test_the_chain_is_0001_0002_0003():
+    assert migrate.head_revision() == "0003_privacy_reports"
+    script = migrate._script()
+    assert script.get_revision("0003_privacy_reports").down_revision == "0002_mfa_oidc"
+    assert script.get_revision("0002_mfa_oidc").down_revision == "0001_initial"
 
 
 def test_upgrade_adds_the_columns_and_existing_users_get_mfa_off(any_engine):
@@ -61,7 +64,7 @@ def test_upgrade_adds_the_columns_and_existing_users_get_mfa_off(any_engine):
     assert _revision(any_engine) == "0001_initial"
     assert not NEW_COLUMNS & _columns(any_engine)
     before = _old_rows(any_engine)
-    _step(any_engine, "upgrade", "head")
+    _step(any_engine, "upgrade", "0002_mfa_oidc")
     assert _revision(any_engine) == "0002_mfa_oidc"
     assert NEW_COLUMNS <= _columns(any_engine)
     assert "ux_users_oidc" in _index_names(any_engine)
@@ -74,6 +77,7 @@ def test_upgrade_adds_the_columns_and_existing_users_get_mfa_off(any_engine):
     for row in rows:
         assert not row[0]  # mfa_enabled false
         assert row[1:] == (None,) * 6
+    _step(any_engine, "upgrade", "head")
     assert migrate.check(any_engine) == []
 
 

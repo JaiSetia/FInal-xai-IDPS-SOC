@@ -147,6 +147,15 @@ class ChannelRunner:
                 self._dedupe.clear()
         self._dedupe[key] = (now, rank)
 
+    def forget_ips(self, ips: set[str], *, dry_run: bool = False) -> int:
+        """Drop de-duplication entries that name one of these addresses (erasure on request)."""
+        with self._lock:
+            hits = [k for k in self._dedupe if any(part in ips for part in k)]
+            if not dry_run:
+                for k in hits:
+                    del self._dedupe[k]
+        return len(hits)
+
     def _forget(self, item: Item) -> None:
         """Delivery finally failed: the next alert of this kind must be allowed to try again."""
         key = item.dedupe_key() if isinstance(item, Event) else None
@@ -349,6 +358,9 @@ class NotificationManager:
 
     def status(self) -> list[dict]:
         return [r.status() for r in self.runners.values()]
+
+    def forget_ips(self, ips: set[str], *, dry_run: bool = False) -> int:
+        return sum(r.forget_ips(ips, dry_run=dry_run) for r in self.runners.values())
 
     def send_test(self, name: str) -> dict:
         return self.runners[name].send_test()

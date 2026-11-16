@@ -241,6 +241,15 @@ services:
       IDPS_SOC_SYSLOG_PROTOCOL: ${LAB_SYSLOG_PROTOCOL:-}
       IDPS_SOC_SYSLOG_CA_FILE: ${LAB_SYSLOG_CA_FILE:-}
       IDPS_SOC_ABUSEIPDB_KEY: ${LAB_ABUSEIPDB_KEY:-}
+      # Step 13: privacy notice contacts, the access log's retention, and the weekly PDF report
+      # (emailed through the SMTP settings above when LAB_REPORT_EMAIL_ENABLED=true).
+      IDPS_SOC_PRIVACY_CONTROLLER_NAME: ${LAB_PRIVACY_CONTROLLER_NAME:-}
+      IDPS_SOC_PRIVACY_CONTACT_EMAIL: ${LAB_PRIVACY_CONTACT_EMAIL:-}
+      IDPS_SOC_PRIVACY_GRIEVANCE_OFFICER: ${LAB_PRIVACY_GRIEVANCE_OFFICER:-}
+      IDPS_SOC_ACCESS_LOG_RETENTION_DAYS: ${LAB_ACCESS_LOG_RETENTION_DAYS:-}
+      IDPS_SOC_REPORT_EMAIL_ENABLED: ${LAB_REPORT_EMAIL_ENABLED:-}
+      IDPS_SOC_REPORT_EMAIL_TO: ${LAB_REPORT_EMAIL_TO:-}
+      IDPS_SOC_REPORT_MASK_IPS: ${LAB_REPORT_MASK_IPS:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import ssl,urllib.request; urllib.request.urlopen('https://127.0.0.1:8443/health', context=ssl.create_default_context(cafile='/run/idps-soc/ca.pem'), timeout=2)"]
       interval: 3s

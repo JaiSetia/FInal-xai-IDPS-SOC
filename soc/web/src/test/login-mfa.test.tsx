@@ -1,3 +1,4 @@
+import { MemoryRouter } from "react-router-dom";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { AuthProvider } from "../auth";
@@ -42,7 +43,7 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); setToken(null); });
 
-const show = () => render(<AuthProvider><Login /></AuthProvider>);
+const show = () => render(<MemoryRouter><AuthProvider><Login /></AuthProvider></MemoryRouter>);
 const fillPassword = async () => {
   fireEvent.change(await screen.findByLabelText("Username"), { target: { value: "alice" } });
   fireEvent.change(screen.getByLabelText("Password"), { target: { value: "pw" } });

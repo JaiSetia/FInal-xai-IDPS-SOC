@@ -7,6 +7,8 @@ import { useLiveStatus } from "./live";
 import { blockingMode, useSensors } from "./sensors";
 import Account from "./pages/Account";
 import Assistant from "./pages/Assistant";
+import Privacy, { PublicPrivacy } from "./pages/Privacy";
+import Reports from "./pages/Reports";
 import Admin from "./pages/Admin";
 import AlertDetail from "./pages/AlertDetail";
 import Alerts from "./pages/Alerts";
@@ -61,7 +63,7 @@ export default function App() {
   const location = useLocation();
 
   if (authLoading) return <p className="muted" style={{ padding: 24 }}>Loading…</p>;
-  if (!me) return <Login />;
+  if (!me) return location.pathname.replace(/\/+$/, "") === "/privacy" ? <PublicPrivacy /> : <Login />;
 
   return (
     <div className="app">
@@ -75,6 +77,8 @@ export default function App() {
             <NavLink to="/cases">Cases</NavLink>
             <NavLink to="/maps">Maps</NavLink>
             <NavLink to="/assistant">Assistant</NavLink>
+            <NavLink to="/reports">Reports</NavLink>
+            <NavLink to="/privacy">Privacy</NavLink>
             {me.role === "admin" && <NavLink to="/admin">Admin</NavLink>}
           </nav>
           <div className="topbar-status">
@@ -100,6 +104,8 @@ export default function App() {
               <Route path="/cases/:id" element={<Cases />} />
               <Route path="/maps" element={<Suspense fallback={loading}><Maps /></Suspense>} />
               <Route path="/account" element={<Account />} />
+              <Route path="/reports" element={<Reports />} />
+              <Route path="/privacy" element={<Privacy />} />
               {/* Old addresses, kept so bookmarks and links in docs still work. */}
               <Route path="/metrics" element={<Redirect to="/" />} />
               <Route path="/blocks" element={<Redirect to="/response" />} />

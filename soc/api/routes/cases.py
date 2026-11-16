@@ -3,11 +3,12 @@
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
+from soc.api import access_log
 from soc.api.auth import AnyUser
 from soc.api.common import Cursor, Limit, Page, audit, get_or_404, paginate
 from soc.api.db import get_db
@@ -160,8 +161,15 @@ def list_cases(user: AnyUser, db: Annotated[Session, Depends(get_db)],
 
 
 @router.get("/{case_id}", response_model=CaseDetail)
-def get_case(case_id: int, user: AnyUser, db: Annotated[Session, Depends(get_db)]):
-    return _detail(db, get_or_404(db, Case, case_id, "case"))
+def get_case(case_id: int, user: AnyUser, request: Request,
+             db: Annotated[Session, Depends(get_db)]):
+    detail = _detail(db, get_or_404(db, Case, case_id, "case"))
+    # the case itself, then the addresses of its alerts (capped by access_log.MAX_SUBJECTS)
+    ips = [ip for a in detail.alerts for ip in (a.src_ip, a.dst_ip)]
+    access_log.log_access(db, request.app.state.settings, user, "case_view",
+                          target_type="case", target=str(case_id), ips=ips,
+                          without_subject=True)
+    return detail
 
 
 @router.patch("/{case_id}", response_model=CaseDetail)

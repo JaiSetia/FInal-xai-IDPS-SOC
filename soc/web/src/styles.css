@@ -487,3 +487,15 @@ table.heatmap { min-width: 0; border-spacing: 3px; font-size: 12px; }
   .map-shot, .map-ripple { display: none; }
   .feed-item, .topo-node.pulse { animation: none; }
 }
+
+/* --- Reports and Privacy (step 13) --- */
+.warn-text { color: var(--warn-text); }
+table.compact td { padding: 4px 10px 4px 0; border: 0; }
+.privacy-notice { display: flex; flex-direction: column; gap: 16px; max-width: 72ch; }
+.privacy-notice h3 { margin: 0 0 6px; font-size: 15px; }
+.privacy-notice ul { margin: 0; padding-left: 20px; }
+.privacy-notice li { margin: 3px 0; }
+.erase-preview { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.public-page { max-width: 860px; margin: 0 auto; padding: 24px 16px; }
+.public-head { margin-bottom: 16px; }
+.login-foot { margin: 12px 0 0; text-align: center; }

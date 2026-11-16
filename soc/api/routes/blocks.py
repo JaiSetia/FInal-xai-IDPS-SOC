@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
+from soc.api import access_log
 from soc.api.auth import AnyUser, Sensor
 from soc.api.common import Cursor, IPAddress, Limit, Page, audit, paginate, strip_unsafe
 from soc.api.db import get_db
@@ -268,7 +269,7 @@ def ingest_blocks(batch: BlockBatch, sensor: Sensor, request: Request,
 
 
 @router.get("/blocks", response_model=Page[BlockOut])
-def list_blocks(user: AnyUser, db: Annotated[Session, Depends(get_db)],
+def list_blocks(user: AnyUser, request: Request, db: Annotated[Session, Depends(get_db)],
                 active: Annotated[bool | None, Query()] = None,
                 ip: Annotated[IPAddress | None, Query()] = None,
                 limit: Limit = 50, cursor: Cursor = None):
@@ -283,7 +284,11 @@ def list_blocks(user: AnyUser, db: Annotated[Session, Depends(get_db)],
     if cursor:
         query = query.where(Block.id < cursor)
     rows, next_cursor = paginate(list(db.scalars(query)), limit)
-    return Page[BlockOut](items=[block_out(b, now) for b in rows], next_cursor=next_cursor)
+    page = Page[BlockOut](items=[block_out(b, now) for b in rows], next_cursor=next_cursor)
+    if ip:  # logged before the answer is served (soc/api/access_log.py)
+        access_log.log_access(db, request.app.state.settings, user, "block_search_by_ip",
+                              target_type="block_list", ips=[ip])
+    return page
 
 
 class WouldBlockOut(BaseModel):
@@ -300,7 +305,7 @@ class WouldBlockOut(BaseModel):
 
 
 @router.get("/blocks/would", response_model=Page[WouldBlockOut])
-def list_would_blocks(user: AnyUser, db: Annotated[Session, Depends(get_db)],
+def list_would_blocks(user: AnyUser, request: Request, db: Annotated[Session, Depends(get_db)],
                       ip: Annotated[IPAddress | None, Query()] = None,
                       since_hours: Annotated[int, Query(ge=1, le=24 * 30)] = 24,
                       limit: Limit = 50, cursor: Cursor = None):
@@ -313,5 +318,9 @@ def list_would_blocks(user: AnyUser, db: Annotated[Session, Depends(get_db)],
     if cursor:
         query = query.where(WouldBlock.id < cursor)
     rows, next_cursor = paginate(list(db.scalars(query)), limit)
-    return Page[WouldBlockOut](items=[WouldBlockOut.model_validate(r) for r in rows],
+    page = Page[WouldBlockOut](items=[WouldBlockOut.model_validate(r) for r in rows],
                                next_cursor=next_cursor)
+    if ip:
+        access_log.log_access(db, request.app.state.settings, user, "would_block_search_by_ip",
+                              target_type="would_block_list", ips=[ip])
+    return page

@@ -132,6 +132,19 @@ BUSY_TIMEOUT = timedelta(minutes=10)  # a reply still "running" after this is as
 _SENTINEL = object()
 
 
+def save_reply(session_factory, conv_id: int, user_message: dict, new_messages: list[dict]) -> None:
+    """Store a finished reply: the stored messages as they are NOW (an erasure of an IP address
+    may have rewritten them while the reply ran; writing back the copy taken at the start would
+    restore what was erased), then this turn's user message and the new messages."""
+    with session_factory() as s:
+        c = s.get(AssistantConversation, conv_id)
+        c.messages = [*c.messages, user_message, *new_messages]  # a new list: the JSON column updates
+        c.user_turns += 1
+        c.busy_since = None
+        c.updated_at = datetime.now(UTC)
+        s.commit()
+
+
 def _start_reply(app, user_id: int, body: ChatIn) -> tuple[int, list[dict]]:
     """Check limits and claim the conversation (sync DB work, run in the thread pool)."""
     settings = app.state.settings
@@ -227,13 +240,7 @@ async def chat(body: ChatIn, request: Request, user: AnyUser):
             cancel.set()
 
     def save(new_messages: list[dict]) -> None:
-        with app.state.session_factory() as s:
-            c = s.get(AssistantConversation, conv_id)
-            c.messages = history + new_messages  # a new list, so the JSON column is updated
-            c.user_turns += 1
-            c.busy_since = None
-            c.updated_at = datetime.now(UTC)
-            s.commit()
+        save_reply(app.state.session_factory, conv_id, history[-1], new_messages)
 
     def work() -> None:
         try:

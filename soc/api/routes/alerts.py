@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from idps.features import MODEL_FEATURES
 from idps.features.labels import CIC_CLASSES
+from soc.api import access_log
 from soc.api.auth import AnyUser, Sensor
 from soc.api.common import (
     Cursor,
@@ -349,7 +350,7 @@ def ingest_alerts(batch: AlertBatch, sensor: Sensor, request: Request,
 
 @router.get("/alerts", response_model=Page[AlertOut])
 def list_alerts(
-    user: AnyUser, db: Annotated[Session, Depends(get_db)],
+    user: AnyUser, request: Request, db: Annotated[Session, Depends(get_db)],
     severity: Annotated[list[Severity] | None, Query(max_length=4)] = None,
     predicted_class: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
     ip: Annotated[IPAddress | None, Query(description="matches source or destination")] = None,
@@ -381,13 +382,23 @@ def list_alerts(
     if cursor:
         query = query.where(Alert.id < cursor)
     rows, next_cursor = paginate(list(db.scalars(query)), limit)
-    return Page[AlertOut](items=[AlertOut.model_validate(r) for r in rows],
+    page = Page[AlertOut](items=[AlertOut.model_validate(r) for r in rows],
                           next_cursor=next_cursor)
+    if ip:  # a search for one address is a look at that person's data: logged before it is served
+        access_log.log_access(db, request.app.state.settings, user, "alert_search_by_ip",
+                              target_type="alert_list", ips=[ip])
+    return page
 
 
 @router.get("/alerts/{alert_id}", response_model=AlertDetail)
-def get_alert(alert_id: int, user: AnyUser, db: Annotated[Session, Depends(get_db)]):
-    return AlertDetail.model_validate(get_or_404(db, Alert, alert_id, "alert"))
+def get_alert(alert_id: int, user: AnyUser, request: Request,
+              db: Annotated[Session, Depends(get_db)]):
+    alert = get_or_404(db, Alert, alert_id, "alert")
+    out = AlertDetail.model_validate(alert)
+    access_log.log_access(db, request.app.state.settings, user, "alert_view",
+                          target_type="alert", target=str(alert.id),
+                          ips=[alert.src_ip, alert.dst_ip])
+    return out
 
 
 @router.patch("/alerts/{alert_id}", response_model=AlertDetail)
