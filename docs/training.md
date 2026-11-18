@@ -73,3 +73,29 @@ used a fixed port (DoS to 80, SSH-Patator to 22, FTP-Patator to 21, PortScan to 
 score high by learning the lab's ports rather than traffic behaviour, and then fail on other
 networks or on an attacker who changes the port. Always also train with `--drop-feature dst_port`
 and report both results; the gap is the part of the score that is port memorisation.
+
+## Public datasets (CSE-CIC-IDS2018)
+
+`python -m idps.public run` trains the same pipeline on CSE-CIC-IDS2018's own feature table and tests
+CIC-IDS2017 <-> CSE-CIC-IDS2018 generalisation; see `docs/training-dataset1.md`. For that, `split_by_class_time`
+(and `make_split`) take three optional arguments that default to the behaviour above: `dup_columns`
+(the columns that define an exact duplicate, default `MODEL_FEATURES`), `group_col` (which column forms
+the (day, group) groups, default `label`) and `max_drop_share` (shrink the gap so at most this share
+of a group is dropped, default off). The train-overlap share is computed with 64-bit row hashes.
+
+Shrinking gap rule (`max_drop_share`): when a group would lose more than that share, the gap becomes
+the `max_drop_share` quantile of the rows' distances to the two cuts, taken with `method="lower"` (an
+actual distance, no interpolation) and never above the nominal `gap_ms`. A group of fewer than about 10
+rows can therefore end up with a gap of 0 (nothing dropped, train and test touch at the cut): those
+groups are listed in the split description as `groups_with_zero_effective_gap` ("day:label"). With the
+defaults (no `max_drop_share`) the split is unchanged; `tests/test_split_regression.py` compares it row
+for row with the version before these options.
+
+Bundles from the public datasets (`extraction_meta.public_dataset`) are comparison-only: `resplit`
+(used by `drift-reference` and `retrain`) refuses them with an error, because their split used group,
+day-key and duplicate settings that the split description does not record.
+
+`python -m idps.public unsw` does the same for UNSW-NB15 (Argus/Bro features, two capture days); see the
+UNSW-NB15 section of `docs/training-dataset1.md`. It uses one more optional argument of `split_by_class_time`
+and `make_split`: `day_col` (default None = the UTC day of `start_ms`), a column that names the capture session
+used as the "day" of the groups.
