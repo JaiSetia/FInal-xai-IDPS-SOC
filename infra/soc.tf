@@ -154,7 +154,7 @@ data "aws_ssm_parameter" "al2023" {
 }
 
 resource "aws_instance" "soc" {
-  ami                    = data.aws_ssm_parameter.al2023[local.soc_arch].insensitive_value
+  ami                    = data.aws_ssm_parameter.al2023[local.soc_arch].insecure_value
   instance_type          = var.soc_instance_type
   subnet_id              = aws_subnet.soc_public.id
   vpc_security_group_ids = [aws_security_group.soc.id]

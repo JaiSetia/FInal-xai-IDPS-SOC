@@ -20,11 +20,12 @@ import zlib
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import BinaryIO
-
-import pandas as pd
+from typing import TYPE_CHECKING, BinaryIO
 
 from idps.respond.policy import normalise_ip
+
+if TYPE_CHECKING:  # pandas is imported only when a frame is built: the exporter does not need it
+    import pandas as pd
 
 log = logging.getLogger("idps.cloud.flowlogs")
 
@@ -359,4 +360,6 @@ def to_flow_rows(records: Iterable[FlowLogRecord], *, pair_directions: bool = Tr
 
 def rows_to_frame(rows: Iterable[dict]) -> pd.DataFrame:
     """Rows -> DataFrame with exactly CLOUD_FEATURE_COLUMNS, in order (empty input: 0 rows)."""
+    import pandas as pd
+
     return pd.DataFrame(list(rows), columns=CLOUD_FEATURE_COLUMNS)

@@ -123,7 +123,7 @@ locals {
 }
 
 resource "aws_instance" "victim" {
-  ami                    = data.aws_ssm_parameter.al2023[local.victim_arch].insensitive_value
+  ami                    = data.aws_ssm_parameter.al2023[local.victim_arch].insecure_value
   instance_type          = var.victim_instance_type
   subnet_id              = aws_subnet.target.id
   vpc_security_group_ids = [aws_security_group.victim.id]

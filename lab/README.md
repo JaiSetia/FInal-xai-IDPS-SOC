@@ -99,7 +99,7 @@ sensor mounts read-only at `/run/idps-soc`; keys, secret and database stay in th
 - **Sensor certificate.** `bootstrap.py` issues the sensor a client certificate (common name =
   its name at the SOC) from a sensor CA whose key is deleted right after. The SOC listens on 8443
   (dashboard) and 8444 (sensors only, certificate required; the firewall accepts 8444 only from
-  10.10.3.2), and `live.sh` uses 8444 with the certificate. `LAB_SOC_SENSOR_MTLS=false` in `.env`
+  10.10.3.2, plus the addresses in `LAB_SOC_EXTRA_SENSOR_ADDRS`, e.g. the cloud collector 10.10.3.3, see cloud/README.md), and `live.sh` uses 8444 with the certificate. `LAB_SOC_SENSOR_MTLS=false` in `.env`
   goes back to the token alone on 8443.
 - **Signed models.** With `lab/keys/model-signing.pub` present (see [keys/README.md](keys/README.md)),
   the sensor refuses models without a valid signature from your key.

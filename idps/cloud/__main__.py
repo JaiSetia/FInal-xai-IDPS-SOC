@@ -1,10 +1,11 @@
-"""python -m idps.cloud collect --once | parse <file>"""
+"""python -m idps.cloud collect --once | parse <file> | export writer|offline|ship"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -33,9 +34,14 @@ def _collect(args: argparse.Namespace) -> int:
         Collector,
         CollectorConfig,
         CollectorError,
+        GuardRefused,
+        NetworkLost,
         SocClient,
+        emulator_mode,
         load_cloud_bundle,
         make_client,
+        make_guard_check,
+        resolve_sensor_token,
     )
     from idps.cloud.nacl import NaclBlocker
     from idps.config import get_settings
@@ -69,26 +75,47 @@ def _collect(args: argparse.Namespace) -> int:
     if not settings.dry_run and not config.nacl_id:
         print("error: real blocking needs IDPS_CLOUD_NACL_ID (or --nacl-id)", file=sys.stderr)
         return 2
+    guard = None
+    pin: dict = {}
     try:
-        s3 = make_client("s3", config.region)
-        ec2 = make_client("ec2", config.region) if not settings.dry_run else None
+        if emulator_mode():
+            # The emulated AWS: the billing guard (lab/cloud/guard.py, unchanged) must approve the
+            # environment now and every few minutes; the clients are pinned to the endpoint with
+            # the fake keys instead of trusting the environment.
+            guard = make_guard_check()
+            found = guard()
+            if found:
+                print("billing guard: REFUSED, nothing was read", file=sys.stderr)
+                for item in found:
+                    print(f"  - {item}", file=sys.stderr)
+                return 1
+            pin = {"endpoint_url": os.environ["AWS_ENDPOINT_URL"], "fake_credentials": True}
+        s3 = make_client("s3", config.region, **pin)
+        ec2 = make_client("ec2", config.region, **pin) if not settings.dry_run else None
         policy = ResponsePolicy.from_settings(settings, min_flows=config.min_flows)
         blocker = NaclBlocker(
             ec2, config.nacl_id or "acl-dryrun", policy, config.state_dir / "nacl_state.json",
             dry_run=settings.dry_run, max_denies=config.max_denies)
         engine = ResponseEngine(settings, blocker=blocker, policy=policy)
-        bundle = load_cloud_bundle(config.model_path) if config.model_path else None
+        bundle = (load_cloud_bundle(config.model_path, config.model_public_key)
+                  if config.model_path else None)
         post = None
-        if config.soc_url and config.sensor_token:
-            post = SocClient(config.soc_url, config.sensor_token,
-                             ca_file=config.soc_ca_file).post_alerts
-        collector = Collector(config, s3, bundle=bundle, engine=engine, blocker=blocker, post=post)
+        token = resolve_sensor_token(config)
+        if config.soc_url and token:
+            post = SocClient(config.soc_url, token, ca_file=config.soc_ca_file,
+                             client_cert=config.client_cert, client_key=config.client_key).post_alerts
+        collector = Collector(config, s3, bundle=bundle, engine=engine, blocker=blocker, post=post,
+                              guard=guard)
         if args.once:
+            collector.check_guard(force=True)
             collector.run_once()
         else:
             collector.run_forever(args.interval)
     except KeyboardInterrupt:
         return 0
+    except (GuardRefused, NetworkLost) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except (CollectorError, BlockerError, ValueError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -114,6 +141,10 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--model", help="cloud model bundle (IDPS_CLOUD_MODEL)")
     c.add_argument("--state-dir", help="checkpoint and block state (IDPS_CLOUD_STATE_DIR)")
     c.set_defaults(func=_collect)
+
+    from idps.cloud.flowlog_export import add_export_parser
+
+    add_export_parser(sub)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")

@@ -1,9 +1,12 @@
 # infra/: AWS infrastructure for the IDPS (Terraform)
 
 Everything for the cloud part of the project (docs/PLAN.md section 4b) as code, so one
-`terraform destroy` removes it. **Nothing here has been run yet**: Terraform was not installed
-when it was written, and it was never planned or applied against AWS. Expect to fix small things
-on the first `terraform validate` / `plan` (see "First run" below).
+`terraform destroy` removes it. **It has never been applied to real AWS** (the project has no AWS
+account and must never be billed). Since 17 Nov 2026 it is validated and applied, unchanged, to an
+open-source AWS emulator with `lab/cloud/tf.sh` (see `docs/cloud-architecture.md`): all 49 resources
+are created and a second plan shows no changes. That run found and fixed one real bug
+(`insensitive_value` is `insecure_value` on `aws_ssm_parameter`). Real AWS may still differ in small
+ways (see "First run" below).
 
 ## You must do these yourself
 

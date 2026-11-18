@@ -265,3 +265,117 @@ def test_more_local_host_cases(host, local):
     # Not local: "1.2" is resolved like a name and every answer is checked by public_ipv4; "::1"
     # is then refused by valid_host in the main section (email stays blocked, the SOC starts).
     assert _call("local_mail_host", host) is local
+
+
+# --- extra sensors on the mutual-TLS port 8444 (C4: the cloud collector) ----------------------
+
+def _extra(value):
+    env = {**os.environ}
+    env.pop("SOC_EXTRA_SENSOR_ADDRS", None)
+    if value is not None:
+        env["SOC_EXTRA_SENSOR_ADDRS"] = value
+    cmd = f'NETGUARD_LIB=1; . "{SCRIPT}" || exit 9; extra_sensor_addrs; echo DONE'
+    r = subprocess.run([SH, "-c", cmd], capture_output=True, text=True, env=env)  # noqa: PLW1510
+    lines = r.stdout.split()
+    assert r.returncode == 0 and lines[-1] == "DONE", (r.stdout, r.stderr)
+    return lines[:-1], r.stderr
+
+
+def test_no_extra_sensor_by_default():
+    assert _extra(None) == ([], "")
+    assert _extra("") == ([], "")
+    assert _extra(" , ,") == ([], "")
+
+
+def test_the_collector_address_is_accepted():
+    assert _extra("10.10.3.3")[0] == ["10.10.3.3"]
+    assert _extra(" 10.10.3.3 , 10.10.3.4,10.10.3.3")[0] == ["10.10.3.3", "10.10.3.4"]
+
+
+@pytest.mark.parametrize("bad", [
+    "10.10.3.1",        # the Docker gateway
+    "10.10.3.10",       # the SOC itself
+    "10.10.3.0", "10.10.3.255", "10.10.3.256", "10.10.3.03", "10.10.3",
+    "10.10.2.10",       # the victim
+    "10.10.1.10",       # the attacker
+    "10.10.4.30",       # cloud_net
+    "10.10.3.0/24", "0.0.0.0", "any", "10.10.3.3/32", "10.10.3.3;ls", "$(id)", "*", "8.8.8.8",
+    "10.10.30.3", "110.10.3.3", "tcp",
+])
+def test_bad_extra_sensor_entries_are_ignored_and_logged(bad):
+    out, err = _extra(bad)
+    assert out == []
+    assert "ignoring SOC_EXTRA_SENSOR_ADDRS entry" in err
+
+
+def test_a_bad_entry_does_not_cancel_a_good_one():
+    out, err = _extra("10.10.2.10,10.10.3.3")
+    assert out == ["10.10.3.3"] and "10.10.2.10" in err
+
+
+def test_at_most_four_extra_sensors():
+    out, _ = _extra(",".join(f"10.10.3.{n}" for n in range(3, 10)))
+    assert out == [f"10.10.3.{n}" for n in range(3, 7)]
+
+
+FULL_NFT = """#!/bin/sh
+# Records every call; `-f -` also records the rule set it is given.
+echo "nft $*" >> "$FAKE/calls"
+[ "$1" = -f ] && cat >> "$FAKE/calls"
+exit 0
+"""
+FULL_IP = """#!/bin/sh
+case "$*" in
+  "-4 route show default") echo "default via 10.0.0.1 dev eth0" ;;
+  "route") ;;                              # no default route left
+esac
+exit 0
+"""
+FULL_SLEEP = """#!/bin/sh
+kill -TERM "$PPID"   # ends the script's idle loop (its trap exits 0)
+"""
+FULL_TOUCH = """#!/bin/sh
+echo "touch $*" >> "$FAKE/calls"
+"""
+
+
+def _run_script(tmp_path, extra):
+    """Run the whole script with fake nft/ip/sleep/touch (nothing real is changed)."""
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    for name, body in (("nft", FULL_NFT), ("ip", FULL_IP), ("sleep", FULL_SLEEP),
+                       ("touch", FULL_TOUCH)):
+        f = bin_ / name
+        f.write_text(body)
+        f.chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SOC_")}
+    env.update(FAKE=str(tmp_path), PATH=f"{bin_}:{os.environ['PATH']}")
+    if extra is not None:
+        env["SOC_EXTRA_SENSOR_ADDRS"] = extra
+    r = subprocess.run([SH, str(SCRIPT)], capture_output=True, text=True, env=env, timeout=30)  # noqa: PLW1510
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    return (tmp_path / "calls").read_text(), r.stderr
+
+
+def test_default_rules_are_unchanged(tmp_path):
+    """Nothing set: exactly today's input rules, no extra `nft add rule`."""
+    calls, err = _run_script(tmp_path, None)
+    assert "ip saddr 10.10.3.2 tcp dport 8444 accept" in calls
+    assert "tcp dport 8443 accept" in calls
+    assert "nft add rule" not in calls
+    assert "touch /tmp/ready" in calls
+    assert "also open" not in err
+
+
+def test_the_collector_gets_8444_and_nothing_else(tmp_path):
+    calls, err = _run_script(tmp_path, "10.10.3.3")
+    added = [ln for ln in calls.splitlines() if ln.startswith("nft add rule")]
+    assert added == ["nft add rule inet socguard input ip saddr 10.10.3.3 tcp dport 8444 accept"]
+    assert "ip saddr 10.10.3.2 tcp dport 8444 accept" in calls  # the sensor keeps its rule
+    assert "10.10.3.3" in err
+
+
+def test_a_rejected_entry_adds_no_rule_but_the_soc_still_starts(tmp_path):
+    calls, err = _run_script(tmp_path, "10.10.2.10")
+    assert "nft add rule" not in calls and "touch /tmp/ready" in calls
+    assert "ignoring SOC_EXTRA_SENSOR_ADDRS entry '10.10.2.10'" in err

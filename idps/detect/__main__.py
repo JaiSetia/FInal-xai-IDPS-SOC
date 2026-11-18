@@ -139,7 +139,12 @@ def _sign(args: argparse.Namespace) -> int:
     key = load_private_key(args.key)
     # Sign only what loads: the sha256 file, permissions and bundle format are checked first
     # (that unpickles the bundle: sign only bundles you made yourself).
-    load_bundle(args.bundle)
+    if args.cloud:  # a cloud bundle has the flow-log column layout (idps.cloud.collector)
+        from idps.cloud.collector import load_cloud_bundle
+
+        load_cloud_bundle(args.bundle)
+    else:
+        load_bundle(args.bundle)
     out = sign_bundle(args.bundle, key)
     print(f"signed {args.bundle} -> {out}", file=sys.stderr)
     return 0
@@ -239,6 +244,8 @@ def main(argv: list[str] | None = None) -> int:
     sg = sub.add_parser("sign", help="sign a model bundle (writes <bundle>.sig)")
     sg.add_argument("bundle")
     sg.add_argument("--key", required=True, help="the private key from keygen")
+    sg.add_argument("--cloud", action="store_true",
+                    help="the bundle is a cloud model (flow-log features, idps.cloud.train_model)")
     sg.set_defaults(fn=_sign)
     v = sub.add_parser("verify", help="check a model bundle's signature (does not load it)")
     v.add_argument("bundle")

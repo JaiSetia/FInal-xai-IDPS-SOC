@@ -7,6 +7,11 @@
 #   mutual TLS is off) and TCP 8444 from the sensor's address 10.10.3.2 (the mutual-TLS sensor port).
 # - Outbound: only replies, by default. The SOC never opens a connection, so it can't reach the
 #   lab, the Docker host or the internet even if it were compromised.
+# - Optional additional sensors (SOC_EXTRA_SENSOR_ADDRS, from LAB_SOC_EXTRA_SENSOR_ADDRS in lab/.env,
+#   blank by default): TCP 8444 (never 8443) also from those mgmt_net addresses, e.g. the cloud
+#   collector at 10.10.3.3 (lab/cloud/README.md). The lab sensor's rule is always there. An entry
+#   must be a host address 10.10.3.2 to 10.10.3.254 other than the SOC, at most 4; anything else
+#   is ignored and logged, so a typo leaves the port closed, never opens it wider.
 # - Optional exception (SOC_EGRESS_HOSTS, from LAB_SOC_EGRESS_HOSTS in lab/.env): HTTPS (TCP 443)
 #   to the public IPv4 addresses those host names resolve to, e.g. api.abuseipdb.com for IP
 #   reputation or hooks.slack.com for Slack. Each address gets its own /32 route through the
@@ -109,6 +114,24 @@ refresh_all() {  # every configured set; 1 only if all of them failed (one worki
   [ "$tried" = 0 ] || [ "$ok" = 1 ]
 }
 
+MAX_EXTRA_SENSORS=4
+
+sensor_addr_ok() {  # true for a mgmt_net host address a sensor may have: 10.10.3.2 to .254, not the SOC
+  case "$1" in
+    10.10.3.10) return 1 ;;
+    10.10.3.[2-9]|10.10.3.[1-9][0-9]|10.10.3.1[0-9][0-9]|10.10.3.2[0-4][0-9]|10.10.3.25[0-4]) return 0 ;;
+  esac
+  return 1
+}
+
+extra_sensor_addrs() {  # the usable entries of SOC_EXTRA_SENSOR_ADDRS, one per line; the rest are logged
+  for a in $(printf '%s' "${SOC_EXTRA_SENSOR_ADDRS:-}" | tr ',' ' '); do
+    if sensor_addr_ok "$a"; then printf '%s\n' "$a"; else
+      echo "soc-net: ignoring SOC_EXTRA_SENSOR_ADDRS entry '$a' (needs a host address 10.10.3.2-254, not the SOC)" >&2
+    fi
+  done | sort -u | head -n "$MAX_EXTRA_SENSORS"
+}
+
 local_mail_host() {  # true for blank, localhost or a non-public IPv4 literal: nothing to open
   case "$1" in
     ""|localhost|*.localhost) return 0 ;;
@@ -150,6 +173,8 @@ if [ -n "$SMTP_HOST" ] && ! valid_smtp_port "$SMTP_PORT"; then
   SMTP_HOST=""
 fi
 
+EXTRA_SENSORS=$(extra_sensor_addrs)
+
 GW=$(ip -4 route show default | awk '{print $3; exit}')
 ip route del default 2>/dev/null || true
 
@@ -172,6 +197,10 @@ table inet socguard {
   }
 }
 NFT
+for a in $EXTRA_SENSORS; do  # each one is a validated dotted quad
+  nft add rule inet socguard input ip saddr "$a" tcp dport 8444 accept
+  echo "soc-net: sensor port 8444 also open to $a" >&2
+done
 if [ -n "$SMTP_HOST" ]; then  # the port is validated above (25, 465 or 587)
   nft add rule inet socguard output ip daddr @egress_smtp4 tcp dport "$SMTP_PORT" accept
 fi
