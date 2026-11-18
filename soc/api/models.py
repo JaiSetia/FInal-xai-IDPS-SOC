@@ -350,3 +350,259 @@ class ReportRun(Base):
     emailed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     recipients_count: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+
+# --- IAM / RBAC (soc/api/iam, migration 0004_iam) ---------------------------------------------
+# SQLite does not enforce foreign keys here, so the code deletes dependent rows itself; the
+# ON DELETE clauses are what PostgreSQL enforces.
+
+class IamRole(Base):
+    """A named set of permissions. The system roles "admin" and "analyst" are immutable."""
+
+    __tablename__ = "iam_roles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(48), unique=True)
+    description: Mapped[str] = mapped_column(String(255), default="")
+    system: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+
+class IamRolePermission(Base):
+    __tablename__ = "iam_role_permissions"
+
+    role_id: Mapped[int] = mapped_column(ForeignKey("iam_roles.id", ondelete="CASCADE"),
+                                         primary_key=True)
+    permission: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
+class IamGroup(Base):
+    __tablename__ = "iam_groups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(48), unique=True)
+    description: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+
+class IamGroupMember(Base):
+    __tablename__ = "iam_group_members"
+
+    group_id: Mapped[int] = mapped_column(ForeignKey("iam_groups.id", ondelete="CASCADE"),
+                                          primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"),
+                                         primary_key=True, index=True)
+
+
+class IamGroupRole(Base):
+    __tablename__ = "iam_group_roles"
+
+    group_id: Mapped[int] = mapped_column(ForeignKey("iam_groups.id", ondelete="CASCADE"),
+                                          primary_key=True)
+    role_id: Mapped[int] = mapped_column(ForeignKey("iam_roles.id", ondelete="CASCADE"),
+                                         primary_key=True, index=True)
+
+
+class IamUserRole(Base):
+    __tablename__ = "iam_user_roles"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"),
+                                         primary_key=True)
+    role_id: Mapped[int] = mapped_column(ForeignKey("iam_roles.id", ondelete="CASCADE"),
+                                         primary_key=True, index=True)
+
+
+class IamPolicy(Base):
+    """An allow or deny rule: permission patterns ("cloud.*") on resource globs (default "*")."""
+
+    __tablename__ = "iam_policies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(48), unique=True)
+    description: Mapped[str] = mapped_column(String(255), default="")
+    effect: Mapped[str] = mapped_column(String(5))  # "allow" or "deny"
+    permissions: Mapped[list] = mapped_column(JSON)
+    resources: Mapped[list] = mapped_column(JSON)
+    disabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+
+class IamPolicyAttachment(Base):
+    """A policy attached to a user, group or role. `subject_id` has no foreign key (it points at
+    one of three tables): the code removes attachments when the subject is deleted."""
+
+    __tablename__ = "iam_policy_attachments"
+
+    policy_id: Mapped[int] = mapped_column(ForeignKey("iam_policies.id", ondelete="CASCADE"),
+                                           primary_key=True)
+    subject_type: Mapped[str] = mapped_column(String(8), primary_key=True)  # user|group|role
+    subject_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    __table_args__ = (Index("ix_iam_policy_attachments_subject", "subject_type", "subject_id"),)
+
+
+class LoginHistory(Base):
+    """One sign-in attempt. Never holds a password or a token. `user_id` is NULL for an unknown
+    username and after the user is deleted (the username stays)."""
+
+    __tablename__ = "login_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, index=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    username: Mapped[str] = mapped_column(String(64), index=True)
+    success: Mapped[bool] = mapped_column(Boolean)
+    reason: Mapped[str] = mapped_column(String(24))
+    ip: Mapped[str] = mapped_column(String(45), default="")
+    user_agent: Mapped[str] = mapped_column(String(255), default="")
+    mfa_used: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+# --- Cloud management (soc/api/cloud, migration 0005_cloud) -----------------------------------
+# MOCK inventory: nothing here describes a real cloud. As with IAM, SQLite does not enforce the
+# foreign keys, so the code deletes dependent rows itself; the ON DELETE clauses are for PostgreSQL.
+# State columns are plain strings checked by the code (the vocabularies are in cloud/catalog.py).
+
+class CloudVpc(Base):
+    __tablename__ = "cloud_vpcs"
+
+    id: Mapped[str] = mapped_column(String(24), primary_key=True)  # vpc-xxxxxxxx
+    name: Mapped[str] = mapped_column(String(63))
+    cidr: Mapped[str] = mapped_column(String(43))
+
+
+class CloudSubnet(Base):
+    __tablename__ = "cloud_subnets"
+
+    id: Mapped[str] = mapped_column(String(24), primary_key=True)  # subnet-xxxxxxxx
+    vpc_id: Mapped[str] = mapped_column(ForeignKey("cloud_vpcs.id", ondelete="CASCADE"),
+                                        index=True)
+    name: Mapped[str] = mapped_column(String(63))
+    cidr: Mapped[str] = mapped_column(String(43))
+    az: Mapped[str] = mapped_column(String(24))
+    public: Mapped[bool] = mapped_column(Boolean, default=False)  # instances get a public address
+
+
+class CloudSecurityGroup(Base):
+    __tablename__ = "cloud_security_groups"
+
+    id: Mapped[str] = mapped_column(String(24), primary_key=True)  # sg-xxxxxxxx
+    name: Mapped[str] = mapped_column(String(64))
+    description: Mapped[str] = mapped_column(String(255), default="")
+    vpc_id: Mapped[str] = mapped_column(ForeignKey("cloud_vpcs.id", ondelete="CASCADE"),
+                                        index=True)
+
+
+class CloudSgRule(Base):
+    __tablename__ = "cloud_sg_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sg_id: Mapped[str] = mapped_column(
+        ForeignKey("cloud_security_groups.id", ondelete="CASCADE"), index=True)
+    direction: Mapped[str] = mapped_column(String(3))  # in | out
+    protocol: Mapped[str] = mapped_column(String(4))  # tcp | udp | icmp | all
+    port_from: Mapped[int] = mapped_column(Integer)
+    port_to: Mapped[int] = mapped_column(Integer)
+    cidr: Mapped[str] = mapped_column(String(43))
+    description: Mapped[str] = mapped_column(String(255), default="")
+
+
+class CloudInstance(Base):
+    __tablename__ = "cloud_instances"
+
+    id: Mapped[str] = mapped_column(String(20), primary_key=True)  # i-xxxxxxxx
+    name: Mapped[str] = mapped_column(String(63))
+    instance_type: Mapped[str] = mapped_column(String(24), index=True)
+    state: Mapped[str] = mapped_column(String(12), index=True)  # running|stopped|pending|terminated
+    az: Mapped[str] = mapped_column(String(24), index=True)
+    vpc_id: Mapped[str] = mapped_column(String(24))
+    subnet_id: Mapped[str] = mapped_column(String(24))
+    private_ip: Mapped[str] = mapped_column(String(45))
+    public_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    os: Mapped[str] = mapped_column(String(48))
+    vcpus: Mapped[int] = mapped_column(Integer)
+    memory_gb: Mapped[float] = mapped_column(Float)
+    disk_gb: Mapped[int] = mapped_column(Integer)
+    tags: Mapped[dict] = mapped_column(JSON)
+    launched_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+
+class CloudInstanceSg(Base):
+    """Which security groups an instance uses."""
+
+    __tablename__ = "cloud_instance_sgs"
+
+    instance_id: Mapped[str] = mapped_column(
+        ForeignKey("cloud_instances.id", ondelete="CASCADE"), primary_key=True)
+    sg_id: Mapped[str] = mapped_column(
+        ForeignKey("cloud_security_groups.id", ondelete="CASCADE"), primary_key=True, index=True)
+
+
+class CloudVolume(Base):
+    __tablename__ = "cloud_volumes"
+
+    id: Mapped[str] = mapped_column(String(24), primary_key=True)  # vol-xxxxxxxx
+    name: Mapped[str] = mapped_column(String(63))
+    size_gb: Mapped[int] = mapped_column(Integer)
+    type: Mapped[str] = mapped_column(String(8))
+    state: Mapped[str] = mapped_column(String(10))  # available | in-use
+    instance_id: Mapped[str | None] = mapped_column(
+        ForeignKey("cloud_instances.id", ondelete="SET NULL"), nullable=True, index=True)
+    encrypted: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class CloudBucket(Base):
+    __tablename__ = "cloud_buckets"
+
+    name: Mapped[str] = mapped_column(String(63), primary_key=True)
+    region: Mapped[str] = mapped_column(String(24))
+    versioning: Mapped[bool] = mapped_column(Boolean, default=False)
+    encrypted: Mapped[bool] = mapped_column(Boolean, default=True)
+    public_access_blocked: Mapped[bool] = mapped_column(Boolean, default=True)
+    object_count: Mapped[int] = mapped_column(Integer, default=0)
+    size_gb: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+
+class CloudAlert(Base):
+    __tablename__ = "cloud_alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    severity: Mapped[str] = mapped_column(String(8))  # info | warning | critical
+    rule: Mapped[str] = mapped_column(String(32))  # which check raised it (dedupe key part)
+    resource_type: Mapped[str] = mapped_column(String(24))
+    resource_id: Mapped[str] = mapped_column(String(64))
+    message: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(12), index=True)  # open|acknowledged|resolved
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    updated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class CloudActivity(Base):
+    """One row per change to the mock inventory (also in the audit log, which is the record of
+    who did what; this one is the cloud module's own timeline)."""
+
+    __tablename__ = "cloud_activity"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, index=True)
+    actor: Mapped[str] = mapped_column(String(64), index=True)
+    action: Mapped[str] = mapped_column(String(48), index=True)
+    resource_type: Mapped[str] = mapped_column(String(24))
+    resource_id: Mapped[str] = mapped_column(String(64), index=True)
+    details: Mapped[dict] = mapped_column(JSON)
+
+
+class CloudCostDaily(Base):
+    """Mock cost of one service on one day. `day` is an ISO date (YYYY-MM-DD, UTC)."""
+
+    __tablename__ = "cloud_cost_daily"
+
+    day: Mapped[str] = mapped_column(String(10), primary_key=True)
+    service: Mapped[str] = mapped_column(String(16), primary_key=True)
+    amount_usd: Mapped[float] = mapped_column(Float)
+    currency: Mapped[str] = mapped_column(String(3), default="USD")

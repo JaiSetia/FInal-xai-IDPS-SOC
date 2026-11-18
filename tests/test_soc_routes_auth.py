@@ -16,6 +16,10 @@ PUBLIC = {("GET", "/health"), ("POST", "/auth/login"),
           # the retention periods in force and channel names, never their targets
           # (tests/test_soc_privacy.py).
           ("GET", "/privacy/notice")}
+# The live demo runner's routes take X-Demo-Token, not a bearer token. With IDPS_SOC_DEMO_TOKEN
+# unset (the default, as here) they don't exist (404); with it set they answer 401 without the
+# right token (tests/test_soc_demo.py).
+DEMO_RUNNER = {("GET", "/demo/runner/next"), ("POST", "/demo/runner/report")}
 
 
 def flat_routes(routes, prefix=""):
@@ -43,9 +47,19 @@ def test_every_non_public_route_requires_a_token(soc_app):
     for method, path in endpoints:
         if (method, path) in PUBLIC:
             continue
+        if (method, path) in DEMO_RUNNER:
+            for headers in ({}, {"Authorization": "Bearer junk"}):
+                r = client.request(method, path, json={}, headers=headers)
+                assert r.status_code == 404, f"{method} {path} is open while demo mode is off"
+            checked += 1
+            continue
         url = path.replace("{alert_id}", "1").replace("{case_id}", "1") \
             .replace("{action_id}", "1").replace("{user_id}", "1").replace("{sensor_id}", "1") \
-            .replace("{conversation_id}", "1") \
+            .replace("{conversation_id}", "1").replace("{group_id}", "1") \
+            .replace("{role_id}", "1").replace("{policy_id}", "1") \
+            .replace("{instance_id}", "i-00000001").replace("{volume_id}", "vol-00000001") \
+            .replace("{name}", "some-bucket").replace("{sg_id}", "sg-00000001") \
+            .replace("{rule_id}", "1") \
             .replace("{channel}", "webhook")
         assert "{" not in url, f"unhandled path parameter in {path}"
         r = client.request(method, url, json={})
@@ -73,6 +87,7 @@ def test_public_routes_are_only_health_and_login(soc_app):
     ("POST", "/admin/privacy/erase/preview"), ("POST", "/admin/privacy/erase"),
     ("GET", "/admin/privacy/erasures"), ("GET", "/admin/privacy/access-log"),
     ("POST", "/admin/reports/weekly/email"),
+    ("POST", "/admin/demo/run"), ("POST", "/admin/demo/cancel"),
 ])
 def test_analysts_cannot_use_admin_routes(client, analyst_headers, method, path):
     assert client.request(method, path, json={}, headers=analyst_headers).status_code == 403

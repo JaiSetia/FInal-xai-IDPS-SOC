@@ -17,8 +17,11 @@ from fastapi.responses import JSONResponse
 
 from soc.api import auth, oidc, privacy, reports
 from soc.api.broadcast import AlertBroadcaster
+from soc.api.cloud.router import router as cloud_router
 from soc.api.db import init_db, make_engine, make_session_factory
 from soc.api.geo import GeoLocator
+from soc.api.iam.deps import WriteLimiter
+from soc.api.iam.router import router as iam_router
 from soc.api.integrations.manager import NotificationManager
 from soc.api.integrations.reputation import ReputationService
 from soc.api.limits import BodyLimitMiddleware
@@ -31,6 +34,7 @@ from soc.api.routes import (
     assistant,
     blocks,
     cases,
+    demo,
     geo,
     integrations,
     live,
@@ -38,6 +42,7 @@ from soc.api.routes import (
     sensors,
     training,
 )
+from soc.api.routes.demo import DemoState, new_token_throttle
 from soc.api.routes.sensors import SensorAuditState
 from soc.api.security import LoginThrottle
 from soc.api.settings import SocSettings, get_settings
@@ -77,6 +82,10 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
     app.state.notifier = NotificationManager(settings)
     app.state.reputation = ReputationService(settings)
     app.state.sensor_audit = SensorAuditState()  # throttles sensor-status audit rows
+    app.state.iam_limiter = WriteLimiter()  # writes per user per minute on /iam
+    app.state.cloud_limiter = WriteLimiter()  # writes per user per minute on /cloud
+    app.state.demo = DemoState()  # the live demo's one run slot (routes/demo.py), in memory
+    app.state.demo_token_throttle = new_token_throttle()  # wrong X-Demo-Token values per address
     app.state.broadcaster = AlertBroadcaster(settings.ws_max_connections, settings.ws_queue_size)
     app.state.login_throttle = LoginThrottle(
         settings.login_max_failures, settings.login_max_failures_per_ip,
@@ -92,7 +101,7 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
     app.add_middleware(BodyLimitMiddleware)
     app.add_middleware(
         CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=False,
-        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
         allow_headers=["Authorization", "Content-Type"])
 
     @app.exception_handler(RequestValidationError)
@@ -110,8 +119,10 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
     app.include_router(auth.router)
     app.include_router(oidc.router)
     for module in (alerts, live, blocks, actions, cases, metrics, geo, assistant, admin, sensors,
-                   training, integrations, privacy, reports):
+                   training, integrations, privacy, reports, demo):
         app.include_router(module.router)
+    app.include_router(iam_router)
+    app.include_router(cloud_router)
     return app
 
 

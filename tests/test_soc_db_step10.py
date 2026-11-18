@@ -205,9 +205,14 @@ def test_a_refused_adoption_changes_nothing(tmp_path):
 
 def test_the_baseline_does_not_depend_on_the_live_models():
     meta = migrate.baseline_metadata()
-    # 0001 is frozen: the tables added by later migrations (0003: privacy and reports) are not in it
-    assert set(meta.tables) == set(Base.metadata.tables) - {"access_log", "erasure_records",
-                                                          "report_runs"}
+    # 0001 is frozen: the tables added by later migrations (0003: privacy and reports; 0004: IAM;
+    # 0005: cloud) are not in it
+    assert set(meta.tables) == set(Base.metadata.tables) - {
+        "access_log", "erasure_records", "report_runs", "iam_roles", "iam_role_permissions",
+        "iam_groups", "iam_group_members", "iam_group_roles", "iam_user_roles", "iam_policies",
+        "iam_policy_attachments", "login_history", "cloud_vpcs", "cloud_subnets",
+        "cloud_security_groups", "cloud_sg_rules", "cloud_instances", "cloud_instance_sgs",
+        "cloud_volumes", "cloud_buckets", "cloud_alerts", "cloud_activity", "cloud_cost_daily"}
     assert meta is not Base.metadata
     assert "ix_blocks_alert_id" in {i.name for i in meta.tables["blocks"].indexes}
 

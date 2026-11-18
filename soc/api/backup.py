@@ -271,6 +271,11 @@ def _reset_sequences(conn: Connection, tables: sa.MetaData) -> None:
                              f"MAX({col}) IS NOT NULL) FROM {tab}"), {"s": seq})
 
 
+# Tables a migration fills with starting rows (0004: the system IAM roles), children first. A
+# backup made at that revision or later contains them, so they are emptied before its rows go in.
+SEEDED_TABLES = ("iam_role_permissions", "iam_roles")
+
+
 def restore(engine: Engine, src: str | os.PathLike, progress: Progress = _stderr) -> dict:
     """Restore `src` into an EMPTY database. Returns the header."""
     src = Path(src)
@@ -298,6 +303,9 @@ def restore(engine: Engine, src: str | os.PathLike, progress: Progress = _stderr
             reflected = sa.MetaData()
             reflected.reflect(conn, only=lambda name, _m: name != "alembic_version")
             inserts = _insert_tables(reflected, header)
+            for name in SEEDED_TABLES:  # rows a migration seeds: the backup brings its own
+                if name in header["tables"] and name in reflected.tables:
+                    conn.execute(sa.delete(reflected.tables[name]))
             counts = dict.fromkeys(header["tables"], 0)
             sha = hashlib.sha256()  # again, over what is actually inserted (the file may have
             # been swapped since the first pass)

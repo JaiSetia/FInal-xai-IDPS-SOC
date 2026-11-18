@@ -499,3 +499,12 @@ table.compact td { padding: 4px 10px 4px 0; border: 0; }
 .public-page { max-width: 860px; margin: 0 auto; padding: 24px 16px; }
 .public-head { margin-bottom: 16px; }
 .login-foot { margin: 12px 0 0; text-align: center; }
+
+/* Live demo (pages/Demo.tsx): one row per step; the status is a text chip, the left rule only repeats it. */
+.demo-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.demo-step { padding: 12px 14px; border-radius: 14px; background: var(--surface-2); border-left: 4px solid var(--border); }
+.demo-step.running { border-left-color: var(--accent); background: var(--accent-wash); }
+.demo-step.done { border-left-color: var(--ok); }
+.demo-step.failed { border-left-color: var(--danger); }
+.demo-step-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.demo-step p { margin: 6px 0 0; }

@@ -10,6 +10,9 @@ export interface Me {
   mfa_enabled?: boolean;
   /** MFA can't be turned off for this account (admins, by default). */
   mfa_required?: boolean;
+  /** Effective permissions from the IAM module. Missing from older SOCs. Used only to show or
+   *  hide UI: the backend enforces every permission itself. */
+  permissions?: string[];
 }
 
 /** POST /auth/login, /auth/mfa/verify, /auth/oidc/callback: an access token, or the MFA step
@@ -31,6 +34,8 @@ interface AuthState {
   /** Reload the signed-in user (after MFA changes). */
   refresh: () => Promise<void>;
   logout: () => void;
+  /** True if the signed-in user holds this permission (UI hint only; the backend enforces). */
+  can: (permission: string) => boolean;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -81,7 +86,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setMe(null);
   }, []);
 
-  return <AuthContext.Provider value={{ me, loading, login, finish, refresh: loadMe, logout }}>{children}</AuthContext.Provider>;
+  const can = useCallback((permission: string) => Boolean(me?.permissions?.includes(permission)), [me]);
+
+  return <AuthContext.Provider value={{ me, loading, login, finish, refresh: loadMe, logout, can }}>{children}</AuthContext.Provider>;
 }
 
 export function useAuth(): AuthState {

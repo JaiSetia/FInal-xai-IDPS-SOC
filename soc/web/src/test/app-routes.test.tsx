@@ -6,7 +6,7 @@ import { report } from "./sensor-fixtures";
 
 const auth = vi.hoisted(() => ({ role: "analyst" }));
 vi.mock("../auth", () => ({
-  useAuth: () => ({ me: { username: "ann", role: auth.role }, loading: false, logout: vi.fn() }),
+  useAuth: () => ({ me: { username: "ann", role: auth.role }, loading: false, logout: vi.fn(), can: () => false }),
 }));
 const sens = vi.hoisted(() => ({ data: null as unknown }));
 vi.mock("../sensors", async (orig) => ({

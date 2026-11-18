@@ -37,15 +37,15 @@ def _indexes(engine, table):
     return {i["name"] for i in inspect(engine).get_indexes(table)}
 
 
-def test_head_is_0003():
-    assert migrate.head_revision() == "0003_privacy_reports"
+def test_0003_is_in_the_chain():
+    assert migrate._script().get_revision("0004_iam").down_revision == "0003_privacy_reports"
 
 
 def test_upgrade_creates_the_tables_and_matches_the_models(any_engine):
     _step(any_engine, "upgrade", "0002_mfa_oidc")
     assert not NEW_TABLES & _tables(any_engine)
     _step(any_engine, "upgrade", "head")
-    assert _revision(any_engine) == "0003_privacy_reports"
+    assert _revision(any_engine) == migrate.head_revision()
     assert NEW_TABLES <= _tables(any_engine)
     for table, names in INDEXES.items():
         assert names <= _indexes(any_engine, table), table

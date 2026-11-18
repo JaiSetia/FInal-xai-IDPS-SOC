@@ -502,3 +502,36 @@ export interface PrivacyNotice {
   how_to_exercise: string;
   note: string;
 }
+
+// --- Live demo (soc/api/routes/demo.py) ---------------------------------------------------
+
+export type DemoStepStatus = "pending" | "running" | "done" | "failed" | "skipped";
+export type DemoRunStatus = "queued" | "running" | "done" | "failed" | "cancelled" | "expired";
+
+export interface DemoStep {
+  key: string;
+  label: string;
+  status: DemoStepStatus;
+  started_at: string | null;
+  ended_at: string | null;
+  /** Plain text from the runner, at most 200 characters. */
+  note: string;
+}
+
+export interface DemoRun {
+  id: string;
+  status: DemoRunStatus;
+  requested_by: string;
+  requested_at: string;
+  finished_at: string | null;
+  steps: DemoStep[];
+}
+
+export interface DemoState {
+  /** Demo mode is on in the SOC (IDPS_SOC_DEMO_TOKEN is set). */
+  enabled: boolean;
+  /** The host-side demo runner polled in the last 30 s. */
+  runner_online: boolean;
+  /** The current run, or the last one; null when there has been none since the SOC started. */
+  run: DemoRun | null;
+}

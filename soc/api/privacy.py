@@ -108,6 +108,37 @@ EXEMPT_TABLES: dict[str, str] = {
     "sensor_tokens": "sensor names and token hashes, chosen by an admin",
     "access_log": "holds fingerprints and system-written labels only, never an address",
     "report_runs": "the week label and a fixed-vocabulary error",
+    # IAM (soc/api/iam). Names and globs are chosen by admins, like sensor names; none is network
+    # data. login_history.ip is the signing-in operator's own client address (and user_agent
+    # their browser), not the monitored network's addresses this erasure is about: those rows
+    # are the sign-in record of SOC accounts and stay. Decided as exempt; it has no retention yet.
+    "iam_roles": "admin-chosen role names and descriptions",
+    "iam_role_permissions": "catalog permission names",
+    "iam_groups": "admin-chosen group names and descriptions",
+    "iam_group_members": "ids only",
+    "iam_group_roles": "ids only",
+    "iam_user_roles": "ids only",
+    "iam_policies": "admin-chosen policy names, permission patterns and resource globs",
+    "iam_policy_attachments": "ids and a subject type",
+    "login_history": "sign-in attempts of SOC accounts: an operator's client address, not network "
+                     "data of the monitored hosts",
+    # Cloud management (soc/api/cloud, MOCK inventory). Every row is invented demo data or a
+    # change an operator made to it: the addresses are private or RFC 5737 documentation
+    # addresses of fictional instances, never an address seen on the monitored network, so
+    # an erasure request about a monitored host has nothing to find here. Decided as exempt.
+    "cloud_vpcs": "mock inventory: fictional network names and private ranges",
+    "cloud_subnets": "mock inventory: fictional subnets",
+    "cloud_security_groups": "mock inventory: operator-chosen names and descriptions",
+    "cloud_sg_rules": "mock inventory: firewall rules over fictional networks",
+    "cloud_instances": "mock inventory: fictional instances with private and documentation-range "
+                       "addresses",
+    "cloud_instance_sgs": "ids only",
+    "cloud_volumes": "mock inventory: names and sizes",
+    "cloud_buckets": "mock inventory: operator-chosen bucket names",
+    "cloud_alerts": "alerts on the mock inventory: fixed rule names and generated text",
+    "cloud_activity": "timeline of changes to the mock inventory: account names, resource ids "
+                      "and the values changed; no network data of monitored hosts",
+    "cloud_cost_daily": "mock cost figures",
 }
 EXEMPT_COLUMNS: dict[tuple[str, str], str] = {
     ("alerts", "severity"): "enumeration", ("alerts", "status"): "enumeration",

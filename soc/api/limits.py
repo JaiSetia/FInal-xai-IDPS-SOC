@@ -32,7 +32,11 @@ LIMITS: tuple[tuple[str, int], ...] = (
     ("/cases", 128 * KiB),               # a 10,000 character note, escaped; 100 alert ids
     ("/admin/privacy", 4 * KiB),         # an address and a reason of at most 500 characters
     ("/admin/reports", 1 * KiB),         # no body: the week is a query parameter
+    ("/admin/demo", 1 * KiB),            # no body: the steps are fixed by the SOC
+    ("/demo", 2 * KiB),                  # a step report: a uuid, a key and a 200 character note
     ("/admin", 16 * KiB),
+    ("/cloud", 32 * KiB),                # tags: 20 x (64 + 128) characters, escaped
+    ("/iam", 64 * KiB),                  # up to 1000 member ids or 200 attachments, escaped
 )
 DEFAULT_LIMIT = 256 * KiB  # everything else
 

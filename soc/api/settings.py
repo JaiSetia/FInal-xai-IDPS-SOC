@@ -35,7 +35,7 @@ INTEGRATION_PREFIXES = ("notify_", "webhook_", "slack_", "smtp_", "email_", "sys
 # Settings where a blank value (docker compose passes "" for an unset ${VAR:-}) also means unset.
 BLANK_IS_UNSET = ("alert_retention_days", "alert_retention_keep_labelled", "audit_retention_days",
                   "assistant_retention_days", "closed_case_retention_days", "auto_migrate",
-                  "access_log_retention_days")
+                  "access_log_retention_days", "demo_token", "cloud_endpoint_url")
 _EMAIL = re.compile(r"^[^@\s<>,;\"]+@[^@\s<>,;\"]+$")
 
 
@@ -98,6 +98,17 @@ class SocSettings(BaseSettings):
     # Serve /docs and /openapi.json. Off by default: they would be the only unauthenticated
     # routes besides /health and /auth/login.
     enable_docs: bool = False
+    # Cloud management (soc/api/cloud): unset (the default) = the MOCK provider, a demo inventory
+    # in the SOC's own database. Set it to the URL of the LOCAL Moto emulator, for example
+    # http://127.0.0.1:4566, to read from the emulator instead (read-only, fake credentials,
+    # account 000000000000). Only a loopback or private http address is accepted; anything else
+    # is refused and /cloud answers 503. It never talks to real AWS.
+    cloud_endpoint_url: str | None = Field(default=None, max_length=200)
+    # Live demo (soc/api/routes/demo.py, docs/soc.md "Live demo"): the shared secret the host-side
+    # demo runner sends in X-Demo-Token. Unset or blank = demo mode off (the runner endpoints answer
+    # 404 and an admin can't start a run). At least 32 characters; generate one with
+    # python -c "import secrets; print(secrets.token_urlsafe(32))"
+    demo_token: SecretStr | None = None
     # Addresses and networks the SOC must never ask a sensor to block: the gateways, DNS servers,
     # the SOC host, the sensors and the analysts' machines. REQUIRED for blocking: while it is
     # empty, every block request is refused (503), so a forgotten setting fails closed.
@@ -305,6 +316,18 @@ class SocSettings(BaseSettings):
         if value is not None and len(value.get_secret_value()) < MIN_SECRET_LENGTH:
             raise ValueError(f"IDPS_SOC_MFA_KEY must be at least {MIN_SECRET_LENGTH} characters")
         return value
+
+    @field_validator("demo_token")
+    @classmethod
+    def _demo_token_valid(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        secret = value.get_secret_value().strip()
+        if len(secret) < MIN_SECRET_LENGTH or len(secret) > 256 or not secret.isascii() \
+                or not secret.isprintable():
+            raise ValueError(f"IDPS_SOC_DEMO_TOKEN must be {MIN_SECRET_LENGTH} to 256 printable "
+                             "ASCII characters")
+        return SecretStr(secret)
 
     @model_validator(mode="after")
     def _oidc_complete(self) -> "SocSettings":

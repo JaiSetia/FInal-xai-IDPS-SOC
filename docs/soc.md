@@ -27,6 +27,7 @@ Settings (environment variables, prefix `IDPS_SOC_`):
 | `LOW_CONFIDENCE_BELOW` | 0.6 | Below this confidence, severity drops one level (never below low) |
 | `WS_MAX_CONNECTIONS` / `WS_QUEUE_SIZE` | 50 / 200 | Live feed limits |
 | `ENABLE_DOCS` | false | Serves `/docs` and `/openapi.json` (unauthenticated, so off by default) |
+| `CLOUD_ENDPOINT_URL` | unset | Cloud management: unset = the MOCK provider. Set to the URL of the LOCAL Moto emulator (`http://127.0.0.1:4566`) to read it instead; only a loopback or private `http://` address is accepted (see "Cloud management") |
 | `WOULD_BLOCK_RETENTION_DAYS` | 7 | Dry-run would-block records older than this are deleted (1 to 365) |
 | `AUTO_MIGRATE` | true | Upgrade the database schema at start-up; when false, refuse to start unless it is already at the current revision (see "Database") |
 | `ALERT_RETENTION_DAYS` | 180 | Delete alerts older than this many days; 0 = keep forever (see "Retention") |
@@ -85,11 +86,16 @@ generated for you), use `deploy/install.sh`: see [deploy.md](deploy.md).
 | `GET /metrics/summary?hours=24` | user | Alerts per bucket (hourly up to 72 h, else daily), by class and severity, `by_source` (`{"ml": n, "rule": n}`, always both keys), top 10 sources, false-positive rate, detection latency p50/p95, active blocks, `would_blocks` (dry-run decisions in the window), `by_class_per_day` (cached for 60 s; last 7 UTC days whatever `hours` is: `[{day, class, count}]`, non-zero pairs only, classes beyond the top 25 as `(other)`), `anomaly_per_day` (same 7 days and cache: `[{day, count}]`, alerts the Isolation Forest also flagged, non-zero days only) |
 | `GET /topology?hours=1` | user | Nodes (host, alert count, max severity) and edges (src to dst, count, max severity) |
 | `GET/POST /admin/users`, `PATCH /admin/users/{id}/role`, `POST /admin/users/{id}/disable`, `/enable`, `/reset-password`, `/mfa/reset`, `/sso/unlink` | admin | User management |
+| `/iam/...` | permission | Users, roles, groups, policies, login history and audit by permission; see "IAM and permissions" |
+| `/cloud/...` | permission | Cloud management on a MOCK inventory (instances, storage, network, metrics, cost, alerts, activity); see "Cloud management" |
 | `GET/POST /admin/sensors`, `POST /admin/sensors/{id}/revoke` | admin | Sensors; the token is returned once, on creation |
 | `GET /admin/retention` | admin | The retention policy and the last run (time, rows deleted per table, error); see "Retention" |
 | `GET /reports/weekly?week=2026-W45` | user | The weekly report as a PDF attachment (default: the last complete ISO week, UTC); access-logged; 422 for a bad or future week, 429 when two are already being built; see "Reports" |
 | `GET /reports/weeks` | user | `{default_week, email_enabled, email_configured, weeks: [{week, start, end, alerts, run, emailed, emailed_at, recipients_count, error}]}`: the last 12 complete weeks, newest first |
 | `POST /admin/reports/weekly/email?week=` | admin | Email that week's report now to the configured recipients: `{week, recipients, emailed_at, size_bytes}`; audited; 409 when email is not configured, 502 when sending fails, 413 over 10 MB |
+| `GET /demo` | user | Live demo status: `{enabled, runner_online, run}`; see "Live demo" |
+| `POST /admin/demo/run`, `POST /admin/demo/cancel` | admin | Queue the fixed demo run (202; 409 if a run is active or the runner has not polled in 30 s; 503 while demo mode is off) / cancel the active run (404 if none); audited |
+| `GET /demo/runner/next`, `POST /demo/runner/report` | `X-Demo-Token` | The host-side demo runner only: heartbeat and hand-over of the queued run / step progress; see "Live demo" |
 | `GET /privacy/notice` | **public** | The privacy notice for the people whose traffic is monitored: controller, data categories, purposes, the retention periods in force, recipients (channel names only), rights; see "Privacy" |
 | `POST /admin/privacy/erase/preview` | admin | `{ip}`: what erasing the address would remove or rewrite, per table and field (`{ip, subject_fp, counts, total, active_blocks, manual_review, warnings}`); changes nothing; access-logged |
 | `POST /admin/privacy/erase` | admin | `{ip, reason, force?}` (reason 1 to 500 characters, must not contain the address): erase the address everywhere in one transaction; same shape plus `record_id`, `erased_at`; 422 for an invalid address or a CIDR; 409 while the address has an active block (unless `force: true`) or while any assistant reply is running |
@@ -170,7 +176,7 @@ Rules worth knowing:
   sensor): by `Content-Length` when sent, and by counting streamed bytes (chunked bodies) until the
   limit. 10 MiB for `/ingest/alerts` (500 alerts x 16 KiB explanation fit), 128 KiB `/ingest/blocks`
   and `/cases`, 64 KiB `/sensor/status` and `/assistant`, 16 KiB `/actions`, `/sensor/actions` and
-  `/admin` (4 KiB `/admin/privacy`, 1 KiB `/admin/reports`), 4 KiB `/auth/login`, 8 KiB the rest of `/auth`, 256 KiB anything else. A malformed `Content-Length` is a 400. The
+  `/admin`, 64 KiB `/iam` (4 KiB `/admin/privacy`, 1 KiB `/admin/reports`), 4 KiB `/auth/login`, 8 KiB the rest of `/auth`, 256 KiB anything else. A malformed `Content-Length` is a 400. The
   Caddyfile in `infra/templates/soc-user-data.sh.tftpl` also sets `request_body { max_size 11MiB }`,
   `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`.
 - **Sensor-supplied text.** Interface, model and sensor-version names in a status report are
@@ -230,6 +236,242 @@ Rules worth knowing:
   restarts and are not shared between processes, so run one process or move them to the
   database or Redis before scaling out. Behind a reverse proxy, use uvicorn's `--proxy-headers`
   so the client IP is the real one.
+
+## IAM and permissions
+
+Roles, groups and policies on top of the two legacy roles (`soc/api/iam/`, migration `0004_iam`).
+Everything is enforced on the backend by permission; the dashboard only reads what the API says.
+
+**How the legacy roles map.** Nothing about existing endpoints changed: every endpoint that
+exists today still checks the legacy role (`analyst` or `admin`) exactly as before, and holding
+IAM permissions does not open them. A user's legacy role decides their starting point:
+
+| Legacy role | Holds |
+| --- | --- |
+| `admin` | **Every permission, always.** No deny policy can remove one (so a bad policy can never lock the SOC out of its own administration). |
+| `analyst` | The system role `analyst`: `cloud.view` |
+
+**Model.** `iam_roles` (named permission sets; the two **system roles** `admin` (every permission)
+and `analyst` (`cloud.view`) are seeded by the migration and cannot be edited or deleted),
+`iam_role_permissions`, `iam_groups`, `iam_group_members`, `iam_group_roles`, `iam_user_roles`,
+`iam_policies` (allow or deny, permission patterns such as `cloud.*`, resource globs, default
+`["*"]`, can be disabled), `iam_policy_attachments` (to a user, group or role) and `login_history`.
+Names are 3 to 48 characters of `A-Za-z0-9 _-`, unique ignoring case; descriptions up to 255
+characters. The catalog is a constant in `soc/api/iam/catalog.py`, not stored: a permission named
+in the database but missing from the catalog is ignored.
+
+**Catalog** (`GET /iam/permissions`):
+
+| Group | Permissions |
+| --- | --- |
+| Cloud | `cloud.view`, `cloud.instances.write`, `cloud.storage.write`, `cloud.network.write`, `cloud.alerts.manage` (enforced by `/cloud`, see "Cloud management") |
+| Users | `iam.users.view`, `iam.users.write`, `iam.users.delete` |
+| Roles | `iam.roles.view`, `iam.roles.write` |
+| Groups | `iam.groups.view`, `iam.groups.write` |
+| Policies | `iam.policies.view`, `iam.policies.write` |
+| Monitoring | `iam.audit.view`, `iam.logins.view` |
+
+**Effective permissions** (`soc/api/iam/engine.py`, computed from the database on every request,
+nothing cached, so a change is in force at once):
+
+1. A legacy admin holds everything and is not subject to any policy.
+2. Anyone else holds the union of the system role named like their legacy role, the roles assigned
+   to them, the roles of their groups, and what **allow** policies attached to them, their groups
+   or their roles grant.
+3. Then every permission matched by an enabled **deny** policy attached to them, to one of their
+   groups or to one of their roles is removed. Deny always wins.
+4. Patterns use `*` (`cloud.*`, `*.view`). A policy applies to resources matching one of its globs;
+   roles grant on every resource. `engine.allows(db, user, permission, resource="*")` is the helper
+   for code that has a resource: a deny scoped to `prod-*` stops the permission on `prod-db` but
+   does not remove it "in general" (what `/auth/me` and the permission dependency ask), and a
+   scoped allow does not grant it in general.
+
+**Enforcement.** `require_permission(*perms)` (`soc/api/iam/deps.py`) is a dependency: 401 when not
+signed in or disabled, 403 unless the user holds **all** the permissions. `GET /auth/me` gained
+`permissions: [...]` (additive).
+
+**Endpoints** (all under `/iam`; lists take `limit` and `cursor` like the others, newest first;
+bodies reject unknown fields; names and descriptions refuse control and direction-override
+characters; at most 120 writes per user per minute (429); bodies over 64 KiB are 413):
+
+| Endpoint | Needs | Notes |
+| --- | --- | --- |
+| `GET /iam/permissions` | `iam.roles.view` | The catalog, grouped, with descriptions |
+| `GET /iam/me/permissions` | any signed-in user | `{username, role, all_access, permissions}` |
+| `GET /iam/users/{id}/effective-permissions` | `iam.users.view` | Permissions, which were `denied`, the roles, groups and policies that apply |
+| `GET /iam/users` | `iam.users.view` | Filters `q` (username contains), `status` (`active`/`disabled`), `role` (legacy), `role_id`, `group_id` |
+| `POST /iam/users` | `iam.users.write` | `{username, password, role?, role_ids?, group_ids?}`; the password policy of every other path |
+| `GET /iam/users/{id}` | `iam.users.view` | Roles, groups, `mfa_enabled`, `mfa_required`, `last_login`, `disabled` |
+| `PATCH /iam/users/{id}` | `iam.users.write` | `role`, `role_ids`, `group_ids`, `disabled` (the lists replace) |
+| `POST /iam/users/{id}/deactivate`, `/activate` | `iam.users.write` | Idempotent |
+| `DELETE /iam/users/{id}` | `iam.users.delete` | See "Deleting a user" |
+| `GET/POST /iam/roles`, `GET/PATCH/DELETE /iam/roles/{id}` | `iam.roles.view` / `iam.roles.write` | Permissions and member counts; system roles: 409 |
+| `GET/POST /iam/groups`, `GET/PATCH/DELETE /iam/groups/{id}`, `PUT /iam/groups/{id}/members`, `PUT /iam/groups/{id}/roles` | `iam.groups.view` / `iam.groups.write` | The `PUT`s replace the list |
+| `GET/POST /iam/policies`, `GET/PATCH/DELETE /iam/policies/{id}`, `PUT /iam/policies/{id}/attachments` | `iam.policies.view` / `iam.policies.write` | `{effect, permissions, resources, disabled}`; attachments `[{subject_type: user\|group\|role, subject_id}]` |
+| `GET /iam/logins` | `iam.logins.view` | Filters `user_id`, `username`, `success`, `reason`, `since`, `until` (a timezone is required, use `Z`) |
+| `GET /iam/audit` | `iam.audit.view` | The audit log of `/admin/audit` plus `target`, `since`, `until` |
+
+**Security rules** (each has tests in `tests/test_soc_iam_security.py`):
+
+- **No privilege escalation.** You cannot grant what you do not hold: a role's permissions, a role
+  or group given to a user, a role given to a group, a member added to a group, an allow policy
+  (created, widened, enabled, flipped from deny, or attached). Only newly added things are checked,
+  so you can always remove permissions. Making someone a legacy admin needs every permission.
+- **No lifting a restriction you are under.** Deleting, disabling, narrowing or detaching a deny
+  policy (or removing someone from a deny-carrying group or role) needs the denied permissions
+  yourself, so a user cannot simply delete the deny that limits them.
+- **No managing someone more powerful.** Editing, deactivating or deleting a user who holds a
+  permission you do not is 403.
+- **Not yourself.** You cannot change your own legacy role, roles, groups or active state, deactivate
+  or delete yourself, join or leave a group, or have a policy attached to or removed from you.
+- **Last admin.** The last enabled legacy admin cannot be deactivated, demoted or deleted (409);
+  the same check as `/admin/users`.
+- **System roles** cannot be edited or deleted (409); roles with their name cannot be created.
+- **Sessions end.** Any change to a user's legacy role, roles, groups or active state adds one to
+  their `token_version`, so their existing tokens stop working. Changes that reach many users
+  indirectly (a role's permissions or deletion, a group's members, roles or deletion, a policy's
+  change, attachment or deletion) do the same for every affected user, except the person making
+  the change.
+- **Audit.** Every mutation writes one entry in the same transaction (`iam_user_create`,
+  `iam_user_update`, `iam_user_deactivate`, `iam_user_activate`, `iam_user_delete`,
+  `iam_role_create/update/delete`, `iam_group_create/update/delete/members/roles`,
+  `iam_policy_create/update/delete/attach`), with the actor, a target such as `user:bob` and short
+  details (ids, added and removed). Never a password. A refused request writes nothing.
+
+**Deleting a user.** The database does not enforce foreign keys on SQLite, so the code clears
+everything itself, in the same transaction (PostgreSQL's `ON DELETE CASCADE` is a second line).
+History is kept but loses its link to the user: cases (`created_by`), case notes (`author`) and
+actions (`proposed_by`, `decided_by`) keep their rows with an empty user, and the login history
+keeps its rows with `user_id` empty (the username stays, as in the audit log, which names the
+deleted user in `iam_user_delete`). What belongs to the user alone is removed: their assistant
+conversations, group memberships, role assignments and policy attachments. Deactivating is the
+reversible alternative.
+
+**Login history** (`login_history`, `GET /iam/logins`). One row per sign-in attempt, written by the
+existing login flow: `ok`, `bad_password`, `unknown_user`, `disabled` (right password, account
+off), `locked` (throttled; at most one row per username and address per minute), `mfa_failed`, with
+`ip`, `user_agent` (255 characters at most), `mfa_used`. With MFA, a password alone is not a
+sign-in: `ok` is written when the code is accepted (or an admin finishes enrolling). No password or
+token is ever stored. A failure to write the row is logged and ignored: it never breaks a login.
+The login response is still the same for every failure. Not covered: single sign-on logins, and
+there is no retention for this table yet (it grows by one row per attempt).
+
+## Cloud management
+
+A backend for a cloud dashboard (`soc/api/cloud/`, migration `0005_cloud`, routes under `/cloud`).
+**There is no real cloud behind it.** The project has no cloud account and no billing, so by
+default every instance, volume, bucket, network, metric and cost figure is **mock data**: an
+invented inventory kept in the SOC's own database. Every response that returns inventory,
+metrics, cost or alerts carries `data_source` (`"mock"`) and `data_source_label` (`"Mock data: no
+live cloud connected"`), and every change says in `note` that it was "applied to the persisted mock
+inventory only; nothing in any real cloud was changed". A UI must show the label.
+
+**Providers** (`soc/api/cloud/provider.py`). `CloudProvider` is the interface (list instances,
+volumes, buckets, VPCs, subnets, security groups, daily cost). `MockProvider` (default) reads the
+database and is the only one that accepts changes. `EmulatedAwsProvider` reads the local Moto
+emulator with boto3 and is used **only** when `IDPS_SOC_CLOUD_ENDPOINT_URL` is set; it returns
+`data_source: "emulated-aws"`, is read-only (every change is 409), has no cost data
+(`available: false`), uses the fake `test`/`test` credentials passed explicitly (the environment, profiles
+and roles are never read), region `eu-west-1`, and refuses a different account than
+`000000000000`. The guard (`guard.py`, the same idea as `lab/cloud/guard.py`) accepts only
+`http://` and `localhost` or an IP address that is loopback or private; HTTPS, DNS names, public,
+link-local (the metadata address) and multicast addresses, credentials in the URL and a configured
+proxy are refused, and then every `/cloud` request answers 503 (it never falls back silently, and
+no boto3 client is built). Metrics stay synthetic with either provider (`metrics_source: "mock"`).
+**The emulated provider is covered by unit tests against fake boto3 clients only; it has not been
+run against a live Moto.**
+
+**Permissions** (the catalog of "IAM and permissions"; a legacy admin holds all, an analyst holds
+`cloud.view`). All checked on the backend with `require_permission`; 401 without a token, 403
+without the permission.
+
+| Permission | Endpoints |
+| --- | --- |
+| `cloud.view` | every `GET` under `/cloud` |
+| `cloud.instances.write` | `POST /cloud/instances`, `PATCH /cloud/instances/{id}`, `POST /cloud/instances/{id}/start`, `/stop`, `/reboot`, `DELETE /cloud/instances/{id}` (terminate) |
+| `cloud.storage.write` | `POST/PATCH/DELETE /cloud/volumes...`, `POST /cloud/volumes/{id}/attach`, `/detach`, `POST/PATCH/DELETE /cloud/buckets...` |
+| `cloud.network.write` | `POST/DELETE /cloud/network/security-groups`, `POST/DELETE /cloud/network/security-groups/{id}/rules...` |
+| `cloud.alerts.manage` | `POST /cloud/alerts/evaluate`, `/{id}/acknowledge`, `/{id}/resolve`, `DELETE /cloud/alerts/{id}` |
+| all four write permissions | `POST /cloud/demo-data/reset` |
+
+**Resource-scoped policies.** Instance-level changes also ask the IAM engine
+`allows(user, permission, resource)` with `instance:{id}`; volumes use `volume:{id}`, buckets
+`bucket:{name}`, security groups `securitygroup:{id}`. A deny policy scoped to
+`instance:i-1234abcd` stops that instance and leaves the others (403 naming the resource). The
+general check (route level) asks about "any resource", so a user needs the permission from a role or
+an unscoped allow policy; a scoped allow alone does not pass the route check (decided: the spec's
+`require_permission` stays the gate, scoping can only narrow).
+
+**Endpoints.** Lists take `limit` (1 to 200, default 50) and `offset` and answer
+`{data_source, data_source_label, items, total, limit, offset}`. Errors are `{"detail": ...}` as
+everywhere (422 validation and references to something that does not exist, 409 a state or
+dependency conflict, 403, 404, 429, 413).
+
+| Endpoint | Notes |
+| --- | --- |
+| `GET /cloud/overview` | Instances by state and type, totals (vCPUs and memory running, disk, volumes, buckets, VPCs...), health counts, alerts (`open`, `acknowledged`, `critical_open`), cost (`month_to_date`, `last_month_total`, `last_month_same_period`, `change_vs_same_period_pct`, linear `forecast_month_total`) |
+| `GET /cloud/instances` | `q`, `state`, `az`, `type`, `sort` (`name`, `state`, `instance_type`, `az`, `launched_at`, `updated_at`, `id`), `order`, `limit`, `offset` |
+| `GET /cloud/instances/{id}` | Includes `health` (below) |
+| `POST /cloud/instances` | `{name, instance_type, subnet_id, security_group_ids, az?, os?, disk_gb?, tags?}`: type from a fixed catalog (`t3.micro` ... `r5.large`), `az` must match the subnet, groups must be in the subnet's VPC, at most 100 live instances. Starts `pending`, becomes `running` 10 s later (on the next request: there are no background threads) |
+| `PATCH /cloud/instances/{id}` | `name`, `tags` (not on a terminated instance) |
+| `POST /cloud/instances/{id}/start` `/stop` `/reboot`, `DELETE /cloud/instances/{id}` | State machine: start from `stopped`; stop and reboot from `running`; terminate from `running` or `stopped`; anything else is 409. A stop releases the public address, terminating detaches the volumes. The terminated record stays |
+| `GET /cloud/instances/{id}/metrics?range=1h\|24h\|7d` | `timestamps` and `series` (`cpu_pct`, `memory_pct`, `disk_pct`, `net_in_mbps`, `net_out_mbps`; steps 1 min, 15 min, 1 h; null before the instance existed), `current`, `metrics_source: "mock"` |
+| `GET /cloud/metrics/summary` | Fleet CPU, memory and network averages, storage utilisation, busiest instances, 24 h CPU trend |
+| `GET /cloud/volumes`, `GET /cloud/volumes/{id}` | `q`, `state`, `instance_id`, `sort`, `order` |
+| `POST /cloud/volumes`, `PATCH /cloud/volumes/{id}` (grow only), `POST /cloud/volumes/{id}/attach` (`{instance_id}`), `/detach`, `DELETE /cloud/volumes/{id}` (not while in use) | 1 to 16384 GB, types `gp3`, `gp2`, `io1`, `st1` |
+| `GET /cloud/buckets`, `GET /cloud/buckets/{name}`, `POST` (DNS-style unique name), `PATCH` (`versioning`, `encrypted`, `public_access_blocked`), `DELETE` | A bucket with objects needs `?force=true` (409 otherwise) |
+| `GET /cloud/network/vpcs`, `/subnets`, `/security-groups`, `/security-groups/{id}` | Filters `vpc_id`, `az`, `q` |
+| `POST /cloud/network/security-groups`, `DELETE /cloud/network/security-groups/{id}` (409 while an instance uses it) | |
+| `POST /cloud/network/security-groups/{id}/rules`, `DELETE .../rules/{rule_id}` | `{direction: in\|out, protocol: tcp\|udp\|icmp\|all, port_from?, port_to?, cidr, description?, confirm_open_to_world?}`; CIDR validated with `ipaddress` and normalised, ports 0 to 65535 (not for `icmp`/`all`), duplicates 409. An ingress rule from `0.0.0.0/0` or `::/0` that covers port 22 or 3389 over `tcp`/`all` is refused (422, with the reason) unless `confirm_open_to_world` is true |
+| `GET /cloud/cost?range=7d\|30d\|90d` | `total`, `by_service` (`compute`, `storage`, `network`, `other`), `by_day`, `forecast` (month to date divided by days elapsed, times days in the month), `top_drivers` (instances by price x running hours) and `by_instance_type`; the drivers are an estimate, not a bill |
+| `GET /cloud/alerts` | `status`, `severity`, `resource_type`, `resource_id` |
+| `POST /cloud/alerts/evaluate` | Raises an alert for each threshold crossed (below), once: an open or acknowledged alert for the same rule and resource is not repeated (a worse severity raises the existing one); a resolved one is raised anew if the problem is still there. Nothing resolves automatically |
+| `POST /cloud/alerts/{id}/acknowledge`, `/resolve`, `DELETE /cloud/alerts/{id}` | `open` to `acknowledged` to `resolved`; a wrong state is 409 |
+| `GET /cloud/notifications` | The unresolved alerts, most severe first, with `open` and `acknowledged` counts |
+| `GET /cloud/activity` | `actor`, `action` (exact, e.g. `instance.stop`), `resource_type`, `resource_id`; newest first |
+| `POST /cloud/demo-data/reset` | Needs all four write permissions. Wipes the mock inventory, alerts, activity and cost and seeds the demo data again (same ids every time) |
+
+**Mock metrics and health.** A sample is computed from the instance id, the series name and the
+timestamp (rounded down to the step), with a daily wave and stable noise; nothing is stored, so the
+same history comes back on every call and in every process. Each instance has a load profile fixed
+by its id (idle, normal, busy, hot, full). The activity log says when it last started or stopped:
+before a stop it ran, after it CPU, memory and network are exactly 0 and the disk is flat; after a
+start they come back (a pending instance is still 0). Health checks (`instance_state`, `cpu_pct`,
+`memory_pct`, `disk_pct`) are computed from the latest sample: degraded at 80 % CPU, 85 % memory,
+80 % disk, critical at 95, 95 and 90 %; the instance status is the worst check. An instance that
+is not running is `unknown` (nothing to measure), not healthy.
+
+**Alert rules** (`evaluate`): CPU, memory or disk over the degraded (warning) or critical
+threshold on a running instance; a bucket that does not block public access (critical) or is not
+encrypted (warning); a security group opening SSH or RDP to the world (critical); an unencrypted
+volume (info).
+
+**Data and seed.** Tables: `cloud_instances`, `cloud_instance_sgs`, `cloud_volumes`,
+`cloud_buckets`, `cloud_vpcs`, `cloud_subnets`, `cloud_security_groups`, `cloud_sg_rules`,
+`cloud_alerts` (with a `rule` column, the dedupe key), `cloud_activity`, `cloud_cost_daily` (`day`
+is an ISO date string). On the first authorised `/cloud` request, if the instance, VPC, bucket and
+security group tables are all empty, the demo data is created: 8 instances (6 running, 1 stopped,
+1 terminated) in two availability zones of `eu-west-1`, 6 volumes, 4 buckets
+(`idps-demo-*`), 2 VPCs with 6 subnets, 3 security groups (one deliberately opens SSH to the world,
+and one bucket does not block public access: demo findings), 5 alerts, 52 activity rows (26 of them
+spread over the last 14 days) (actor `demo-seed`, `demo-admin`, `demo-analyst`, `system`) and **90** days of
+cost (the 30 days asked for, extended so the `90d` range and "last month" are complete). The
+seed is deterministic (same ids and figures every time, dates relative to now), idempotent and safe
+when two first requests race. Addresses are private ranges or RFC 5737 documentation addresses
+(`203.0.113.x`), never a real one. A refused (401/403) request never seeds.
+
+**What is mock.** Everything: the inventory, its states, the metrics, the cost figures (which do not
+change when you change the inventory; the cost drivers do) and the demo alerts. Changes are real
+only in the sense that they persist in the SOC database, are audited (`cloud_<resource>_<verb>`
+rows in the audit log, with `data_source: mock`) and appear in `/cloud/activity`.
+Not mock: the permissions, the audit trail and the validation.
+
+**Rules and limits.** Bodies reject unknown fields and control or direction-override characters
+(names, descriptions, tags); at most 120 writes per user per minute across `/cloud` (429), bodies
+over 32 KiB are 413; at most 100 live instances, 200 volumes, 50 buckets, 50 security groups, 60
+rules per group, 20 tags. Every change and its activity and audit rows are one transaction: a
+refused or failed change leaves nothing behind. The new tables are exempt from privacy erasure (they
+hold fictional data; the decision and reason are in `EXEMPT_TABLES` in `soc/api/privacy.py`).
 
 ## Security (roadmap step 11)
 
@@ -932,3 +1174,41 @@ there), with the SOC stopped: `backup` needs a
 database that has been adopted already (`python -m soc.api db upgrade` does that). `python -m soc.api db
 check` afterwards confirms the schema. The temporary `ALTER TABLE` stop-gap that earlier releases
 ran at every start-up now runs once, during adoption only.
+
+## Live demo
+
+An admin can start a fixed attack run from the dashboard's "Live demo" page (port scan, SSH brute
+force, SYN flood, then a wait of about 150 s for the flows to end) and everyone signed in can follow
+the steps. It is **off by default**: set `IDPS_SOC_DEMO_TOKEN` (32 to 256 printable ASCII characters,
+for the lab put it in `lab/.env`; `python -c "import secrets;print(secrets.token_urlsafe(32))"`).
+While it is unset the runner endpoints answer 404 and `POST /admin/demo/run` answers 503.
+
+Why a host runner: the SOC is isolated from the lab attacker on purpose and never connects to it,
+and the browser can send no parameters. The SOC only keeps the request in memory (one run slot, no
+migration, forgotten on restart). `scripts/demo_runner.py`, started on the lab host with the same
+token in its environment (`python scripts/demo_runner.py --ca-file <ca.pem>`), polls
+`GET /demo/runner/next` (this is also its heartbeat), runs the fixed scripts in the attacker
+container with `docker compose exec` and reports each step to `POST /demo/runner/report`. The
+runner authenticates with the `X-Demo-Token` header (constant-time comparison). Step keys, order and
+labels are fixed in `soc/api/routes/demo.py`; reports are strict (unknown fields refused, notes plain
+text up to 200 characters) and steps only move forward. A failed step skips the rest and fails the
+run; a run not finished 15 minutes after it was requested expires; a running run whose runner has
+not been heard from for 60 s (it reports at least every 15 s) is failed early with the note "runner
+went away"; cancelling tells the runner to stop at its next report. Starting and cancelling are
+written to the audit log (`demo_run`, `demo_cancel`) in the same transaction as the change: if the
+audit row cannot be saved the run slot is put back as it was.
+
+Token lockout trade-off: wrong tokens are counted per client address (10 in 10 minutes, then 429
+for wrong tokens). A **correct** token is always accepted, even during a lockout. Every host-side
+request reaches the SOC from the same address (127.0.0.1), so refusing the right token while locked
+out would let anything on the host cut off a run in progress by sending ten bad tokens. The cost is
+that the lockout only slows guessing; the 32 to 256 character secret is what makes guessing
+infeasible, so use a long random one.
+
+Runner safety: commands run in the attacker container under `timeout` (so they end even if the host
+client is killed), and on cancel, timeout or Ctrl-C the runner also runs `pkill -f <fixed script>`
+there (best effort; it needs `pkill` in the attacker image). Subprocesses get only `PATH`, `HOME`
+and `DOCKER_*` (plus the lab password for the SSH step); the token is never passed on. The runner
+refuses HTTP redirects, ignores proxy environment variables, and accepts `--poll-seconds` from 1 to
+10 with an error backoff of at most 15 s, so it never looks offline (the SOC's threshold is 30 s).
+`lab/.env` is read as plain text: inline comments and `$VAR` interpolation are not interpreted.

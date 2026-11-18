@@ -1,0 +1,92 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "soc-api",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "IDPS_SOC_JWT_SECRET=dev-only-secret-not-for-real-use-0123456789 IDPS_SOC_DATABASE_URL=sqlite:////private/tmp/claude-502/-Users-user2-Desktop-idps-final-year-project/7df73fa9-98e6-44e6-bd36-57f01c4ad66c/scratchpad/dev-soc.db /Users/user2/Desktop/idps-final-year-project/.venv/bin/uvicorn soc.api.main:app --host 127.0.0.1 --port 8040"
+      ],
+      "port": 8040
+    },
+    {
+      "name": "soc-web",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "cd soc/web && IDPS_SOC_API=http://127.0.0.1:8040 npm run dev -- --host 127.0.0.1"
+      ],
+      "port": 5173
+    },
+    {
+      "name": "soc-web-lab",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "cd soc/web && NODE_EXTRA_CA_CERTS=/private/tmp/claude-502/-Users-user2-Desktop-idps-final-year-project/7df73fa9-98e6-44e6-bd36-57f01c4ad66c/scratchpad/lab-soc-ca.pem IDPS_SOC_API=https://127.0.0.1:8443 npm run dev -- --host 127.0.0.1 --port 5174"
+      ],
+      "port": 5174
+    },
+    {
+      "name": "soc-api-p3",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "IDPS_SOC_JWT_SECRET=dev-only-secret-not-for-real-use-0123456789 IDPS_SOC_BLOCK_ALLOWLIST=10.10.1.1,10.10.2.1 IDPS_SOC_DATABASE_URL=sqlite:////private/tmp/claude-502/-Users-user2-Desktop-idps-final-year-project/3bd967ec-356b-4131-bfdc-d6955068274b/scratchpad/p3-soc.db /private/tmp/claude-502/-Users-user2-Desktop-idps-final-year-project/2b273733-1482-487e-ad14-4d99100b02d5/scratchpad/venv/bin/uvicorn soc.api.main:app --host 127.0.0.1 --port 8010"
+      ],
+      "port": 8010,
+      "autoPort": false
+    },
+    {
+      "name": "soc-web-p3",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "cd soc/web && IDPS_SOC_API=http://127.0.0.1:8010 npm run dev -- --host 127.0.0.1 --port 5176"
+      ],
+      "port": 5176,
+      "autoPort": false
+    },
+    {
+      "name": "soc-api-s7",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "IDPS_SOC_NOTIFY_ALLOW_PRIVATE=true IDPS_SOC_NOTIFY_ALLOW_HTTP=true IDPS_SOC_WEBHOOK_URL=http://127.0.0.1:9100/hook IDPS_SOC_WEBHOOK_SECRET=dev-hmac-secret-0123 IDPS_SOC_SYSLOG_HOST=127.0.0.1 IDPS_SOC_SYSLOG_PORT=5514 IDPS_SOC_SYSLOG_PROTOCOL=tcp IDPS_SOC_SMTP_HOST=127.0.0.1 IDPS_SOC_SMTP_PORT=2525 IDPS_SOC_SMTP_SECURITY=none IDPS_SOC_SMTP_FROM=soc@lab.test IDPS_SOC_SMTP_TO=analyst@lab.test IDPS_SOC_JWT_SECRET=dev-only-secret-not-for-real-use-0123456789 IDPS_SOC_DATABASE_URL=sqlite:////private/tmp/claude-502/-Users-user2-Desktop-idps-final-year-project/3bd967ec-356b-4131-bfdc-d6955068274b/scratchpad/s7-soc.db /private/tmp/claude-502/-Users-user2-Desktop-idps-final-year-project/2b273733-1482-487e-ad14-4d99100b02d5/scratchpad/venv/bin/uvicorn soc.api.main:app --host 127.0.0.1 --port 8020"
+      ],
+      "port": 8020,
+      "autoPort": false
+    },
+    {
+      "name": "soc-web-s7",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "cd soc/web && IDPS_SOC_API=http://127.0.0.1:8020 npm run dev -- --host 127.0.0.1 --port 5177"
+      ],
+      "port": 5177,
+      "autoPort": false
+    },
+    {
+      "name": "soc-api-s11",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "IDPS_SOC_JWT_SECRET=dev-only-secret-not-for-real-use-0123456789 IDPS_SOC_DATABASE_URL=sqlite:////private/tmp/claude-502/-Users-user2-Desktop-idps-final-year-project/3bd967ec-356b-4131-bfdc-d6955068274b/scratchpad/s11-soc.db /Users/user2/Desktop/idps-final-year-project/.venv/bin/uvicorn soc.api.main:app --host 127.0.0.1 --port 8030"
+      ],
+      "port": 8030,
+      "autoPort": false
+    },
+    {
+      "name": "soc-web-s11",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "cd soc/web && IDPS_SOC_API=http://127.0.0.1:8030 npm run dev -- --host 127.0.0.1 --port 5178"
+      ],
+      "port": 5178,
+      "autoPort": false
+    }
+  ]
+}

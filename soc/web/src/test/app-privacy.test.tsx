@@ -6,7 +6,7 @@ import Login from "../pages/Login";
 
 const auth = vi.hoisted(() => ({ me: null as null | { username: string; role: string } }));
 vi.mock("../auth", () => ({
-  useAuth: () => ({ me: auth.me, loading: false, logout: vi.fn(), login: vi.fn(), finish: vi.fn() }),
+  useAuth: () => ({ me: auth.me, loading: false, logout: vi.fn(), login: vi.fn(), finish: vi.fn(), can: () => false }),
 }));
 vi.mock("../api/client", async (orig) => ({
   ...(await orig<typeof import("../api/client")>()),

@@ -13,12 +13,16 @@ import Admin from "./pages/Admin";
 import AlertDetail from "./pages/AlertDetail";
 import Alerts from "./pages/Alerts";
 import Cases from "./pages/Cases";
+import Demo from "./pages/Demo";
 import Login from "./pages/Login";
+import CloudAlertsBadge from "./components/cloud/CloudAlertsBadge";
 import Response from "./pages/Response";
 
 // The map libraries are large, so those pages load on demand.
 const ThreatCenter = lazy(() => import("./pages/ThreatCenter"));
 const Maps = lazy(() => import("./pages/Maps"));
+const CloudModule = lazy(() => import("./pages/cloud"));
+const IamModule = lazy(() => import("./pages/iam"));
 
 function Shield() {
   return (
@@ -59,7 +63,9 @@ function Redirect({ to, add = {} }: { to: string; add?: Record<string, string> }
 }
 
 export default function App() {
-  const { me, loading: authLoading, logout } = useAuth();
+  const { me, loading: authLoading, logout, can } = useAuth();
+  // UI hint only: the backend enforces every permission.
+  const showIam = ["iam.users.view", "iam.roles.view", "iam.groups.view", "iam.policies.view", "iam.audit.view", "iam.logins.view"].some(can);
   const location = useLocation();
 
   if (authLoading) return <p className="muted" style={{ padding: 24 }}>Loading…</p>;
@@ -78,10 +84,14 @@ export default function App() {
             <NavLink to="/maps">Maps</NavLink>
             <NavLink to="/assistant">Assistant</NavLink>
             <NavLink to="/reports">Reports</NavLink>
+            <NavLink to="/demo">Live demo</NavLink>
+            {can("cloud.view") && <NavLink to="/cloud">Cloud</NavLink>}
+            {showIam && <NavLink to="/iam">IAM</NavLink>}
             <NavLink to="/privacy">Privacy</NavLink>
             {me.role === "admin" && <NavLink to="/admin">Admin</NavLink>}
           </nav>
           <div className="topbar-status">
+            <CloudAlertsBadge />
             <LiveBadge />
             <ModeBadge />
             <div className="userbox">
@@ -105,6 +115,9 @@ export default function App() {
               <Route path="/maps" element={<Suspense fallback={loading}><Maps /></Suspense>} />
               <Route path="/account" element={<Account />} />
               <Route path="/reports" element={<Reports />} />
+              <Route path="/demo" element={<Demo />} />
+              <Route path="/cloud/*" element={<Suspense fallback={loading}><CloudModule /></Suspense>} />
+              <Route path="/iam/*" element={<Suspense fallback={loading}><IamModule /></Suspense>} />
               <Route path="/privacy" element={<Privacy />} />
               {/* Old addresses, kept so bookmarks and links in docs still work. */}
               <Route path="/metrics" element={<Redirect to="/" />} />

@@ -25,7 +25,27 @@ from soc.api.models import (
     Case,
     CaseNote,
     CaseStatus,
+    CloudActivity,
+    CloudAlert,
+    CloudBucket,
+    CloudCostDaily,
+    CloudInstance,
+    CloudInstanceSg,
+    CloudSecurityGroup,
+    CloudSgRule,
+    CloudSubnet,
+    CloudVolume,
+    CloudVpc,
     ErasureRecord,
+    IamGroup,
+    IamGroupMember,
+    IamGroupRole,
+    IamPolicy,
+    IamPolicyAttachment,
+    IamRole,
+    IamRolePermission,
+    IamUserRole,
+    LoginHistory,
     ModelVersion,
     ReportRun,
     Role,
@@ -143,6 +163,52 @@ def populate(engine, now=None) -> None:
         db.add(ErasureRecord(at=now, requested_by="admin", reason="request", subject_fp="e" * 64,
                              counts={"alerts": 1}))
         db.add(ReportRun(week="2026-W10", generated_at=now, emailed_at=now, recipients_count=1))
+        # IAM (the system roles come from the migration; add a custom role and the rest)
+        role = IamRole(name="Ops é", description="d", system=False, created_at=now, updated_at=now)
+        group = IamGroup(name="Night shift", description="g", created_at=now)
+        policy = IamPolicy(name="No cloud", description="p", effect="deny",
+                           permissions=["cloud.*"], resources=["*"], created_at=now)
+        db.add_all([role, group, policy])
+        db.flush()
+        db.add_all([IamRolePermission(role_id=role.id, permission="cloud.view"),
+                    IamGroupMember(group_id=group.id, user_id=analyst.id),
+                    IamGroupRole(group_id=group.id, role_id=role.id),
+                    IamUserRole(user_id=analyst.id, role_id=role.id),
+                    IamPolicyAttachment(policy_id=policy.id, subject_type="group",
+                                        subject_id=group.id),
+                    LoginHistory(at=now, user_id=admin.id, username="admin", success=True,
+                                 reason="ok", ip="10.0.0.1", user_agent="ua", mfa_used=True)])
+        # Cloud (mock inventory): one row of every table
+        db.add_all([
+            CloudVpc(id="vpc-00000001", name="prod-vpc", cidr="10.0.0.0/16"),
+            CloudSubnet(id="subnet-00000001", vpc_id="vpc-00000001", name="a", cidr="10.0.1.0/24",
+                        az="eu-west-1a", public=True),
+            CloudSecurityGroup(id="sg-00000001", name="web-sg", description="é web",
+                               vpc_id="vpc-00000001"),
+            CloudInstance(id="i-00000001", name="web-1", instance_type="t3.micro",
+                          state="running", az="eu-west-1a", vpc_id="vpc-00000001",
+                          subnet_id="subnet-00000001", private_ip="10.0.1.10",
+                          public_ip="203.0.113.10", os="Debian 12", vcpus=2, memory_gb=1.0,
+                          disk_gb=20, tags={"env": "prod", "owner": "é"}, launched_at=now,
+                          updated_at=now),
+            CloudBucket(name="demo-bucket", region="eu-west-1", versioning=True, encrypted=True,
+                        public_access_blocked=True, object_count=3, size_gb=0.25, created_at=now),
+            CloudAlert(severity="warning", rule="cpu_high", resource_type="instance",
+                       resource_id="i-00000001", message="CPU high", status="open",
+                       created_at=now, updated_at=now, updated_by=None),
+            CloudActivity(at=now, actor="admin", action="instance.create",
+                          resource_type="instance", resource_id="i-00000001",
+                          details={"data_source": "mock"}),
+            CloudCostDaily(day="2026-01-02", service="compute", amount_usd=12.34, currency="USD"),
+        ])
+        db.flush()
+        db.add_all([
+            CloudSgRule(sg_id="sg-00000001", direction="in", protocol="tcp", port_from=443,
+                        port_to=443, cidr="0.0.0.0/0", description="https"),
+            CloudInstanceSg(instance_id="i-00000001", sg_id="sg-00000001"),
+            CloudVolume(id="vol-00000001", name="data", size_gb=100, type="gp3",
+                        state="in-use", instance_id="i-00000001", encrypted=True),
+        ])
         db.commit()
     # extra float edge cases and a unicode-heavy row can not be stored in JSON portably; skip
 

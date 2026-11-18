@@ -2,7 +2,7 @@ FROM kalilinux/kali-rolling
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nmap hydra hping3 sqlmap curl iproute2 slowhttptest iputils-ping tcpreplay \
-        openssh-client sshpass \
+        openssh-client sshpass procps \
     && rm -rf /var/lib/apt/lists/* \
     # nmap ships with file capabilities incl. cap_net_admin, which this container does not get,
     # so exec fails. Root already has cap_net_raw, so drop the file capabilities (if a later

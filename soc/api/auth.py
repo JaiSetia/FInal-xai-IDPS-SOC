@@ -13,6 +13,8 @@ from sqlalchemy.orm import Session
 from soc.api import mfa, security
 from soc.api.common import audit
 from soc.api.db import get_db
+from soc.api.iam import engine as iam_engine
+from soc.api.iam.history import record_login
 from soc.api.models import Role, SensorToken, User
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -47,6 +49,8 @@ class UserOut(BaseModel):
     mfa_enabled: bool = False
     # MFA is required for this user (admins, by default): it cannot be turned off.
     mfa_required: bool = False
+    # What the user may do (soc/api/iam): the whole catalog for an admin. Additive.
+    permissions: list[str] = []
 
 
 def client_ip(request: Request) -> str:
@@ -61,19 +65,30 @@ def login(body: LoginRequest, request: Request, db: Annotated[Session, Depends(g
     settings = request.app.state.settings
     throttle: security.LoginThrottle = request.app.state.login_throttle
     ip = client_ip(request)
+    agent = request.headers.get("user-agent")
     ticket = throttle.begin_attempt(body.username, ip)  # counted as a failure until proven
     if ticket is None:
+        record_login(db, username=body.username, user_id=None, success=False, reason="locked",
+                     ip=ip, user_agent=agent)
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
                             "too many failed logins; try again later")
     user = db.scalar(select(User).where(User.username == body.username))
     ok = security.verify_password(body.password, user.password_hash if user else None)
     if not ok or user is None or user.disabled:
+        # The response is the same for every cause; the history (admins only) tells them apart.
+        reason = ("unknown_user" if user is None else "disabled" if ok else "bad_password")
+        record_login(db, username=body.username, user_id=user.id if user else None,
+                     success=False, reason=reason, ip=ip, user_agent=agent)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, _LOGIN_FAILED)
     throttle.succeeded(body.username, ip, ticket)
     if security.needs_rehash(user.password_hash):
         user.password_hash = security.hash_password(body.password)
         db.commit()
-    return after_first_factor(user, settings)
+    result = after_first_factor(user, settings)
+    if result.access_token:  # no second step: the sign-in is complete (else: at /mfa/verify)
+        record_login(db, username=user.username, user_id=user.id, success=True, reason="ok",
+                     ip=ip, user_agent=agent)
+    return result
 
 
 def mfa_required(user: User, settings) -> bool:
@@ -181,10 +196,11 @@ Sensor = Annotated[SensorToken, Depends(current_sensor)]
 
 
 @router.get("/me", response_model=UserOut)
-def me(user: AnyUser, request: Request):
+def me(user: AnyUser, request: Request, db: Annotated[Session, Depends(get_db)]):
     return UserOut(id=user.id, username=user.username, role=user.role,
                    mfa_enabled=user.mfa_enabled,
-                   mfa_required=mfa_required(user, request.app.state.settings))
+                   mfa_required=mfa_required(user, request.app.state.settings),
+                   permissions=sorted(iam_engine.effective_permissions(db, user)))
 
 
 # --- MFA -------------------------------------------------------------------------------------
@@ -341,7 +357,15 @@ def mfa_verify(body: MfaVerify, request: Request, db: Annotated[Session, Depends
     user = _challenge_user(request, db, body.mfa_token, "verify")
     if not user.mfa_enabled:
         raise _BAD_CHALLENGE
-    _check_second_factor(db, request, user, body.code)
+    who = {"username": user.username, "user_id": user.id, "ip": client_ip(request),
+           "user_agent": request.headers.get("user-agent"), "mfa_used": True}
+    try:
+        _check_second_factor(db, request, user, body.code)
+    except HTTPException as exc:
+        record_login(db, success=False, reason=("locked" if exc.status_code == 429
+                                                else "mfa_failed"), **who)
+        raise
+    record_login(db, success=True, reason="ok", **who)
     return access_token(user, request.app.state.settings)
 
 
@@ -423,6 +447,10 @@ def mfa_enrol_confirm(body: MfaEnrolConfirm, request: Request,
     db.commit()
     db.refresh(user)
     token = access_token(user, request.app.state.settings)
+    if body.mfa_token:  # an admin's first sign-in: the enrolment completed it
+        record_login(db, username=user.username, user_id=user.id, success=True, reason="ok",
+                     ip=client_ip(request), user_agent=request.headers.get("user-agent"),
+                     mfa_used=True)
     return MfaEnabled(**token.model_dump(), recovery_codes=codes)
 
 
