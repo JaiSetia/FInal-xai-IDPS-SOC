@@ -1,10 +1,11 @@
+# ruff: noqa: F811  (fixtures imported from step10_helpers)
 """Migration 0004 (IAM tables and the seeded system roles): upgrade, downgrade, upgrade again, no
 drift from the models, foreign keys. SQLite always; PostgreSQL when IDPS_TEST_DATABASE_URL is set."""
 
 import pytest
 import sqlalchemy as sa
 from sqlalchemy import inspect, text
-from step10_helpers import any_engine  # noqa: F401
+from step10_helpers import any_engine, pg_engine  # noqa: F401
 
 from soc.api import migrate
 from soc.api.iam.catalog import ALL_PERMISSIONS
@@ -58,7 +59,7 @@ def test_upgrade_creates_the_tables_and_matches_the_models(any_engine):
 
 
 def test_indexes_and_uniqueness(any_engine):
-    _step(any_engine, "upgrade", "head")
+    _step(any_engine, "upgrade", "0004_iam")
     assert {"ix_login_history_at", "ix_login_history_username",
             "ix_login_history_user_id"} <= _indexes(any_engine, "login_history")
     insert_role = text("INSERT INTO iam_roles (name, description, system, created_at, updated_at) "
@@ -177,3 +178,12 @@ def test_the_migration_does_not_import_the_models():
         source = f.read()
     imports = [ln for ln in source.splitlines() if ln.startswith(("import ", "from "))]
     assert not [ln for ln in imports if "soc" in ln], imports
+
+
+def test_previous_postgres_seed_is_repaired(pg_engine):
+    _step(pg_engine, "upgrade", "0005_cloud")
+    with pg_engine.begin() as conn:
+        conn.execute(text("SELECT setval(pg_get_serial_sequence('iam_roles', 'id'), 1, false)"))
+    _step(pg_engine, "upgrade", "head")
+    with pg_engine.begin() as conn:
+        assert conn.scalar(text("SELECT nextval(pg_get_serial_sequence('iam_roles','id'))")) > 2

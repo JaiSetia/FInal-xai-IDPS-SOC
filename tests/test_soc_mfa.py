@@ -421,9 +421,10 @@ def test_an_enrol_challenge_cannot_verify(c, clock):
     assert r.status_code == 401
 
 
-def _forged_challenge(sub, ver, purpose, *, exp=None, secret=TEST_SECRET):
+def _forged_challenge(user, purpose, *, exp=None, secret=TEST_SECRET):
     now = datetime.now(UTC)
-    claims = {"sub": str(sub), "ver": ver, "purpose": purpose, "iss": security.ISSUER,
+    claims = {"sub": str(user.id), "ver": user.token_version, "account_created": user.created_at.isoformat(),
+              "purpose": purpose, "iss": security.ISSUER,
               "aud": security.CHALLENGE_AUDIENCE, "iat": now - timedelta(minutes=30),
               "nbf": now - timedelta(minutes=30), "exp": exp or now + timedelta(minutes=5)}
     return jwt.encode(claims, secret, algorithm="HS256")
@@ -431,9 +432,9 @@ def _forged_challenge(sub, ver, purpose, *, exp=None, secret=TEST_SECRET):
 
 def test_expired_challenge_is_refused_but_a_forged_fresh_one_is_accepted(app, c):
     user = get_user(app, "admin")
-    fresh = _forged_challenge(user.id, user.token_version, "enrol")
+    fresh = _forged_challenge(user, "enrol")
     assert c.post("/auth/mfa/enrol/start", json={"mfa_token": fresh}).status_code == 200
-    expired = _forged_challenge(user.id, user.token_version, "enrol",
+    expired = _forged_challenge(user, "enrol",
                                 exp=datetime.now(UTC) - timedelta(minutes=1))
     r = c.post("/auth/mfa/enrol/start", json={"mfa_token": expired})
     assert r.status_code == 401 and "expired" in r.json()["detail"]
@@ -441,7 +442,7 @@ def test_expired_challenge_is_refused_but_a_forged_fresh_one_is_accepted(app, c)
 
 def test_challenge_signed_with_another_secret_is_refused(app, c):
     user = get_user(app, "admin")
-    forged = _forged_challenge(user.id, user.token_version, "enrol", secret="z" * 48)
+    forged = _forged_challenge(user, "enrol", secret="z" * 48)
     assert c.post("/auth/mfa/enrol/start", json={"mfa_token": forged}).status_code == 401
 
 
@@ -479,8 +480,9 @@ def test_an_admin_without_mfa_whose_role_was_granted_after_login_loses_access(ap
 
 
 def test_a_challenge_for_a_missing_user_is_refused(c):
+    user = User(id=9999, token_version=0, created_at=datetime.now(UTC))
     assert c.post("/auth/mfa/enrol/start",
-                  json={"mfa_token": _forged_challenge(9999, 0, "enrol")}).status_code == 401
+                  json={"mfa_token": _forged_challenge(user, "enrol")}).status_code == 401
 
 
 def test_analysts_log_in_with_password_only(c):

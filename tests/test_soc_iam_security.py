@@ -182,7 +182,7 @@ def test_leaving_a_deny_group_needs_the_permission_too(client, soc_app, admin_he
                             headers=admin_headers).status_code == 200
 
 
-def test_only_someone_with_every_permission_can_make_an_admin(client, soc_app, admin_headers):
+def test_only_a_legacy_admin_can_make_an_admin(client, soc_app, admin_headers):
     add_user(soc_app, "um", perms=["iam.users.write", "iam.users.view"])
     victim = add_user(soc_app, "victim")
     h = headers(client, "um")
@@ -191,10 +191,12 @@ def test_only_someone_with_every_permission_can_make_an_admin(client, soc_app, a
     assert client.post("/iam/users", json={"username": "boss2", "password": PW, "role": "admin"},
                        headers=h).status_code == 403
     assert user_row(soc_app, "victim").role == Role.ANALYST
-    # someone holding every permission through roles (not the legacy role) may
+    # Catalog permissions do not include the legacy administrator endpoints.
     add_user(soc_app, "root", perms=sorted(ALL_PERMISSIONS))
     r = client.patch(f"/iam/users/{victim}", json={"role": "admin"}, headers=headers(client, "root"))
-    assert r.status_code == 200 and r.json()["role"] == "admin"
+    assert r.status_code == 403
+    assert client.patch(f"/iam/users/{victim}", json={"role": "admin"},
+                        headers=admin_headers).status_code == 200
 
 
 def test_cannot_manage_a_user_who_holds_more_than_you(client, soc_app):
@@ -270,36 +272,16 @@ def test_cannot_change_yourself(client, soc_app, admin_headers):
     assert not user_row(soc_app, "boss").disabled
 
 
-def test_the_last_active_admin_is_protected(client, soc_app):
-    # someone who is not a legacy admin but holds every permission can try to remove the admin
-    add_user(soc_app, "root", perms=sorted(ALL_PERMISSIONS))
-    h = headers(client, "root")
-    admin_id = uid(soc_app, "admin")
-    assert client.post(f"/iam/users/{admin_id}/deactivate", headers=h).status_code == 409
-    assert client.patch(f"/iam/users/{admin_id}", json={"role": "analyst"},
-                        headers=h).status_code == 409
-    assert client.patch(f"/iam/users/{admin_id}", json={"disabled": True},
-                        headers=h).status_code == 409
-    assert client.delete(f"/iam/users/{admin_id}", headers=h).status_code == 409
-    admin = user_row(soc_app, "admin")
-    assert admin.role == Role.ADMIN and not admin.disabled
-    # with a second admin the first can go; then the second is the last
-    second = add_user(soc_app, "boss2", Role.ADMIN)
-    assert client.post(f"/iam/users/{admin_id}/deactivate", headers=h).status_code == 200
-    assert client.post(f"/iam/users/{second}/deactivate", headers=h).status_code == 409
-    assert client.delete(f"/iam/users/{second}", headers=h).status_code == 409
-    # a disabled admin does not count, and can be deleted
-    assert client.delete(f"/iam/users/{admin_id}", headers=h).status_code == 204
-
-
-def test_demoting_an_admin_through_roles_still_counts_admins(client, soc_app):
+def test_admin_management_requires_a_legacy_admin(client, soc_app, admin_headers):
     add_user(soc_app, "root", perms=sorted(ALL_PERMISSIONS))
     h = headers(client, "root")
     second = add_user(soc_app, "boss2", Role.ADMIN)
-    assert client.patch(f"/iam/users/{second}", json={"role": "analyst"},
-                        headers=h).status_code == 200
-    assert client.patch(f"/iam/users/{uid(soc_app, 'admin')}", json={"role": "analyst"},
-                        headers=h).status_code == 409
+    path = f"/iam/users/{second}"
+    assert client.patch(path, json={"role": "analyst"}, headers=h).status_code == 403
+    assert client.post(path + "/deactivate", headers=h).status_code == 403
+    assert client.delete(path, headers=h).status_code == 403
+    assert client.post(path + "/deactivate", headers=admin_headers).status_code == 200
+    assert client.delete(path, headers=admin_headers).status_code == 204
 
 
 def test_system_roles_are_immutable(client, soc_app, admin_headers):
@@ -517,6 +499,8 @@ def test_a_deleted_users_token_stops_working(client, soc_app, admin_headers):
     h = headers(client, "victim")
     assert client.delete(f"/iam/users/{victim}", headers=admin_headers).status_code == 204
     assert not alive(client, h)
+    add_user(soc_app, "replacement", Role.ADMIN)
+    assert not alive(client, h)
 
 
 # --- audit ----------------------------------------------------------------------------------
@@ -578,3 +562,26 @@ def test_a_refused_change_leaves_no_audit_row_and_no_change(client, soc_app, adm
     assert len(audit_actions(client, admin_headers)) == before
     row = user_row(soc_app, "victim")
     assert not row.disabled and row.token_version == 0
+
+
+def test_scoped_and_inherited_permissions_limit_delegation(client, soc_app):
+    manager = add_user(soc_app, "manager", perms=["iam.groups.write", "iam.policies.write",
+                                                 "iam.roles.write", "cloud.storage.write"])
+    member = add_user(soc_app, "member")
+    with soc_app.state.session_factory() as db:
+        role = add_role(db, "restricted")
+        group = add_group(db, "team", roles=[role.id])
+        grant = add_policy(db, "grant", "allow", ["iam.audit.view"], ["team-*"],
+                           attach=[("role", role.id)])
+        deny = add_policy(db, "protect", "deny", ["cloud.storage.write"], ["prod-*"],
+                          attach=[("role", role.id), ("user", manager)])
+        gid, allow_id, deny_id = group.id, grant.id, deny.id
+    h = headers(client, "manager")
+    assert client.post("/iam/roles", json={"name": "writer", "permissions": ["cloud.storage.write"]},
+                       headers=h).status_code == 403
+    assert client.put(f"/iam/groups/{gid}/members", json={"user_ids": [member]},
+                      headers=h).status_code == 403
+    assert client.put(f"/iam/groups/{gid}/roles", json={"role_ids": []}, headers=h).status_code == 403
+    for pid, resources in [(allow_id, ["*"]), (deny_id, ["other-*"])]:
+        assert client.patch(f"/iam/policies/{pid}", json={"resources": resources},
+                            headers=h).status_code == 403

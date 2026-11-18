@@ -159,7 +159,12 @@ def create_user(body: UserCreate, request: Request,
                 db: Annotated[Session, Depends(get_db)]):
     held = util.actor_permissions(db, actor)
     if body.role == Role.ADMIN:
-        util.may_grant_legacy_admin(held)
+        util.require_legacy_admin(actor)
+    else:
+        legacy = db.scalar(select(IamRole.id).where(IamRole.system.is_(True),
+                                                    IamRole.name == body.role.value))
+        grants = engine.subject_grants(db, "role", legacy) if legacy else {"cloud.view"}
+        util.must_hold(held, grants)
     for role in util.role_ids_checked(db, body.role_ids):
         util.must_hold(held, engine.subject_grants(db, "role", role.id))
     for group in util.group_ids_checked(db, body.group_ids):
@@ -217,6 +222,8 @@ def _manage_target(db: Session, actor: User, user_id: int, message: str) -> tupl
     user = get_or_404(db, User, user_id, "user")
     util.must_not_be_self(actor, user.id, message)
     held = util.actor_permissions(db, actor)
+    if user.role == Role.ADMIN:
+        util.require_legacy_admin(actor)
     util.must_outrank(db, held, user)
     return user, held
 
@@ -232,7 +239,7 @@ def update_user(user_id: int, body: UserUpdate, request: Request,
     changes: dict = {}
     if body.role is not None and body.role != user.role:
         if body.role == Role.ADMIN:
-            util.may_grant_legacy_admin(held)
+            util.require_legacy_admin(actor)
         elif _would_remove_last_admin(db, user):
             raise HTTPException(409, _LAST_ADMIN)
         changes["role"] = [user.role.value, body.role.value]

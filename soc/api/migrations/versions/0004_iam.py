@@ -115,6 +115,8 @@ def upgrade() -> None:
         op.bulk_insert(roles, [{"id": number, "name": name, "description": description,
                                 "system": True, "created_at": now, "updated_at": now}])
         op.bulk_insert(perms, [{"role_id": number, "permission": p} for p in granted])
+    if op.get_context().dialect.name == "postgresql":
+        op.execute("SELECT setval(pg_get_serial_sequence('iam_roles', 'id'), MAX(id)) FROM iam_roles")
 
 
 def downgrade() -> None:

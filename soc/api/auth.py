@@ -98,7 +98,8 @@ def mfa_required(user: User, settings) -> bool:
 def access_token(user: User, settings) -> TokenResponse:
     minutes = settings.access_token_minutes
     token = security.create_access_token(
-        user_id=user.id, token_version=user.token_version,
+        user_id=user.id, account_created=user.created_at.isoformat(),
+        token_version=user.token_version,
         secret=settings.jwt_secret.get_secret_value(), minutes=minutes)
     return TokenResponse(access_token=token, expires_in=minutes * 60)
 
@@ -113,7 +114,8 @@ def after_first_factor(user: User, settings) -> TokenResponse:
         return access_token(user, settings)
     minutes = settings.mfa_challenge_minutes
     challenge = security.create_challenge_token(
-        user_id=user.id, token_version=user.token_version, purpose=purpose,
+        user_id=user.id, account_created=user.created_at.isoformat(),
+        token_version=user.token_version, purpose=purpose,
         secret=settings.jwt_secret.get_secret_value(), minutes=minutes)
     return TokenResponse(mfa=purpose, mfa_token=challenge, expires_in=minutes * 60)
 
@@ -127,7 +129,8 @@ def user_from_token(token: str, request_or_app, db: Session) -> User | None:
     except security.TokenError:
         return None
     user = db.get(User, int(claims["sub"]))
-    if user is None or user.disabled or user.token_version != claims["ver"]:
+    if (user is None or user.disabled or user.token_version != claims["ver"]
+            or user.created_at.isoformat() != claims["account_created"]):
         return None
     if mfa_required(user, app.state.settings) and not user.mfa_enabled:
         return None  # e.g. made admin since the token was issued: log in again and enrol
@@ -278,7 +281,8 @@ def _challenge_user(request: Request, db: Session, token: str, purpose: str) -> 
     except security.TokenError:
         raise _BAD_CHALLENGE from None
     user = db.get(User, int(claims["sub"]))
-    if user is None or user.disabled or user.token_version != claims["ver"]:
+    if (user is None or user.disabled or user.token_version != claims["ver"]
+            or user.created_at.isoformat() != claims["account_created"]):
         raise _BAD_CHALLENGE
     return user
 

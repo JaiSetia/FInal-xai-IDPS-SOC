@@ -84,6 +84,10 @@ def test_dev_seed_needs_the_flag_and_a_named_dev_database(tmp_path):
     flag = "--i-understand-this-adds-demo-logins"
     assert _seed([flag], {}).returncode == 1  # default database
     assert _seed([flag], {"IDPS_SOC_DATABASE_URL": "sqlite:///./soc.db"}).returncode == 1
-    ok = _seed([flag], {"IDPS_SOC_DATABASE_URL": db})
+    assert _seed([flag], {"IDPS_SOC_DATABASE_URL": db}).returncode == 1
+    import secrets
+    ok = _seed([flag], {"IDPS_SOC_DATABASE_URL": db,
+                        "IDPS_DEMO_ADMIN_PASSWORD": secrets.token_urlsafe(24),
+                        "IDPS_DEMO_ANALYST_PASSWORD": secrets.token_urlsafe(24)})
     assert ok.returncode == 0, ok.stderr
     assert not (ROOT / "soc.db").exists()  # the refused runs wrote nothing to the default DB

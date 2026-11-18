@@ -184,6 +184,11 @@ def update_policy(policy_id: int, body: PolicyUpdate,
         # Gaining power (a deny became an allow, wider patterns, enabled) or losing a
         # restriction (an allow became a deny, narrower patterns, disabled) both need the
         # permissions involved to be held by the actor.
+        if "resources" in changes:
+            # Changing resource globs can widen a grant or narrow a deny even
+            # when the permission names stay the same.
+            util.must_hold(held, engine.policy_grants(policy))
+            util.must_hold(held, old_denies, "lift restrictions on")
         util.must_hold(held, engine.policy_grants(policy) - old_grants)
         util.must_hold(held, old_denies - engine.policy_denies(policy), "lift restrictions on")
         if set(changes) - {"name", "description"}:

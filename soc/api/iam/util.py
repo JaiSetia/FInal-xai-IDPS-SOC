@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from soc.api.common import plain_text
 from soc.api.iam import engine
-from soc.api.iam.catalog import ALL_PERMISSIONS, valid_pattern
+from soc.api.iam.catalog import ALL_PERMISSIONS, expand, valid_pattern
 from soc.api.models import (
     IamGroup,
     IamGroupMember,
@@ -103,7 +103,12 @@ def check_name_free(db: Session, model, name: str, ignore_id: int | None = None)
 # --- escalation guards -----------------------------------------------------------------------
 
 def actor_permissions(db: Session, actor: User) -> set[str]:
-    return engine.effective_permissions(db, actor)
+    # Delegating a role or changing a policy can affect every resource.
+    res = engine.resolve(db, actor)
+    held = res.permissions()
+    for rule in res.deny:
+        held -= expand(rule.permissions)
+    return held
 
 
 def must_hold(held: set[str], perms: set[str], what: str = "grant") -> None:
@@ -120,7 +125,11 @@ def must_hold(held: set[str], perms: set[str], what: str = "grant") -> None:
 def must_outrank(db: Session, held: set[str], target: User) -> None:
     """403 if the target holds a permission the actor does not (a lesser user must not be able
     to deactivate, edit or delete a more powerful one)."""
-    if not engine.effective_permissions(db, target) <= held:
+    res = engine.resolve(db, target)
+    possible = res.permissions()
+    for rule in res.allow:
+        possible |= expand(rule.permissions)
+    if not possible <= held:
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             "that user holds permissions you do not hold")
 
@@ -130,10 +139,10 @@ def must_not_be_self(actor: User, target_id: int, message: str) -> None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, message)
 
 
-def may_grant_legacy_admin(held: set[str]) -> None:
-    if held != set(ALL_PERMISSIONS):
+def require_legacy_admin(actor: User) -> None:
+    if actor.role != Role.ADMIN:
         raise HTTPException(status.HTTP_403_FORBIDDEN,
-                            "only someone holding every permission can make an administrator")
+                            "only an administrator can manage administrator accounts")
 
 
 def role_ids_checked(db: Session, ids: list[int]) -> list[IamRole]:

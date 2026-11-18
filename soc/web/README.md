@@ -23,7 +23,7 @@ React + Vite + TypeScript dashboard for the SOC API (see ../../docs/soc.md for t
    The dev server proxies `/api` (including the `/api/ws/alerts` live feed) to
    `http://127.0.0.1:8000`; set `IDPS_SOC_API` to point it elsewhere.
 
-`scripts/dev_seed.py` lists the demo logins. They are for a local development database only.
+Set `IDPS_DEMO_ADMIN_PASSWORD` and `IDPS_DEMO_ANALYST_PASSWORD` before seeding. Use distinct passwords of at least 12 characters. They are for a local development database only.
 
 ## Pages
 

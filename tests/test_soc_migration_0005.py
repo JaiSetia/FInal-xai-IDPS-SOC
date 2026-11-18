@@ -33,7 +33,7 @@ def _tables(engine):
 
 def test_the_chain():
     script = migrate._script()
-    assert migrate.head_revision() == "0005_cloud"
+    assert script.get_revision(migrate.head_revision()).down_revision == "0005_cloud"
     assert script.get_revision("0005_cloud").down_revision == "0004_iam"
 
 
@@ -41,7 +41,7 @@ def test_upgrade_creates_the_tables_and_matches_the_models(any_engine):
     _step(any_engine, "upgrade", "0004_iam")
     assert not NEW_TABLES & _tables(any_engine)
     _step(any_engine, "upgrade", "head")
-    assert _revision(any_engine) == "0005_cloud"
+    assert _revision(any_engine) == migrate.head_revision()
     assert NEW_TABLES <= _tables(any_engine)
     assert migrate.check(any_engine) == []  # no drift from soc.api.models
     with any_engine.connect() as conn:  # no rows: the application seeds on first access

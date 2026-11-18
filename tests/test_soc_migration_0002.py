@@ -53,7 +53,7 @@ def _old_rows(engine):
 
 
 def test_the_chain_is_0001_0002_0003():
-    assert migrate.head_revision() == "0005_cloud"
+    assert migrate.head_revision() == "0006_iam_sequence"
     script = migrate._script()
     assert script.get_revision("0003_privacy_reports").down_revision == "0002_mfa_oidc"
     assert script.get_revision("0002_mfa_oidc").down_revision == "0001_initial"

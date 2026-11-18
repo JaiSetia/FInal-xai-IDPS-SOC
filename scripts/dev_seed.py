@@ -3,14 +3,12 @@
     IDPS_SOC_JWT_SECRET=... IDPS_SOC_DATABASE_URL=sqlite:///./dev-soc.db \
         python scripts/dev_seed.py --i-understand-this-adds-demo-logins
 
-Demo logins (development only; never use these on a real deployment):
-    admin   / demo-admin-password
-    analyst / demo-analyst-password
+Set IDPS_DEMO_ADMIN_PASSWORD and IDPS_DEMO_ANALYST_PASSWORD to distinct development passwords.
 
 The sample alerts go through the real ingest endpoint, so they are validated like a sensor's.
 Safety: it only runs with the explicit flag above, only against a SQLite database that was
 named on purpose (IDPS_SOC_DATABASE_URL set, and not the API's default ./soc.db), so the
-known demo passwords can't end up in a real SOC database by accident.
+demo accounts can't end up in a real SOC database by accident.
 """
 
 import random
@@ -18,13 +16,10 @@ import sys
 
 from fastapi.testclient import TestClient
 
-from soc.api import auth
+from soc.api import auth, security
 from soc.api.main import create_app
 from soc.api.models import Role, User
 from soc.api.settings import get_settings
-
-DEMO_USERS = {"admin": ("demo-admin-password", Role.ADMIN),
-              "analyst": ("demo-analyst-password", Role.ANALYST)}
 
 # (class, dst_port, top features) for plausible-looking sample explanations
 SAMPLES = [
@@ -43,7 +38,7 @@ def main() -> int:
     import os
 
     if FLAG not in sys.argv[1:]:
-        print(f"refusing: this adds well-known demo passwords; pass {FLAG} to confirm",
+        print(f"refusing: this adds well-demo accounts; pass {FLAG} to confirm",
               file=sys.stderr)
         return 1
     url = os.environ.get("IDPS_SOC_DATABASE_URL", "")
@@ -52,11 +47,23 @@ def main() -> int:
         print("refusing: set IDPS_SOC_DATABASE_URL to a separate SQLite development database "
               f"(not {default_url!r})", file=sys.stderr)
         return 1
+    passwords = {role: os.environ.get(f"IDPS_DEMO_{role.name}_PASSWORD", "") for role in Role}
+    try:
+        for password in passwords.values():
+            security.check_password_policy(password)
+    except security.PasswordPolicyError as exc:
+        print(f"set IDPS_DEMO_ADMIN_PASSWORD and IDPS_DEMO_ANALYST_PASSWORD: {exc}", file=sys.stderr)
+        return 1
+    if len(set(passwords.values())) != len(Role):
+        print("set distinct IDPS_DEMO_ADMIN_PASSWORD and IDPS_DEMO_ANALYST_PASSWORD "
+              "values of at least 12 characters", file=sys.stderr)
+        return 1
     settings = get_settings()
     app = create_app(settings)
     rng = random.Random(7)
     with app.state.session_factory() as db:
-        for name, (password, role) in DEMO_USERS.items():
+        for role, password in passwords.items():
+            name = role.value
             if db.query(User).filter_by(username=name).first() is None:
                 auth.create_user(db, name, password, role)
         token = auth.create_sensor_token(db, f"demo-sensor-{rng.randrange(10**6)}")
@@ -82,8 +89,7 @@ def main() -> int:
     r = client.post("/ingest/alerts", json={"alerts": alerts},
                     headers={"Authorization": f"Bearer {token}"})
     r.raise_for_status()
-    print(f"seeded {r.json()['accepted']} alerts; demo users: {', '.join(DEMO_USERS)}")
-    print("sensor token for sending more alerts (dev only):", token)
+    print(f"seeded {r.json()['accepted']} alerts; demo users: admin, analyst")
     return 0
 
 

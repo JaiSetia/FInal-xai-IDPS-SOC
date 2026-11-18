@@ -161,10 +161,18 @@ def policy_denies(p: IamPolicy) -> set[str]:
 
 
 def _attached(db: Session, subject_type: str, subject_id: int) -> list[IamPolicy]:
-    return list(db.scalars(
-        select(IamPolicy).join(IamPolicyAttachment, IamPolicyAttachment.policy_id == IamPolicy.id)
-        .where(IamPolicyAttachment.subject_type == subject_type,
-               IamPolicyAttachment.subject_id == subject_id)))
+    subjects = and_(IamPolicyAttachment.subject_type == subject_type,
+                    IamPolicyAttachment.subject_id == subject_id)
+    if subject_type == "group":
+        role_ids = select(IamGroupRole.role_id).where(IamGroupRole.group_id == subject_id)
+        subjects = or_(subjects, and_(IamPolicyAttachment.subject_type == "role",
+                                      IamPolicyAttachment.subject_id.in_(role_ids)))
+    return list(db.scalars(select(IamPolicy).join(IamPolicyAttachment)
+                           .where(subjects)).unique())
+
+
+def _group_role_ids(db: Session, group_id: int) -> list[int]:
+    return list(db.scalars(select(IamGroupRole.role_id).where(IamGroupRole.group_id == group_id)))
 
 
 def subject_grants(db: Session, subject_type: str, subject_id: int) -> set[str]:
@@ -173,9 +181,7 @@ def subject_grants(db: Session, subject_type: str, subject_id: int) -> set[str]:
     if subject_type == "role":
         out |= role_permissions(db, [subject_id]).get(subject_id, set())
     elif subject_type == "group":
-        rids = list(db.scalars(select(IamGroupRole.role_id)
-                               .where(IamGroupRole.group_id == subject_id)))
-        for perms in role_permissions(db, rids).values():
+        for perms in role_permissions(db, _group_role_ids(db, subject_id)).values():
             out |= perms
     for p in _attached(db, subject_type, subject_id):
         out |= policy_grants(p)

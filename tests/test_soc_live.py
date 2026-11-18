@@ -105,6 +105,7 @@ def test_connection_closes_when_the_token_expires(client, soc_app):
         user = db.query(User).filter_by(username="analyst").one()
         now = datetime.now(UTC)
         token = jwt.encode({"sub": str(user.id), "ver": user.token_version, "iat": now,
+                            "account_created": user.created_at.isoformat(),
                             "nbf": now - timedelta(seconds=5), "exp": now + timedelta(seconds=2),
                             "iss": "idps-soc", "aud": "idps-soc"}, TEST_SECRET, algorithm="HS256")
     with client.websocket_connect("/ws/alerts") as ws:

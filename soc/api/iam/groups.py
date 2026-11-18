@@ -214,6 +214,8 @@ def set_group_roles(group_id: int, body: RolesSet,
     held = util.actor_permissions(db, actor)
     for rid in added:
         util.must_hold(held, engine.subject_grants(db, "role", rid))
+    for rid in removed:
+        util.must_hold(held, engine.subject_denies(db, "role", rid), "lift restrictions on")
     if removed:
         db.execute(delete(IamGroupRole).where(IamGroupRole.group_id == group.id,
                                               IamGroupRole.role_id.in_(removed)))

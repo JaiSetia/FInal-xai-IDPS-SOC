@@ -42,7 +42,7 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, password_hash: str | None) -> bool:
     """Constant-effort check; pass None for an unknown user."""
     if len(password) > MAX_PASSWORD_LENGTH:
-        password = password[:MAX_PASSWORD_LENGTH]
+        return False
     try:
         return _hasher.verify(password_hash or _DUMMY_HASH, password) and password_hash is not None
     except (VerifyMismatchError, VerificationError, InvalidHashError):
@@ -59,10 +59,11 @@ class TokenError(Exception):
     pass
 
 
-def create_access_token(*, user_id: int, token_version: int, secret: str, minutes: int) -> str:
+def create_access_token(*, user_id: int, account_created: str, token_version: int, secret: str,
+                        minutes: int) -> str:
     now = datetime.now(UTC)
     claims = {
-        "sub": str(user_id),
+        "sub": str(user_id), "account_created": account_created,
         "ver": token_version,
         "iat": now,
         "nbf": now,
@@ -83,7 +84,7 @@ def decode_access_token(token: str, *, secret: str) -> dict:
     try:
         claims = jwt.decode(
             token, secret, algorithms=[ALGORITHM], audience=AUDIENCE, issuer=ISSUER,
-            options={"require": ["sub", "ver", "exp", "iat", "iss", "aud"]},
+            options={"require": ["sub", "account_created", "ver", "exp", "iat", "iss", "aud"]},
         )
     except jwt.PyJWTError as exc:
         raise TokenError(str(exc)) from exc
@@ -101,12 +102,13 @@ CHALLENGE_AUDIENCE = "idps-soc-mfa"
 CHALLENGE_PURPOSES = ("verify", "enrol")
 
 
-def create_challenge_token(*, user_id: int, token_version: int, purpose: str, secret: str,
-                           minutes: int) -> str:
+def create_challenge_token(*, user_id: int, account_created: str, token_version: int, purpose: str,
+                           secret: str, minutes: int) -> str:
     if purpose not in CHALLENGE_PURPOSES:
         raise ValueError(f"unknown challenge purpose {purpose!r}")
     now = datetime.now(UTC)
-    claims = {"sub": str(user_id), "ver": token_version, "purpose": purpose, "iat": now,
+    claims = {"sub": str(user_id), "account_created": account_created, "ver": token_version,
+              "purpose": purpose, "iat": now,
               "nbf": now, "exp": now + timedelta(minutes=minutes), "iss": ISSUER,
               "aud": CHALLENGE_AUDIENCE, "jti": uuid.uuid4().hex}
     return jwt.encode(claims, secret, algorithm=ALGORITHM)
@@ -116,7 +118,7 @@ def decode_challenge_token(token: str, *, secret: str, purpose: str) -> dict:
     try:
         claims = jwt.decode(
             token, secret, algorithms=[ALGORITHM], audience=CHALLENGE_AUDIENCE, issuer=ISSUER,
-            options={"require": ["sub", "ver", "purpose", "exp", "iat", "iss", "aud"]})
+            options={"require": ["sub", "account_created", "ver", "purpose", "exp", "iat", "iss", "aud"]})
     except jwt.PyJWTError as exc:
         raise TokenError(str(exc)) from exc
     if (not str(claims["sub"]).isdigit() or not isinstance(claims["ver"], int)

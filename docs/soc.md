@@ -316,7 +316,7 @@ characters; at most 120 writes per user per minute (429); bodies over 64 KiB are
 - **No privilege escalation.** You cannot grant what you do not hold: a role's permissions, a role
   or group given to a user, a role given to a group, a member added to a group, an allow policy
   (created, widened, enabled, flipped from deny, or attached). Only newly added things are checked,
-  so you can always remove permissions. Making someone a legacy admin needs every permission.
+  so you can always remove permissions. Only a legacy administrator can create or manage a legacy administrator account. Delegation requires the permission across all resources. After upgrading, sign in again so that access and MFA tokens are bound to the account creation time.
 - **No lifting a restriction you are under.** Deleting, disabling, narrowing or detaching a deny
   policy (or removing someone from a deny-carrying group or role) needs the denied permissions
   yourself, so a user cannot simply delete the deny that limits them.
