@@ -14,6 +14,7 @@ import AlertDetail from "./pages/AlertDetail";
 import Alerts from "./pages/Alerts";
 import Cases from "./pages/Cases";
 import Demo from "./pages/Demo";
+import C6 from "./pages/C6";
 import Login from "./pages/Login";
 import CloudAlertsBadge from "./components/cloud/CloudAlertsBadge";
 import Response from "./pages/Response";
@@ -85,6 +86,7 @@ export default function App() {
             <NavLink to="/assistant">Assistant</NavLink>
             <NavLink to="/reports">Reports</NavLink>
             <NavLink to="/demo">Live demo</NavLink>
+            {me.role === "admin" && <NavLink to="/c6">C6</NavLink>}
             {can("cloud.view") && <NavLink to="/cloud">Cloud</NavLink>}
             {showIam && <NavLink to="/iam">IAM</NavLink>}
             <NavLink to="/privacy">Privacy</NavLink>
@@ -115,6 +117,7 @@ export default function App() {
               <Route path="/maps" element={<Suspense fallback={loading}><Maps /></Suspense>} />
               <Route path="/account" element={<Account />} />
               <Route path="/reports" element={<Reports />} />
+              {me.role === "admin" && <Route path="/c6" element={<C6 />} />}
               <Route path="/demo" element={<Demo />} />
               <Route path="/cloud/*" element={<Suspense fallback={loading}><CloudModule /></Suspense>} />
               <Route path="/iam/*" element={<Suspense fallback={loading}><IamModule /></Suspense>} />

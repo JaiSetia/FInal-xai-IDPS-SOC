@@ -33,6 +33,7 @@ from soc.api.routes import (
     alerts,
     assistant,
     blocks,
+    c6,
     cases,
     demo,
     geo,
@@ -84,6 +85,7 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
     app.state.sensor_audit = SensorAuditState()  # throttles sensor-status audit rows
     app.state.iam_limiter = WriteLimiter()  # writes per user per minute on /iam
     app.state.cloud_limiter = WriteLimiter()  # writes per user per minute on /cloud
+    app.state.c6 = c6.Slot()
     app.state.demo = DemoState()  # the live demo's one run slot (routes/demo.py), in memory
     app.state.demo_token_throttle = new_token_throttle()  # wrong X-Demo-Token values per address
     app.state.broadcaster = AlertBroadcaster(settings.ws_max_connections, settings.ws_queue_size)
@@ -119,7 +121,7 @@ def create_app(settings: SocSettings | None = None) -> FastAPI:
     app.include_router(auth.router)
     app.include_router(oidc.router)
     for module in (alerts, live, blocks, actions, cases, metrics, geo, assistant, admin, sensors,
-                   training, integrations, privacy, reports, demo):
+                   training, integrations, privacy, reports, demo, c6):
         app.include_router(module.router)
     app.include_router(iam_router)
     app.include_router(cloud_router)

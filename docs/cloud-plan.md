@@ -110,6 +110,8 @@ already on disk, reduced to flow-log fields (no dataset download).
 | C5 | Architecture diagrams and write-up: (a) the real AWS design in `infra/`, (b) the free emulated version, and what differs; `terraform validate` + apply on the emulator as proof | main session (Opus) |
 | C6 | Live demo run: attacker container attacks; (1) lab sensor blocks in seconds; (2) cloud path alerts in 1-2 min and adds the deny rule, shown with `aws ec2 describe-network-acls` | main session (Opus) |
 
+The dashboard can start a recorded-capture C6 replay and observe an independently operated live runner. The classroom replay has been verified end to end against Moto. Full live-traffic verification remains open. See the [demonstration guide](c6.md).
+
 Reviews: Sonnet's code (C2-C4) -> Opus reviewer; Opus's parts (C1, C5, C6) -> Sonnet reviewer.
 Tests: test-runner (Sonnet). Never Fable.
 

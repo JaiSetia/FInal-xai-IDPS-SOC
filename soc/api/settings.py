@@ -35,7 +35,8 @@ INTEGRATION_PREFIXES = ("notify_", "webhook_", "slack_", "smtp_", "email_", "sys
 # Settings where a blank value (docker compose passes "" for an unset ${VAR:-}) also means unset.
 BLANK_IS_UNSET = ("alert_retention_days", "alert_retention_keep_labelled", "audit_retention_days",
                   "assistant_retention_days", "closed_case_retention_days", "auto_migrate",
-                  "access_log_retention_days", "login_history_retention_days", "demo_token", "cloud_endpoint_url")
+                  "access_log_retention_days", "login_history_retention_days", "demo_token", "c6_token",
+                  "cloud_endpoint_url")
 _EMAIL = re.compile(r"^[^@\s<>,;\"]+@[^@\s<>,;\"]+$")
 
 
@@ -109,6 +110,7 @@ class SocSettings(BaseSettings):
     # 404 and an admin can't start a run). At least 32 characters; generate one with
     # python -c "import secrets; print(secrets.token_urlsafe(32))"
     demo_token: SecretStr | None = None
+    c6_token: SecretStr | None = None  # separate host evidence worker credential
     # Addresses and networks the SOC must never ask a sensor to block: the gateways, DNS servers,
     # the SOC host, the sensors and the analysts' machines. REQUIRED for blocking: while it is
     # empty, every block request is refused (503), so a forgotten setting fails closed.
@@ -318,17 +320,20 @@ class SocSettings(BaseSettings):
             raise ValueError(f"IDPS_SOC_MFA_KEY must be at least {MIN_SECRET_LENGTH} characters")
         return value
 
-    @field_validator("demo_token")
+    @field_validator("demo_token", "c6_token")
     @classmethod
-    def _demo_token_valid(cls, value: SecretStr | None) -> SecretStr | None:
+    def _demo_token_valid(cls, value: SecretStr | None, info) -> SecretStr | None:
         if value is None:
             return None
         secret = value.get_secret_value().strip()
         if len(secret) < MIN_SECRET_LENGTH or len(secret) > 256 or not secret.isascii() \
                 or not secret.isprintable():
-            raise ValueError(f"IDPS_SOC_DEMO_TOKEN must be {MIN_SECRET_LENGTH} to 256 printable "
+            raise ValueError(f"IDPS_SOC_{info.field_name.upper()} must be {MIN_SECRET_LENGTH} to 256 printable "
                              "ASCII characters")
-        return SecretStr(secret)
+        normalized = SecretStr(secret)
+        if info.field_name == "c6_token" and normalized == info.data.get("demo_token"):
+            raise ValueError("Use separate credentials for C6 and the Live Demo runner")
+        return normalized
 
     @model_validator(mode="after")
     def _oidc_complete(self) -> "SocSettings":

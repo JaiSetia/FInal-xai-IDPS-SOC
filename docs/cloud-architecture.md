@@ -1,8 +1,7 @@
 # Cloud architecture: the real AWS design and its free emulated twin
 
 Draft, 18 Nov 2026 (step C5 of [cloud-plan.md](cloud-plan.md)). **C1 (emulator and Terraform) and
-C3 (live flow-log exporter) are built and live-tested.** Parts marked **(C4)** or **(C6)** are still
-to come; this page is updated as each lands.
+C3 (live flow-log exporter) are built and live-tested.** For C4 deployment see the [cloud lab guide](../lab/cloud/README.md). The [C6 demonstration guide](c6.md) covers the dashboard and verified classroom replay.
 
 The project's cloud part has two forms that share the same code:
 
@@ -120,8 +119,9 @@ Applying to the emulator also found **a real bug in `infra/`** that `validate` c
   packets, bytes, times, ACCEPT/REJECT). It cannot match the lab model's accuracy; the comparison is a
   finding to report (see [cloud.md](cloud.md)).
 
-## Demo (C6, planned)
+## C6 demonstration
 
-1. The attacker scans and attacks the victim. The lab sensor blocks in seconds and the SOC shows it.
-2. About 1 to 2 minutes later the flow-log path produces alerts, and the collector adds a deny entry:
-   `aws ec2 describe-network-acls` shows the rule (the AWS CLI download needs your yes first).
+Start the recorded-capture demonstration on the SOC dashboard's C6 page. It shows sensor decisions,
+nftables membership, cloud alerts, the automatic response and an independent AWS CLI read-back
+against Moto. The same page can observe an existing live run using SOC telemetry and collector logs.
+See the [classroom setup and demonstration guide](c6.md).

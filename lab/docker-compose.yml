@@ -256,6 +256,7 @@ services:
       # Live demo (docs/soc.md, "Live demo"): the secret the host-side demo runner
       # (scripts/demo_runner.py) sends. Blank or unset = demo mode off. Only a token goes in;
       # no route to the attacker is opened.
+      IDPS_SOC_C6_TOKEN: ${IDPS_SOC_C6_TOKEN:-}
       IDPS_SOC_DEMO_TOKEN: ${IDPS_SOC_DEMO_TOKEN:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import ssl,urllib.request; urllib.request.urlopen('https://127.0.0.1:8443/health', context=ssl.create_default_context(cafile='/run/idps-soc/ca.pem'), timeout=2)"]

@@ -21,3 +21,5 @@ Optional flow extractors (can be hard to install on macOS): `pip install -e ".[c
 - Install and run it (Docker Compose, `deploy/install.sh`): [docs/deploy.md](docs/deploy.md)
 - Project plan: [docs/PLAN.md](docs/PLAN.md)
 - Lab network and attack scripts: [lab/README.md](lab/README.md)
+
+The [C6 classroom demonstration guide](docs/c6.md) covers the dashboard, recorded-capture replay, live observation and ACL evidence.

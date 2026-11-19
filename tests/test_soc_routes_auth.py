@@ -19,7 +19,8 @@ PUBLIC = {("GET", "/health"), ("POST", "/auth/login"),
 # The live demo runner's routes take X-Demo-Token, not a bearer token. With IDPS_SOC_DEMO_TOKEN
 # unset (the default, as here) they don't exist (404); with it set they answer 401 without the
 # right token (tests/test_soc_demo.py).
-DEMO_RUNNER = {("GET", "/demo/runner/next"), ("POST", "/demo/runner/report")}
+DEMO_RUNNER = {("GET", "/demo/runner/next"), ("POST", "/demo/runner/report"),
+               ("POST", "/c6/worker/claim"), ("POST", "/c6/worker/report")}
 
 
 def flat_routes(routes, prefix=""):
