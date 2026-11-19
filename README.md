@@ -16,6 +16,8 @@ pytest
 
 Optional flow extractors (can be hard to install on macOS): `pip install -e ".[capture]"`.
 
+A [double-clickable macOS dashboard](soc/web/README.md#macos-application) is available for the development and lab SOC workspaces.
+
 ## Docs
 
 - Install and run it (Docker Compose, `deploy/install.sh`): [docs/deploy.md](docs/deploy.md)

@@ -73,3 +73,18 @@ npm run build       # production bundle in dist/
   Content-Security-Policy such as `default-src 'self'; connect-src 'self' wss:; frame-ancestors 'none'`,
   plus `X-Frame-Options: DENY` (the SOC's Caddyfile in `infra/templates/soc-user-data.sh.tftpl` sets
   both on API responses and caps request bodies with `request_body { max_size 11MiB }`).
+
+## macOS application
+
+Double-click **IDPS SOC.app** in `dist/macos/` to open the dashboard in a native Mac window. Choose the workspace on the sign-in screen and use its usual password and MFA. The desktop window has its own sign-in session. Use **View → Dashboard Home** to return to the dashboard, or **⌘R** to reload.
+
+To build or rebuild the app on a Mac with Xcode Command Line Tools, Node and the dashboard's npm dependencies installed, run this from the repository root:
+
+```sh
+python3 scripts/build_macos_app.py
+open "dist/macos/IDPS SOC.app"
+```
+
+The app first checks for the dashboard on loopback port 5173. If that frontend is offline, it serves the bundled dashboard using this checkout's Vite installation. If you move the checkout or replace Node, rebuild the app to refresh those paths. Quit closes the frontend only when the Mac app started it.
+
+The Development SOC API on port 8040 and the Lab SOC API on port 8443 are separate services. Start the backend for the workspace you want to use as described above. Building the client copies the web assets and uses a local ad-hoc signature. The bundle is built for the architecture of the build Mac.
