@@ -265,14 +265,12 @@ def test_the_emulated_provider_is_read_only_and_labelled(soc_settings):
         assert db.query(CloudInstance).count() == 0  # never seeded: the mock was not used
 
 
-def test_the_emulated_provider_feeds_alert_evaluation(soc_settings):
+def test_emulator_does_not_evaluate_or_publish_mock_alerts(soc_settings):
     app, client, h = make_app(soc_settings, cloud_endpoint_url="http://127.0.0.1:4566")
     app.state.cloud_emulated = fake_provider()
-    made = client.post("/cloud/alerts/evaluate", headers=h).json()["created"]
-    assert {(a["rule"], a["resource_id"]) for a in made} >= {
-        ("bucket_public", "emu-bucket"), ("bucket_unencrypted", "emu-bucket"),
-        ("sg_open_admin", "sg-1")}
-    assert client.post("/cloud/alerts/evaluate", headers=h).json()["created"] == []
+    assert client.post("/cloud/alerts/evaluate", headers=h).status_code == 409
+    assert client.get("/cloud/alerts", headers=h).json()["items"] == []
+    assert client.get("/cloud/notifications", headers=h).json()["total"] == 0
 
 
 @pytest.mark.parametrize("url", ["https://ec2.eu-west-1.amazonaws.com", "http://8.8.8.8:4566",

@@ -276,6 +276,26 @@ def _reset_sequences(conn: Connection, tables: sa.MetaData) -> None:
 SEEDED_TABLES = ("iam_role_permissions", "iam_roles")
 
 
+def _only_seed_rows(conn: Connection, name: str) -> bool:
+    # Compare with the frozen revision's rows. A custom grant or an edited system
+    # role is user data and must make restore refuse the destination.
+    from importlib import import_module
+
+    seeds = import_module("soc.api.migrations.versions.0004_iam")._SYSTEM_ROLES
+    if name == "iam_roles":
+        expected = {(i, role, description, True)
+                    for i, (role, description, _) in enumerate(seeds, 1)}
+        sql = "SELECT id, name, description, system FROM iam_roles"
+    else:
+        expected = {(i, p) for i, (_, _, perms) in enumerate(seeds, 1) for p in perms}
+        sql = "SELECT role_id, permission FROM iam_role_permissions"
+    for row in conn.execute(sa.text(sql)):
+        if tuple(row) not in expected:
+            return False
+        expected.remove(tuple(row))
+    return not expected
+
+
 def restore(engine: Engine, src: str | os.PathLike, progress: Progress = _stderr) -> dict:
     """Restore `src` into an EMPTY database. Returns the header."""
     src = Path(src)
@@ -388,7 +408,11 @@ def _check_empty(conn: Connection) -> bool:
     those were dropped, so the restore starts from nothing."""
     quote = conn.dialect.identifier_preparer.quote
     names = [n for n in sa.inspect(conn).get_table_names() if n != "alembic_version"]
+    pristine_seed = (set(SEEDED_TABLES).issubset(names) and migrate.current_revision(conn)
+                     and all(_only_seed_rows(conn, table) for table in SEEDED_TABLES))
     for name in names:
+        if pristine_seed and name in SEEDED_TABLES:
+            continue
         if conn.execute(sa.text(f"SELECT 1 FROM {quote(name)} LIMIT 1")).first() is not None:
             raise BackupError(f"the database is not empty (table {name} has rows): "
                               "restore only into an empty database")

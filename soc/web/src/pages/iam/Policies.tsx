@@ -130,7 +130,7 @@ function PolicyModal({ policy, onClose, onSaved }: { policy: IamPolicy | null; o
           </Field>
         )}
         <Field label="Resources" error={submitted ? resErr : null}
-          hint="One per line or comma separated; * matches all. Examples: instance:i-1234abcd, bucket:logs-*. A deny limited to some resources does not remove the permission in general.">
+          hint="One per line or comma separated; * matches all. Examples: instance:i-1234abcd, bucket:logs-*. A scoped allow requires a separate general grant to enter a cloud write route. A scoped deny blocks that resource.">
           {(a) => <textarea {...a} value={resText} onChange={(e) => setResText(e.target.value)} readOnly={readOnly} spellCheck={false} />}
         </Field>
         <label className="field inline">

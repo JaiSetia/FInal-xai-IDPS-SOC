@@ -19,10 +19,10 @@ from soc.api.cloud.provider import (
     ProviderUnavailable,
 )
 from soc.api.common import audit, plain_text
-from soc.api.db import get_db
+from soc.api.db import get_db, serialize_writes
 from soc.api.iam import engine
 from soc.api.iam.deps import require_permission
-from soc.api.models import CloudActivity, User
+from soc.api.models import CloudActivity, CloudVpc, User
 
 log = logging.getLogger("soc.cloud")
 T = TypeVar("T")
@@ -171,7 +171,8 @@ def writer(*permissions: str) -> Callable[..., Ctx]:
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
                                 "too many changes; slow down", headers={"Retry-After": "60"})
         ctx = Ctx(request, user, db)
-        ctx.ready()
+        ctx.require_mock()
+        serialize_writes(db, CloudVpc)
         return ctx
 
     return dependency

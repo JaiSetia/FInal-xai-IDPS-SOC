@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from soc.api import mfa, security
@@ -68,8 +69,13 @@ def login(body: LoginRequest, request: Request, db: Annotated[Session, Depends(g
     agent = request.headers.get("user-agent")
     ticket = throttle.begin_attempt(body.username, ip)  # counted as a failure until proven
     if ticket is None:
+        try:
+            known = db.scalar(select(User.id).where(User.username == body.username)) is not None
+        except SQLAlchemyError:  # best-effort history must not expose the submitted name
+            db.rollback()
+            known = False
         record_login(db, username=body.username, user_id=None, success=False, reason="locked",
-                     ip=ip, user_agent=agent)
+                     ip=ip, user_agent=agent, settings=settings, unknown=not known)
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
                             "too many failed logins; try again later")
     user = db.scalar(select(User).where(User.username == body.username))
@@ -78,7 +84,8 @@ def login(body: LoginRequest, request: Request, db: Annotated[Session, Depends(g
         # The response is the same for every cause; the history (admins only) tells them apart.
         reason = ("unknown_user" if user is None else "disabled" if ok else "bad_password")
         record_login(db, username=body.username, user_id=user.id if user else None,
-                     success=False, reason=reason, ip=ip, user_agent=agent)
+                     success=False, reason=reason, ip=ip, user_agent=agent, settings=settings,
+                     unknown=user is None)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, _LOGIN_FAILED)
     throttle.succeeded(body.username, ip, ticket)
     if security.needs_rehash(user.password_hash):

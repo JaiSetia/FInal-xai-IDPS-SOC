@@ -16,12 +16,14 @@ export default function CloudAlertsBadge({ pollMs = 60_000, to = "/cloud/alerts"
   useEffect(() => {
     if (!allowed) { setCounts(null); return; }
     let live = true;
+    let denied = false;
     const load = async () => {
+      if (denied || document.hidden) return;
       try {
         const r = await cloudApi.notifications(20);
         if (live) setCounts({ open: r.open, acknowledged: r.acknowledged, critical: r.items.some((a) => a.severity === "critical" && a.status === "open") });
       } catch (err) {
-        if (live && err instanceof ApiError && err.status === 403) setCounts(null);
+        if (live && err instanceof ApiError && err.status === 403) { denied = true; setCounts(null); }
       }
     };
     void load();

@@ -298,7 +298,8 @@ def update_instance(instance_id: ResourceId, body: InstanceUpdate, ctx: WriteIns
             inst.tags = body.tags
             changed.append("tags")
         if changed:
-            inst.updated_at = clock.now()
+            if inst.state != "pending":  # pending uses this timestamp for the boot transition
+                inst.updated_at = clock.now()
             record(ctx.db, ctx.user, "instance.update", "instance", inst.id,
                    {"name": inst.name, "changed": changed})
     return _out(ctx, instance_id, changed=True)

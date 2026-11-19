@@ -111,7 +111,9 @@ EXEMPT_TABLES: dict[str, str] = {
     # IAM (soc/api/iam). Names and globs are chosen by admins, like sensor names; none is network
     # data. login_history.ip is the signing-in operator's own client address (and user_agent
     # their browser), not the monitored network's addresses this erasure is about: those rows
-    # are the sign-in record of SOC accounts and stay. Decided as exempt; it has no retention yet.
+    # are the sign-in record of SOC accounts and stay for LOGIN_HISTORY_RETENTION_DAYS (365 by
+    # default). A username that matched no account is stored only as a keyed hash. Decided as
+    # exempt.
     "iam_roles": "admin-chosen role names and descriptions",
     "iam_role_permissions": "catalog permission names",
     "iam_groups": "admin-chosen group names and descriptions",
@@ -903,6 +905,7 @@ def privacy_notice(request: Request) -> dict:
             "alerts_kept_if_judged_for_training": s.alert_retention_keep_labelled,
             "audit_log_days": s.audit_retention_days,
             "access_log_days": s.access_log_retention_days,
+            "login_history_days": s.login_history_retention_days,
             "assistant_conversations_days": s.assistant_retention_days,
             "closed_cases_days": s.closed_case_retention_days,
             "would_block_records_days": s.would_block_retention_days,

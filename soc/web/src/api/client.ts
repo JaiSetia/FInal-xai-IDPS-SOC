@@ -39,7 +39,7 @@ export function onTokenChange(fn: Listener): () => void {
 }
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(public status: number, message: string, public code?: string) {
     super(message);
   }
 }
@@ -48,6 +48,7 @@ function detailMessage(body: unknown, fallback: string): string {
   if (body && typeof body === "object" && "detail" in body) {
     const d = (body as { detail: unknown }).detail;
     if (typeof d === "string") return d;
+    if (d && typeof d === "object" && "message" in d && typeof d.message === "string") return d.message;
     if (Array.isArray(d)) {
       return d
         .map((e) => (e && typeof e === "object" && "msg" in e ? String(e.msg) : String(e)))
@@ -69,7 +70,11 @@ export async function api<T>(path: string, init: RequestInit & { json?: unknown 
   if (res.status === 401 && token) setToken(null); // expired or revoked: back to login
   const text = await res.text();
   const data = text ? safeJson(text) : null;
-  if (!res.ok) throw new ApiError(res.status, detailMessage(data, `${res.status} ${res.statusText}`));
+  if (!res.ok) throw new ApiError(res.status, detailMessage(data, `${res.status} ${res.statusText}`),
+    (data as { detail?: { code?: string } } | null)?.detail?.code);
+  if (path.startsWith("/iam/") && init.method && init.method !== "GET") {
+    window.dispatchEvent(new Event("idps-iam-changed"));
+  }
   return data as T;
 }
 

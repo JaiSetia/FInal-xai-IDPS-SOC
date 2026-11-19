@@ -153,3 +153,20 @@ def get_db(request: Request) -> Iterator[Session]:
         yield session
     finally:
         session.close()
+
+
+def serialize_writes(session: Session, model) -> None:
+    """Hold a database write lock through commit for a check spanning several rows.
+
+    SQLite serializes writers after the first DML. PostgreSQL serializes the named
+    table's mutations while leaving plain SELECTs available.
+    """
+    from sqlalchemy import false, text, update
+
+    table = model.__table__
+    if session.get_bind().dialect.name == "postgresql":
+        name = session.get_bind().dialect.identifier_preparer.format_table(table)
+        session.execute(text(f"LOCK TABLE {name} IN SHARE ROW EXCLUSIVE MODE"))
+    else:
+        key = next(iter(table.primary_key.columns))
+        session.execute(update(table).where(false()).values({key: key}))

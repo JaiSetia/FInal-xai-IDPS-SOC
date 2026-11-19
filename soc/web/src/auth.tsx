@@ -63,9 +63,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     void loadMe();
     // Any 401 clears the token (see api/client.ts); that sends the user back to login.
-    return onTokenChange(() => {
+    const unsubscribe = onTokenChange(() => {
       if (!getToken()) setMe(null);
     });
+    const permissionsChanged = () => { void loadMe(); };
+    window.addEventListener("idps-iam-changed", permissionsChanged);
+    return () => {
+      window.removeEventListener("idps-iam-changed", permissionsChanged);
+      unsubscribe();
+    };
   }, [loadMe]);
 
   const finish = useCallback(async (res: LoginResult) => {
@@ -86,7 +92,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setMe(null);
   }, []);
 
-  const can = useCallback((permission: string) => Boolean(me?.permissions?.includes(permission)), [me]);
+  const can = useCallback((permission: string) => Boolean(me && (me.permissions === undefined || me.permissions.includes(permission))), [me]);
 
   return <AuthContext.Provider value={{ me, loading, login, finish, refresh: loadMe, logout, can }}>{children}</AuthContext.Provider>;
 }

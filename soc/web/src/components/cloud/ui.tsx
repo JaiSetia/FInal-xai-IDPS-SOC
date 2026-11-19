@@ -124,7 +124,6 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
     return (
       <div className="cl-denied" role="alert">
         <h2>No permission</h2>
-        <p>Your account is not allowed to see this. Ask an administrator for the <code>cloud.view</code> permission.</p>
         <p className="muted small-text">{detail}</p>
       </div>
     );

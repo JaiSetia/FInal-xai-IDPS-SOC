@@ -168,7 +168,7 @@ function CreateGroup({ vpcs, onClose, onDone }: { vpcs: { id: string; name: stri
 }
 
 /** What the server says when an SSH/RDP-to-the-world rule is sent without the confirmation flag. */
-const isWorldRefusal = (err: unknown) => err instanceof ApiError && err.status === 422 && /confirm_open_to_world/.test(err.message);
+const isWorldRefusal = (err: unknown) => err instanceof ApiError && err.status === 422 && err.code === "confirm_open_to_world";
 
 function Rules({ group, onChanged }: { group: SecurityGroup; onChanged: () => void }) {
   const toast = useToast();

@@ -13,8 +13,10 @@ from soc.api.models import LoginHistory, User
 @pytest.fixture(autouse=True)
 def _forget_locked_rows():
     history._recent_locked.clear()
+    history._recent_fails.clear()
     yield
     history._recent_locked.clear()
+    history._recent_fails.clear()
 
 
 def rows(app, **where) -> list[LoginHistory]:
@@ -43,8 +45,8 @@ def test_a_wrong_password_and_an_unknown_user_are_recorded(client, soc_app):
     assert attempt(client, "ghost", "whatever-password-1").status_code == 401
     bad, ghost = rows(soc_app)
     assert (bad.reason, bad.success, bad.user_id is not None) == ("bad_password", False, True)
-    assert (ghost.reason, ghost.success, ghost.user_id, ghost.username) == (
-        "unknown_user", False, None, "ghost")
+    assert (ghost.reason, ghost.success, ghost.user_id) == ("unknown_user", False, None)
+    assert ghost.username != "ghost" and ghost.username.startswith("?")  # never the raw name
 
 
 def test_the_response_does_not_tell_the_causes_apart(client, soc_app):
@@ -126,7 +128,7 @@ def test_user_agent_is_truncated_and_text_is_cleaned(client, soc_app):
     attempt(client, "bad" + chr(0x202E) + "user", "whatever-password-1")
     first, second = rows(soc_app)
     assert first.user_agent == "A" * 255
-    assert second.username == "baduser"
+    assert second.username == history.unknown_label(soc_app.state.settings, "bad" + chr(0x202E) + "user")
 
 
 def test_a_failing_history_write_never_breaks_login(client, soc_app, monkeypatch):
@@ -159,7 +161,8 @@ def test_endpoint_lists_and_filters(client, soc_app, admin_headers):
 
     assert reasons(success="false") == ["unknown_user", "bad_password"]
     assert reasons(user_id=analyst_id, success="true") == ["ok"]  # not the admin's own login
-    assert reasons(username="ghost") == ["unknown_user"]
+    assert reasons(username="ghost") == []
+    assert reasons(username=items[0]["username"]) == ["unknown_user"]
     assert reasons(reason="bad_password") == ["bad_password"]
     assert reasons(since="2999-01-01T00:00:00Z") == []
     assert len(reasons(until="2999-01-01T00:00:00Z")) == len(items)
@@ -182,3 +185,79 @@ def test_a_users_last_login_shows_in_the_user_list(client, soc_app, admin_header
 def test_the_admin_login_used_by_the_fixtures_is_recorded(client, admin_headers, soc_app):
     assert [r.username for r in rows(soc_app)] == ["admin"] and ADMIN_PW
     assert headers  # the helper is shared with the other IAM tests
+
+
+def test_an_unknown_username_is_stored_as_a_keyed_hash(client, soc_app):
+    pasted = "My-Secret-Passw0rd!"  # someone typed their password into the username box
+    assert attempt(client, pasted, "x-whatever-1").status_code == 401
+    (row,) = rows(soc_app)
+    assert row.reason == "unknown_user" and pasted not in row.username
+    assert row.username == history.unknown_label(soc_app.state.settings, pasted)
+    assert len(row.username) == 17  # "?" and 16 hex characters
+
+
+def test_a_label_depends_on_the_key(soc_app):
+    a = history.unknown_label(soc_app.state.settings, "ghost")
+    assert a == history.unknown_label(soc_app.state.settings, "ghost")
+    history._key.cache_clear()
+
+    class Other:
+        mfa_master_key = "another-master-key-entirely"
+
+    assert history.unknown_label(Other, "ghost") != a
+
+
+def test_repeated_unknown_user_attempts_are_one_row_a_minute(client, soc_app):
+    for _ in range(4):
+        assert attempt(client, "ghost", "whatever-password-1").status_code == 401
+    assert attempt(client, "ghost2", "whatever-password-1").status_code == 401  # another name
+    assert [r.reason for r in rows(soc_app)] == ["unknown_user", "unknown_user"]
+
+
+def test_a_locked_row_for_an_unknown_name_is_hashed_too(client, soc_app):
+    for _ in range(5):
+        attempt(client, "ghost-lock", "whatever-password-1")
+    assert attempt(client, "ghost-lock", "whatever-password-1").status_code == 429
+    locked = [r for r in rows(soc_app) if r.reason == "locked"]
+    assert len(locked) == 1 and "ghost-lock" not in locked[0].username
+    assert locked[0].username.startswith("?")
+
+
+def test_failure_rows_are_capped_per_address(soc_app, monkeypatch):
+    t = [1000.0]
+    monkeypatch.setattr(history.time, "monotonic", lambda: t[0])
+    with soc_app.state.session_factory() as db:
+        for i in range(history._FAILS_PER_MINUTE + 20):
+            history.record_login(db, username="analyst", user_id=None, success=False,
+                                 reason="bad_password", ip="203.0.113.9", user_agent="x")
+        history.record_login(db, username="analyst", user_id=None, success=True, reason="ok",
+                             ip="203.0.113.9", user_agent="x")  # successes are never dropped
+        assert len(rows(soc_app)) == history._FAILS_PER_MINUTE + 1
+        t[0] += 61
+        history.record_login(db, username="analyst", user_id=None, success=False,
+                             reason="bad_password", ip="203.0.113.9", user_agent="x")
+    assert len(rows(soc_app)) == history._FAILS_PER_MINUTE + 2
+
+
+def test_login_history_retention(soc_app):
+    from datetime import UTC, datetime, timedelta
+
+    from soc.api.retention import prune
+
+    now = datetime.now(UTC)
+    with soc_app.state.session_factory() as db:
+        for days in (400, 366, 364, 1):
+            db.add(LoginHistory(at=now - timedelta(days=days), username="u", success=True,
+                                reason="ok"))
+        db.commit()
+        settings = soc_app.state.settings
+        assert settings.login_history_retention_days == 365
+        assert prune(db, settings, now, dry_run=True)["login_history"] == 2
+        assert prune(db, settings, now)["login_history"] == 2
+        assert db.query(LoginHistory).count() == 2
+        off = settings.model_copy(update={"login_history_retention_days": 0})
+        db.add(LoginHistory(at=now - timedelta(days=5000), username="u", success=True,
+                            reason="ok"))
+        db.commit()
+        assert prune(db, off, now)["login_history"] == 0
+        assert db.query(LoginHistory).count() == 3

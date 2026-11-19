@@ -6,7 +6,7 @@ import { FilterBar, Guard, LoginTable, useFilters } from "../../components/iam/s
 import { TimeRangeFields, rangeError, rangeParams } from "../../components/iam/TimeFilters";
 import { Pager, QueryState, usePaged } from "../../components/iam/ui";
 
-const REASONS = ["ok", "bad_password", "unknown_user", "disabled", "locked", "mfa_failed"];
+const REASONS = ["ok", "bad_password", "unknown_user", "disabled", "locked", "mfa_failed", "sso_failed", "sso_refused"];
 
 export default function Logins() {
   return (

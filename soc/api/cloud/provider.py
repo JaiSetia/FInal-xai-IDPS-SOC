@@ -101,6 +101,7 @@ class MockProvider(CloudProvider):
         from soc.api.cloud import seed
 
         seed.seed_if_empty(self.db)
+        seed.top_up_cost(self.db)  # the mock cost keeps pace with the clock
         self.settle()
 
     def settle(self) -> None:
@@ -110,9 +111,10 @@ class MockProvider(CloudProvider):
         if not ids:
             return
         now = clock.now()
-        self.db.execute(update(CloudInstance).where(CloudInstance.id.in_(ids),
-                                                    CloudInstance.state == "pending")
-                        .values(state="running", updated_at=now))
+        ids = list(self.db.scalars(update(CloudInstance).where(
+            CloudInstance.id.in_(ids), CloudInstance.state == "pending",
+            CloudInstance.updated_at <= cutoff).values(state="running", updated_at=now)
+            .returning(CloudInstance.id)))
         self.db.add_all(CloudActivity(at=now, actor="system", action="instance.running",
                                       resource_type="instance", resource_id=i,
                                       details={"data_source": MOCK}) for i in ids)

@@ -4,7 +4,7 @@ import ipaddress
 import secrets
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Path, Query
+from fastapi import APIRouter, HTTPException, Path, Query
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import delete, func, select
 
@@ -74,21 +74,22 @@ class SecurityGroupOut(Sourced, SecurityGroup):
     pass
 
 
-def opens_admin_to_world(rule: dict) -> bool:
-    """Ingress from everywhere (0.0.0.0/0 or ::/0) over TCP/all covering port 22 or 3389."""
-    if rule["direction"] != "in" or rule["protocol"] not in ("tcp", "all"):
-        return False
-    try:
+def exposed_admin_ports(rules: list[dict]) -> set[tuple[int, int]]:
+    """Internet-wide TCP management access, including a union of narrower networks."""
+    networks: dict[tuple[int, int], list] = {}
+    for rule in rules:
+        if rule["direction"] != "in" or rule["protocol"] not in ("tcp", "all"):
+            continue
         net = ipaddress.ip_network(rule["cidr"], strict=False)
-    except ValueError:
-        return False
-    return net.prefixlen == 0 and any(rule["port_from"] <= p <= rule["port_to"]
-                                      for p in catalog.SENSITIVE_PORTS)
+        for port in catalog.SENSITIVE_PORTS:
+            if rule["port_from"] <= port <= rule["port_to"]:
+                networks.setdefault((net.version, port), []).append(net)
+    return {key for key, nets in networks.items()
+            if any(n.prefixlen == 0 for n in ipaddress.collapse_addresses(nets))}
 
 
 def _sg(rec: dict) -> SecurityGroup:
-    return SecurityGroup(**rec, open_to_world_admin_ports=any(
-        opens_admin_to_world(r) for r in rec["rules"]))
+    return SecurityGroup(**rec, open_to_world_admin_ports=bool(exposed_admin_ports(rec["rules"])))
 
 
 # --- reads ----------------------------------------------------------------------------------------------
@@ -223,11 +224,11 @@ def create_security_group(body: SecurityGroupCreate, ctx: WriteNetwork):
 def delete_security_group(sg_id: ResourceId, ctx: WriteNetwork):
     ctx.allowed_on(NETWORK, f"securitygroup:{sg_id}")
     ctx.require_mock()
-    snapshot = _find_sg(ctx, sg_id)
     with atomic(ctx.db):
         sg = ctx.db.get(CloudSecurityGroup, sg_id, with_for_update=True)
         if sg is None:
             raise not_found("security group")
+        snapshot = _find_sg(ctx, sg_id)
         if snapshot["instances_using"] > 0:
             raise conflict(f"the security group is used by {snapshot['instances_using']} "
                            "instance(s); change them first")
@@ -246,17 +247,19 @@ def add_rule(sg_id: ResourceId, body: RuleCreate, ctx: WriteNetwork):
     ctx.require_mock()
     rule = {"direction": body.direction, "protocol": body.protocol, "port_from": body.port_from,
             "port_to": body.port_to, "cidr": body.cidr}
-    risky = opens_admin_to_world(rule)
-    if risky and not body.confirm_open_to_world:
-        raise unprocessable(
-            "this rule opens SSH (22) or RDP (3389) to the whole internet (" + body.cidr + "), "
-            "where anyone can try to log in. Use a narrower source range, or send "
-            "confirm_open_to_world=true to accept the risk.")
     with atomic(ctx.db):
         sg = ctx.db.get(CloudSecurityGroup, sg_id, with_for_update=True)
         if sg is None:
             raise not_found("security group")
         existing = list(ctx.db.scalars(select(CloudSgRule).where(CloudSgRule.sg_id == sg_id)))
+        rows = [{k: getattr(r, k) for k in rule} for r in existing]
+        risky = bool(exposed_admin_ports([rule]) or
+                     exposed_admin_ports([*rows, rule]) - exposed_admin_ports(rows))
+        if risky and not body.confirm_open_to_world:
+            raise HTTPException(422, detail={
+                "code": "confirm_open_to_world",
+                "message": "The combined inbound rules open SSH or RDP to the whole internet. "
+                           "Confirm this exposure or choose a narrower source range."})
         if len(existing) >= catalog.MAX_RULES_PER_GROUP:
             raise conflict(f"at most {catalog.MAX_RULES_PER_GROUP} rules per security group")
         if any(all(getattr(r, k) == v for k, v in rule.items()) for r in existing):

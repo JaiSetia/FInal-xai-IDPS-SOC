@@ -8,6 +8,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from soc.api.common import plain_text
+from soc.api.db import serialize_writes
 from soc.api.iam import engine
 from soc.api.iam.catalog import ALL_PERMISSIONS, expand, valid_pattern
 from soc.api.models import (
@@ -93,6 +94,7 @@ def like_pattern(text: str) -> str:
 
 def check_name_free(db: Session, model, name: str, ignore_id: int | None = None) -> None:
     """409 if another row has this name (compared case-insensitively: "Ops" and "ops" clash)."""
+    serialize_writes(db, model)
     query = select(model.id).where(func.lower(model.name) == name.lower())
     if ignore_id is not None:
         query = query.where(model.id != ignore_id)

@@ -262,7 +262,10 @@ def test_create_instance_then_it_settles_to_running(client, pinned, admin_header
     assert "mock inventory only" in inst["note"]
     assert inst["health"]["status"] == "unknown"
     from datetime import timedelta
-    pinned.set(pinned.value + timedelta(seconds=30))
+    pinned.set(pinned.value + timedelta(seconds=8))
+    assert client.patch(f"/cloud/instances/{inst['id']}", json={"name": "renamed-pending"},
+                        headers=admin_headers).status_code == 200
+    pinned.set(pinned.value + timedelta(seconds=3))
     got = client.get(f"/cloud/instances/{inst['id']}", headers=admin_headers).json()
     assert got["state"] == "running" and got["health"]["status"] != "unknown"
     assert any(a["action"] == "instance.running" and a["actor"] == "system"
@@ -524,7 +527,7 @@ def test_ssh_and_rdp_to_the_world_need_an_explicit_confirmation(client, pinned, 
     body = {"direction": "in", **rule}
     r = client.post(url, json=body, headers=admin_headers)
     assert r.status_code == 422
-    assert "confirm_open_to_world" in r.json()["detail"] and "internet" in r.json()["detail"]
+    assert r.json()["detail"]["code"] == "confirm_open_to_world" and "internet" in r.json()["detail"]["message"]
     r = client.post(url, json={**body, "confirm_open_to_world": True}, headers=admin_headers)
     assert r.status_code == 201
     assert r.json()["open_to_world_admin_ports"] is True
@@ -747,4 +750,28 @@ def test_a_policy_change_applies_at_once(client, soc_app, pinned, admin_headers)
     with soc_app.state.session_factory() as db:
         add_policy(db, "Freeze", "deny", ["cloud.instances.write"], attach=[("user", uid)])
     # a deny on every resource also removes the general permission
-    assert client.post(f"/cloud/instances/{web}/reboot", headers=h).status_code in (401, 403)
+    assert client.post(f"/cloud/instances/{web}/reboot", headers=h).status_code == 403
+
+def test_combined_ranges_need_confirmation_and_generate_a_finding(client, pinned, admin_headers):
+    sg = _sg(client, admin_headers, "app-sg")
+    url = f"/cloud/network/security-groups/{sg['id']}/rules"
+    rule = {"direction": "in", "protocol": "tcp", "port_from": 22, "cidr": "0.0.0.0/1"}
+    assert client.post(url, json=rule, headers=admin_headers).status_code == 201
+    rule["cidr"] = "128.0.0.0/1"
+    refusal = client.post(url, json=rule, headers=admin_headers)
+    assert refusal.status_code == 422 and refusal.json()["detail"]["code"] == "confirm_open_to_world"
+    assert client.post(url, json={**rule, "confirm_open_to_world": True},
+                       headers=admin_headers).json()["open_to_world_admin_ports"]
+    findings = client.post("/cloud/alerts/evaluate", headers=admin_headers).json()["created"]
+    assert any(a["rule"] == "sg_open_admin" and a["resource_id"] == sg["id"] for a in findings)
+
+
+def test_scoped_alert_deny_applies_to_all_triage_writes(client, soc_app, pinned, admin_headers):
+    aid = client.get("/cloud/alerts", headers=admin_headers).json()["items"][0]["id"]
+    uid = add_user(soc_app, "triage", perms=["cloud.alerts.manage"])
+    with soc_app.state.session_factory() as db:
+        add_policy(db, "Protected alert", "deny", ["cloud.alerts.manage"],
+                   resources=[f"alert:{aid}"], attach=[("user", uid)])
+    h = headers(client, "triage")
+    for method, suffix in [("POST", "/resolve"), ("POST", "/acknowledge"), ("DELETE", "")]:
+        assert client.request(method, f"/cloud/alerts/{aid}{suffix}", headers=h).status_code == 403

@@ -179,12 +179,16 @@ def populate(engine, now=None) -> None:
                     LoginHistory(at=now, user_id=admin.id, username="admin", success=True,
                                  reason="ok", ip="10.0.0.1", user_agent="ua", mfa_used=True)])
         # Cloud (mock inventory): one row of every table
+        db.add(CloudVpc(id="vpc-00000001", name="prod-vpc", cidr="10.0.0.0/16"))
+        db.flush()
         db.add_all([
-            CloudVpc(id="vpc-00000001", name="prod-vpc", cidr="10.0.0.0/16"),
             CloudSubnet(id="subnet-00000001", vpc_id="vpc-00000001", name="a", cidr="10.0.1.0/24",
                         az="eu-west-1a", public=True),
             CloudSecurityGroup(id="sg-00000001", name="web-sg", description="é web",
                                vpc_id="vpc-00000001"),
+        ])
+        db.flush()
+        db.add_all([
             CloudInstance(id="i-00000001", name="web-1", instance_type="t3.micro",
                           state="running", az="eu-west-1a", vpc_id="vpc-00000001",
                           subnet_id="subnet-00000001", private_ip="10.0.1.10",

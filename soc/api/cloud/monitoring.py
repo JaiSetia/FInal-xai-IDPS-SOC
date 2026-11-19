@@ -14,7 +14,8 @@ from soc.api.cloud.instances import MOCK_METRICS_LABEL, sample_of
 from soc.api.models import CloudAlert
 
 router = APIRouter(prefix="/cloud", tags=["cloud"])
-COST_NOTE = ("Mock cost: seeded daily figures that do not change when the mock inventory does. "
+COST_NOTE = ("Mock cost: invented daily figures, generated per day from the date (they do not "
+             "change when the mock inventory does). "
              "Top drivers are an estimate (list price x running hours), not a bill.")
 
 
@@ -185,10 +186,12 @@ def overview(ctx: Read):
     for i in live:
         health[metrics.health(i["state"], sample_of(i, now))["status"]] += 1
     volumes, buckets = p.list_volumes(), p.list_buckets()
-    counts = dict(ctx.db.execute(select(CloudAlert.status, func.count())
-                                 .group_by(CloudAlert.status)).all())
-    critical_open = ctx.db.scalar(select(func.count()).select_from(CloudAlert).where(
-        CloudAlert.status == "open", CloudAlert.severity == "critical")) or 0
+    counts, critical_open = {}, 0
+    if p.writable:
+        counts = dict(ctx.db.execute(select(CloudAlert.status, func.count())
+                                     .group_by(CloudAlert.status)).all())
+        critical_open = ctx.db.scalar(select(func.count()).select_from(CloudAlert).where(
+            CloudAlert.status == "open", CloudAlert.severity == "critical")) or 0
     return Overview(
         **ctx.sourced(), region=catalog.REGION,
         instances={"total": len(live), "by_state": by_state, "by_type": by_type},

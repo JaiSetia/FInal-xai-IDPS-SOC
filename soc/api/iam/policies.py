@@ -166,6 +166,7 @@ def update_policy(policy_id: int, body: PolicyUpdate,
     policy = get_or_404(db, IamPolicy, policy_id, "policy")
     if not body.model_fields_set:
         raise HTTPException(422, "nothing to change")
+    old_resources = set(policy.resources)
     old_grants, old_denies = engine.policy_grants(policy), engine.policy_denies(policy)
     held = util.actor_permissions(db, actor)  # before anything changes
     changes: dict = {}
@@ -187,8 +188,11 @@ def update_policy(policy_id: int, body: PolicyUpdate,
         if "resources" in changes:
             # Changing resource globs can widen a grant or narrow a deny even
             # when the permission names stay the same.
-            util.must_hold(held, engine.policy_grants(policy))
-            util.must_hold(held, old_denies, "lift restrictions on")
+            new_resources = set(policy.resources)
+            if not (new_resources <= old_resources or "*" in old_resources):
+                util.must_hold(held, engine.policy_grants(policy))
+            if not (old_resources <= new_resources or "*" in new_resources):
+                util.must_hold(held, old_denies, "lift restrictions on")
         util.must_hold(held, engine.policy_grants(policy) - old_grants)
         util.must_hold(held, old_denies - engine.policy_denies(policy), "lift restrictions on")
         if set(changes) - {"name", "description"}:

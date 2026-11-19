@@ -227,6 +227,42 @@ def test_cost_totals_are_consistent(client, pinned, admin_headers, rng, days):
     assert "not a bill" in r["cost_note"]
 
 
+def test_cost_keeps_pace_with_the_clock(client, pinned, admin_headers):
+    first = client.get("/cloud/cost", headers=admin_headers, params={"range": "7d"}).json()
+    by_day = {d["day"]: d for d in first["by_day"]}
+    pinned.set(T0 + timedelta(days=4))  # first access was on the 15th: now it is the 19th
+    r = client.get("/cloud/cost", headers=admin_headers, params={"range": "7d"}).json()
+    assert r["last_day"] == "2026-03-19" and len(r["by_day"]) == 7
+    assert all(d["total"] > 0 for d in r["by_day"])  # no empty days at the end
+    for d in r["by_day"]:  # days that existed before are unchanged
+        if d["day"] in by_day:
+            assert d == by_day[d["day"]]
+    f = r["forecast"]
+    assert f["days_elapsed"] == 19
+    mtd = sum(d["total"] for d in client.get(
+        "/cloud/cost", headers=admin_headers, params={"range": "30d"}).json()["by_day"]
+        if d["day"].startswith("2026-03"))
+    assert f["month_to_date"] == pytest.approx(mtd, abs=0.02)
+    assert client.get("/cloud/overview", headers=admin_headers).json()["cost"][
+        "month_to_date"] == pytest.approx(mtd, abs=0.02)
+    # a long gap is capped at the seeded window and still gapless
+    pinned.set(T0 + timedelta(days=200))
+    r = client.get("/cloud/cost", headers=admin_headers, params={"range": "90d"}).json()
+    assert len(r["by_day"]) == 90 and all(d["total"] > 0 for d in r["by_day"])
+
+
+def test_cost_days_are_a_pure_function_of_the_date():
+    from datetime import date
+
+    from soc.api.cloud import seed
+
+    a = [(r.day, r.service, r.amount_usd) for r in seed.cost_rows(date(2026, 5, 1),
+                                                                 date(2026, 5, 9))]
+    b = [(r.day, r.service, r.amount_usd) for r in seed.cost_rows(date(2026, 5, 4),
+                                                                 date(2026, 5, 9))]
+    assert set(b) <= set(a)
+
+
 def test_cost_forecast_is_linear(client, pinned, admin_headers):
     r = client.get("/cloud/cost", headers=admin_headers, params={"range": "30d"}).json()
     f = r["forecast"]

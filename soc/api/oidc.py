@@ -44,6 +44,7 @@ from sqlalchemy.orm import Session
 from soc.api import auth, security
 from soc.api.common import audit
 from soc.api.db import get_db
+from soc.api.iam.history import record_login
 from soc.api.models import Role, User
 
 router = APIRouter(prefix="/auth/oidc", tags=["auth"])
@@ -58,7 +59,16 @@ LEEWAY_SECONDS = 60
 
 
 class OidcError(Exception):
-    """Sign-in failed. The message is for the log; the browser gets a generic one."""
+    """Sign-in failed. The message is for the log; the browser gets a generic one.
+
+    `reason` is what the login history records (sso_failed: the provider or token was refused;
+    sso_refused: a valid sign-in the SOC will not accept; unknown_user; disabled). `user` is the
+    SOC account concerned when there is one; `name` the claimed username when there is none."""
+
+    def __init__(self, message: str, reason: str = "sso_failed", user=None,
+                 name: str | None = None) -> None:
+        super().__init__(message)
+        self.reason, self.user, self.name = reason, user, name
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -252,27 +262,28 @@ def find_user(db: Session, settings, claims: dict) -> User:
     if user is None:
         name = claims.get(settings.oidc_username_claim)
         if settings.oidc_username_claim == "email" and claims.get("email_verified") is not True:
-            raise OidcError("the provider has not verified this email address")
+            raise OidcError("the provider has not verified this email address", "sso_refused")
         if not isinstance(name, str) or not name:
-            raise OidcError(f"ID token has no {settings.oidc_username_claim} claim")
+            raise OidcError(f"ID token has no {settings.oidc_username_claim} claim", "sso_refused")
         user = db.scalar(select(User).where(User.username == name))
         if user is None:
-            raise OidcError(f"no SOC account named {name[:64]!r}")
+            raise OidcError("no linked SOC account", "unknown_user", name=name)
         if user.oidc_subject is not None:  # linked to another provider account already
-            raise OidcError(f"SOC account {name[:64]!r} is linked to another sign-in")
+            raise OidcError(f"SOC account {name[:64]!r} is linked to another sign-in", "sso_refused",
+                            user=user)
         if user.disabled:
-            raise OidcError(f"SOC account {user.username!r} is disabled")
+            raise OidcError(f"SOC account {user.username!r} is disabled", "disabled", user=user)
         if user.role == Role.ADMIN and not user.mfa_enabled:
             # Linking by a name claim trusts the provider's usernames. An admin without MFA would
             # then be one provider account named like them away from enrolling an attacker's
             # authenticator. The admin signs in with their password and sets up MFA first.
             raise OidcError(f"admin {user.username!r} must set up MFA before the first single "
-                            "sign-on")
+                            "sign-on", "sso_refused", user=user)
         user.oidc_issuer, user.oidc_subject = issuer, subject
         audit(db, user, "sso_link", f"user:{user.username}", {"issuer": issuer[:200]})
         db.commit()
     if user.disabled:
-        raise OidcError(f"SOC account {user.username!r} is disabled")
+        raise OidcError(f"SOC account {user.username!r} is disabled", "disabled", user=user)
     return user
 
 
@@ -296,6 +307,7 @@ class OidcCallback(BaseModel):
     binding: str = Field(min_length=1, max_length=256)
 
 
+SSO_NAME = "(single sign-on)"  # the login-history name when no account is concerned
 _FAILED = "single sign-on failed; try again or ask an admin"
 
 
@@ -332,15 +344,30 @@ def oidc_callback(body: OidcCallback, request: Request, db: Annotated[Session, D
     throttle: security.LoginThrottle = request.app.state.login_throttle
     ip = auth.client_ip(request)
     ticket = throttle.begin_attempt("(single sign-on)", ip)
+    settings = request.app.state.settings
+    agent = request.headers.get("user-agent")
     if ticket is None:
+        record_login(db, username=SSO_NAME, user_id=None, success=False, reason="locked", ip=ip,
+                     user_agent=agent)
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
                             "too many failed sign-ins; try again later")
     try:
         claims = client.finish(body.code, body.state, body.binding)
-        user = find_user(db, request.app.state.settings, claims)
+        user = find_user(db, settings, claims)
     except OidcError as exc:
         db.rollback()
         request.app.state.oidc_log.warning("single sign-on refused from %s: %s", ip, exc)
+        if exc.user is not None:
+            who = {"username": exc.user.username, "user_id": exc.user.id}
+        elif exc.name is not None:  # an account name nobody has: stored only as a hash
+            who = {"username": exc.name, "user_id": None, "settings": settings, "unknown": True}
+        else:
+            who = {"username": SSO_NAME, "user_id": None}
+        record_login(db, success=False, reason=exc.reason, ip=ip, user_agent=agent, **who)
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, _FAILED) from None
     throttle.succeeded("(single sign-on)", ip, ticket)
-    return auth.after_first_factor(user, request.app.state.settings)
+    result = auth.after_first_factor(user, settings)
+    if result.access_token:  # no second step: the sign-in is complete (else: at /mfa/verify)
+        record_login(db, username=user.username, user_id=user.id, success=True, reason="ok",
+                     ip=ip, user_agent=agent)
+    return result

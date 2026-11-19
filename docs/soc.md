@@ -347,14 +347,12 @@ deleted user in `iam_user_delete`). What belongs to the user alone is removed: t
 conversations, group memberships, role assignments and policy attachments. Deactivating is the
 reversible alternative.
 
-**Login history** (`login_history`, `GET /iam/logins`). One row per sign-in attempt, written by the
-existing login flow: `ok`, `bad_password`, `unknown_user`, `disabled` (right password, account
-off), `locked` (throttled; at most one row per username and address per minute), `mfa_failed`, with
-`ip`, `user_agent` (255 characters at most), `mfa_used`. With MFA, a password alone is not a
-sign-in: `ok` is written when the code is accepted (or an admin finishes enrolling). No password or
-token is ever stored. A failure to write the row is logged and ignored: it never breaks a login.
-The login response is still the same for every failure. Not covered: single sign-on logins, and
-there is no retention for this table yet (it grows by one row per attempt).
+**Login history** at `GET /iam/logins` records password, MFA and OIDC outcomes. A completed
+second factor records the successful sign-in. Failed OIDC callbacks distinguish provider failures
+from a refusal by the SOC. Unknown account names are stored as keyed pseudonyms. The history
+deduplicates repeated unknown or locked attempts and caps failure rows per address per minute.
+`IDPS_SOC_LOGIN_HISTORY_RETENTION_DAYS` defaults to 365. A value of zero keeps rows indefinitely.
+Each entry includes the peer address and a bounded user agent. Access requires `iam.logins.view`.
 
 ## Cloud management
 
@@ -422,10 +420,10 @@ dependency conflict, 403, 404, 429, 413).
 | `GET /cloud/buckets`, `GET /cloud/buckets/{name}`, `POST` (DNS-style unique name), `PATCH` (`versioning`, `encrypted`, `public_access_blocked`), `DELETE` | A bucket with objects needs `?force=true` (409 otherwise) |
 | `GET /cloud/network/vpcs`, `/subnets`, `/security-groups`, `/security-groups/{id}` | Filters `vpc_id`, `az`, `q` |
 | `POST /cloud/network/security-groups`, `DELETE /cloud/network/security-groups/{id}` (409 while an instance uses it) | |
-| `POST /cloud/network/security-groups/{id}/rules`, `DELETE .../rules/{rule_id}` | `{direction: in\|out, protocol: tcp\|udp\|icmp\|all, port_from?, port_to?, cidr, description?, confirm_open_to_world?}`; CIDR validated with `ipaddress` and normalised, ports 0 to 65535 (not for `icmp`/`all`), duplicates 409. An ingress rule from `0.0.0.0/0` or `::/0` that covers port 22 or 3389 over `tcp`/`all` is refused (422, with the reason) unless `confirm_open_to_world` is true |
+| `POST /cloud/network/security-groups/{id}/rules`, `DELETE .../rules/{rule_id}` | `{direction: in\|out, protocol: tcp\|udp\|icmp\|all, port_from?, port_to?, cidr, description?, confirm_open_to_world?}`; CIDR validated with `ipaddress` and normalised, ports 0 to 65535 (not for `icmp`/`all`), duplicates 409. An ingress rule that exposes port 22 or 3389 to an entire address family, alone or combined with existing rules, returns 422 with code `confirm_open_to_world` unless `confirm_open_to_world` is true |
 | `GET /cloud/cost?range=7d\|30d\|90d` | `total`, `by_service` (`compute`, `storage`, `network`, `other`), `by_day`, `forecast` (month to date divided by days elapsed, times days in the month), `top_drivers` (instances by price x running hours) and `by_instance_type`; the drivers are an estimate, not a bill |
 | `GET /cloud/alerts` | `status`, `severity`, `resource_type`, `resource_id` |
-| `POST /cloud/alerts/evaluate` | Raises an alert for each threshold crossed (below), once: an open or acknowledged alert for the same rule and resource is not repeated (a worse severity raises the existing one); a resolved one is raised anew if the problem is still there. Nothing resolves automatically |
+| `POST /cloud/alerts/evaluate` | Mock provider only. Raises an alert for each threshold crossed (below), once: an open or acknowledged alert for the same rule and resource is not repeated (a worse severity raises the existing one); a resolved one is raised anew if the problem is still there. Nothing resolves automatically |
 | `POST /cloud/alerts/{id}/acknowledge`, `/resolve`, `DELETE /cloud/alerts/{id}` | `open` to `acknowledged` to `resolved`; a wrong state is 409 |
 | `GET /cloud/notifications` | The unresolved alerts, most severe first, with `open` and `acknowledged` counts |
 | `GET /cloud/activity` | `actor`, `action` (exact, e.g. `instance.stop`), `resource_type`, `resource_id`; newest first |

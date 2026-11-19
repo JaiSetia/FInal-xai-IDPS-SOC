@@ -10,6 +10,7 @@ from sqlalchemy import case, func, select
 
 from soc.api.cloud import clock, metrics
 from soc.api.cloud.common import (
+    ALERTS,
     Limit,
     ManageAlerts,
     Offset,
@@ -22,7 +23,7 @@ from soc.api.cloud.common import (
     record,
 )
 from soc.api.cloud.instances import sample_of
-from soc.api.cloud.network import opens_admin_to_world
+from soc.api.cloud.network import exposed_admin_ports
 from soc.api.models import CloudAlert
 
 router = APIRouter(prefix="/cloud", tags=["cloud"])
@@ -63,6 +64,8 @@ def list_alerts(ctx: Read, status: Literal["open", "acknowledged", "resolved"] |
                 resource_type: Annotated[str | None, Query(max_length=24)] = None,
                 resource_id: Annotated[str | None, Query(max_length=64)] = None,
                 limit: Limit = 50, offset: Offset = 0):
+    if not ctx.provider.writable:
+        return Paged[Alert](**ctx.sourced(), items=[], total=0, limit=limit, offset=offset)
     query = select(CloudAlert)
     if status:
         query = query.where(CloudAlert.status == status)
@@ -89,6 +92,8 @@ class Notifications(Sourced):
 @router.get("/notifications", response_model=Notifications)
 def notifications(ctx: Read, limit: Limit = 20):
     """The unresolved alerts, most severe first, then newest."""
+    if not ctx.provider.writable:
+        return Notifications(**ctx.sourced(), items=[], total=0, open=0, acknowledged=0)
     unresolved = CloudAlert.status != "resolved"
     severity_rank = case((CloudAlert.severity == "critical", 2),
                          (CloudAlert.severity == "warning", 1), else_=0)
@@ -134,7 +139,7 @@ def findings(ctx, now: datetime) -> list[Finding]:
             out.append(Finding("bucket_unencrypted", "warning", "bucket", b["name"],
                                f"Bucket {b['name']} is not encrypted"))
     for g in p.list_security_groups():
-        if any(opens_admin_to_world(r) for r in g["rules"]):
+        if exposed_admin_ports(g["rules"]):
             out.append(Finding("sg_open_admin", "critical", "security_group", g["id"],
                                f"Security group {g['name']} opens SSH or RDP to the whole "
                                "internet"))
@@ -194,6 +199,7 @@ def evaluate(ctx: ManageAlerts):
 # --- triage -----------------------------------------------------------------------------------------------
 
 def _move(ctx, alert_id: int, verb: str, allowed: tuple[str, ...], new: str) -> AlertOut:
+    ctx.allowed_on(ALERTS, f"alert:{alert_id}")
     with atomic(ctx.db):
         a = ctx.db.get(CloudAlert, alert_id, with_for_update=True)
         if a is None:
@@ -219,6 +225,7 @@ def resolve(alert_id: AlertId, ctx: ManageAlerts):
 
 @router.delete("/alerts/{alert_id}", response_model=AlertOut)
 def delete_alert(alert_id: AlertId, ctx: ManageAlerts):
+    ctx.allowed_on(ALERTS, f"alert:{alert_id}")
     with atomic(ctx.db):
         a = ctx.db.get(CloudAlert, alert_id, with_for_update=True)
         if a is None:

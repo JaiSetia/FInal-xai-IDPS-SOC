@@ -57,6 +57,46 @@ def test_round_trip_sqlite_every_table_identical(tmp_path):
     assert migrate.check(dst) == []
 
 
+def test_restore_into_a_migrated_empty_database(tmp_path):
+    """Migration 0004 seeds the system IAM roles: that is not "data", so a freshly migrated
+    database still counts as empty, and the backup's own roles replace the seeded ones."""
+    src = migrated(sqlite(tmp_path, "s.db"))
+    populate(src)
+    before = dump(src)
+    out = tmp_path / "b.gz"
+    backup.backup(src, out, **quiet)
+    dst = migrated(sqlite(tmp_path, "d.db"))
+    with dst.connect() as c:
+        assert c.execute(text("SELECT count(*) FROM iam_roles")).scalar() > 0  # the seed
+    backup.restore(dst, out, **quiet)
+    assert dump(dst) == before
+
+
+def test_a_custom_role_makes_a_migrated_database_not_empty(tmp_path):
+    src = migrated(sqlite(tmp_path, "s.db"))
+    out = tmp_path / "b.gz"
+    backup.backup(src, out, **quiet)
+    dst = migrated(sqlite(tmp_path, "d.db"))
+    with dst.begin() as c:
+        c.execute(text("INSERT INTO iam_roles (name, description, system, created_at, updated_at)"
+                       " VALUES ('mine', '', 0, '2026-01-01', '2026-01-01')"))
+    with pytest.raises(backup.BackupError, match="not empty"):
+        backup.restore(dst, out, **quiet)
+
+
+def test_restore_preserves_an_intentionally_removed_seed_grant(tmp_path):
+    src = migrated(sqlite(tmp_path, "s.db"))
+    out = tmp_path / "b.gz"
+    backup.backup(src, out, **quiet)
+    dst = migrated(sqlite(tmp_path, "d.db"))
+    with dst.begin() as c:
+        c.execute(text("DELETE FROM iam_role_permissions WHERE permission='cloud.view'"))
+    before = dump(dst)
+    with pytest.raises(backup.BackupError, match="not empty"):
+        backup.restore(dst, out, **quiet)
+    assert dump(dst) == before
+
+
 def test_sql_null_and_json_null_survive(tmp_path):
     src = migrated(sqlite(tmp_path, "s.db"))
     populate(src)

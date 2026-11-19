@@ -35,7 +35,7 @@ INTEGRATION_PREFIXES = ("notify_", "webhook_", "slack_", "smtp_", "email_", "sys
 # Settings where a blank value (docker compose passes "" for an unset ${VAR:-}) also means unset.
 BLANK_IS_UNSET = ("alert_retention_days", "alert_retention_keep_labelled", "audit_retention_days",
                   "assistant_retention_days", "closed_case_retention_days", "auto_migrate",
-                  "access_log_retention_days", "demo_token", "cloud_endpoint_url")
+                  "access_log_retention_days", "login_history_retention_days", "demo_token", "cloud_endpoint_url")
 _EMAIL = re.compile(r"^[^@\s<>,;\"]+@[^@\s<>,;\"]+$")
 
 
@@ -132,6 +132,7 @@ class SocSettings(BaseSettings):
     closed_case_retention_days: int = Field(default=0, ge=0, le=36_500)  # by last update
     # The access log (who looked at personal data, soc/api/access_log.py).
     access_log_retention_days: int = Field(default=365, ge=0, le=36_500)
+    login_history_retention_days: int = Field(default=365, ge=0, le=36_500)  # by attempt time
     # --- privacy notice (GET /privacy/notice, docs/privacy.md) and weekly report -----------------
     # All optional: blank = unset. The notice names whoever is responsible for the data.
     privacy_controller_name: str | None = Field(default=None, max_length=200)

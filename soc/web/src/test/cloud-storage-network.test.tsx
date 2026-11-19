@@ -90,7 +90,7 @@ describe("cloud network", () => {
     const panel = await openRules();
     const reason = "this rule opens SSH (22) or RDP (3389) to the whole internet (0.0.0.0/0), where anyone can try to log in. Use a narrower source range, or send confirm_open_to_world=true to accept the risk.";
     db.override["POST /cloud/network/security-groups/sg-1/rules"] = (_p, init) => {
-      if (!init.json.confirm_open_to_world) throw new ApiError(422, reason);
+      if (!init.json.confirm_open_to_world) throw new ApiError(422, reason, "confirm_open_to_world");
       return { ...MOCK, ...db.groups[0] };
     };
     const form = within(within(panel).getByRole("form", { name: /Add a rule/ }));

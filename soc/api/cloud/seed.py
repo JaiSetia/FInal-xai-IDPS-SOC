@@ -5,9 +5,9 @@ POST /cloud/demo-data/reset after wiping.
 """
 
 import random
-from datetime import timedelta
+from datetime import date, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -50,6 +50,44 @@ _SGS_FOR = {"web-1": ("web-sg",), "web-2": ("web-sg",), "api-1": ("app-sg",),
             "build-1": ("legacy-ssh",), "batch-old": ("legacy-ssh",)}
 
 
+_COST_BASE = {"compute": 31.0, "storage": 8.5, "network": 5.2, "other": 3.1}
+
+
+def cost_rows(first: date, last: date) -> list[CloudCostDaily]:
+    """Mock cost rows for first..last inclusive: a pure function of the date (weekday rhythm plus
+    stable noise), so any day can be produced later and always comes out the same."""
+    out = []
+    for n in range((last - first).days + 1):
+        day = first + timedelta(days=n)
+        weekend = 0.82 if day.weekday() >= 5 else 1.0
+        for service, level in _COST_BASE.items():
+            noise = 0.9 + 0.2 * metrics._unit("cost", service, day.isoformat())
+            out.append(CloudCostDaily(day=day.isoformat(), service=service, currency="USD",
+                                      amount_usd=round(level * weekend * noise, 2)))
+    return out
+
+
+def top_up_cost(db: Session) -> int:
+    """Add the days after the newest stored one up to today (at most COST_DAYS of them), so the
+    mock cost keeps pace with the clock. Does nothing while the table is empty (the seed owns
+    that case) or already current. Two requests racing for the same days: the loser conflicts on
+    the primary key, rolls back and finds them there. Returns the days added."""
+    today = clock.now().date()
+    newest = db.scalar(select(func.max(CloudCostDaily.day)))
+    if newest is None or newest >= today.isoformat():
+        return 0
+    first = max(date.fromisoformat(newest) + timedelta(days=1),
+                today - timedelta(days=COST_DAYS - 1))
+    rows = cost_rows(first, today)
+    try:
+        db.add_all(rows)
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return 0
+    return len(rows) // len(_COST_BASE)
+
+
 def _is_empty(db: Session) -> bool:
     return all(db.scalar(select(m).limit(1)) is None
                for m in (CloudInstance, CloudVpc, CloudBucket, CloudSecurityGroup))
@@ -66,6 +104,8 @@ def seed_if_empty(db: Session) -> bool:
         return True
     except IntegrityError:
         db.rollback()
+        if _is_empty(db):
+            raise
         return False
 
 
@@ -116,12 +156,14 @@ def seed(db: Session) -> dict[str, int]:
                 (("in", "tcp", 22, 22, "0.0.0.0/0", "ssh from anywhere"),
                  ("out", "all", 0, 65535, "0.0.0.0/0", "all out"))))
     sgs = {}
+    db.add_all(vpcs.values())
+    db.flush()  # The subnet and security-group rows reference these VPCs.
     for name, desc, v, rules in sg_defs:
         sg = CloudSecurityGroup(id=_hex(rng, "sg-"), name=name, description=desc,
                                 vpc_id=vpcs[v].id)
         sgs[name] = sg
         db.add(sg)
-    db.add_all([*vpcs.values(), *subnets.values()])
+    db.add_all(subnets.values())
     db.flush()
     for name, _d, _v, rules in sg_defs:
         db.add_all(CloudSgRule(sg_id=sgs[name].id, direction=d, protocol=p, port_from=lo,
@@ -229,15 +271,7 @@ def seed(db: Session) -> dict[str, int]:
           "Disk utilisation is high on build-1", "resolved", 120, "demo-admin")
 
     # -- cost: 90 days, four services, a weekday rhythm and stable noise -----------------------------
-    base = {"compute": 31.0, "storage": 8.5, "network": 5.2, "other": 3.1}
-    today = now.date()
-    for back in range(COST_DAYS):
-        day = today - timedelta(days=back)
-        weekend = 0.82 if day.weekday() >= 5 else 1.0
-        for service, level in base.items():
-            noise = 0.9 + 0.2 * metrics._unit("cost", service, day.isoformat())
-            db.add(CloudCostDaily(day=day.isoformat(), service=service, currency="USD",
-                                  amount_usd=round(level * weekend * noise, 2)))
+    db.add_all(cost_rows(now.date() - timedelta(days=COST_DAYS - 1), now.date()))
     db.add_all(act)
     return {"instances": len(inst), "volumes": len(volume_defs), "buckets": len(bucket_defs),
             "vpcs": len(vpcs), "subnets": len(subnets), "security_groups": len(sgs),

@@ -654,3 +654,94 @@ def test_http_json_parses_an_object_and_refuses_everything_else(monkeypatch):
 
 def test_http_json_does_not_follow_redirects():
     assert oidc._NoRedirect().redirect_request(None, None, 302, "Found", {}, "http://x/") is None
+
+
+# --- login history ------------------------------------------------------------------------------
+
+def history_rows(app):
+    from soc.api.models import LoginHistory
+
+    with app.state.session_factory() as db:
+        return list(db.scalars(select(LoginHistory).order_by(LoginHistory.id)))
+
+
+@pytest.fixture(autouse=True)
+def _forget_history_throttles():
+    from soc.api.iam import history
+
+    history._recent_locked.clear()
+    history._recent_fails.clear()
+    yield
+    history._recent_locked.clear()
+    history._recent_fails.clear()
+
+
+def test_a_single_sign_on_is_recorded_in_the_login_history(app, c, provider):
+    r = signin(c, provider)
+    assert r.status_code == 200
+    (row,) = history_rows(app)
+    assert (row.username, row.success, row.reason, row.mfa_used) == ("analyst", True, "ok", False)
+    assert row.user_id == get_user(app, "analyst").id and row.ip == "testclient"
+
+
+def test_sso_with_mfa_is_recorded_once_the_code_is_accepted(soc_settings, provider):
+    app = make_app(make_settings(soc_settings))
+    with app.state.session_factory() as db:
+        user = db.scalar(select(User).where(User.username == "analyst"))
+        user.mfa_enabled = True
+        db.commit()
+    body = signin(TestClient(app), provider).json()
+    assert body["mfa"] == "verify"
+    assert history_rows(app) == []  # a first factor alone is not a sign-in
+
+
+@pytest.mark.parametrize("claims,reason,username", [
+    (dict(nonce="wrong"), "sso_failed", "(single sign-on)"),
+    (dict(preferred_username=None), "sso_refused", "(single sign-on)"),
+])
+def test_sso_failures_are_recorded_with_a_reason(app, c, provider, claims, reason, username):
+    refused(signin(c, provider, **claims))
+    (row,) = history_rows(app)
+    assert (row.success, row.reason, row.username, row.user_id) == (False, reason, username, None)
+
+
+def test_sso_with_no_such_account_stores_a_label_not_the_name(app, c, provider):
+    refused(signin(c, provider, preferred_username="hunter2-pasted-password"))
+    (row,) = history_rows(app)
+    assert row.reason == "unknown_user" and row.user_id is None
+    assert "hunter2" not in row.username and row.username.startswith("?")
+
+
+def test_sso_for_a_disabled_account_is_recorded_against_it(app, c, provider):
+    with app.state.session_factory() as db:
+        auth.set_disabled(db, db.scalar(select(User).where(User.username == "analyst")), True)
+    refused(signin(c, provider))
+    (row,) = history_rows(app)
+    assert (row.username, row.reason, row.success) == ("analyst", "disabled", False)
+    assert row.user_id == get_user(app, "analyst").id
+
+
+def test_sso_for_an_unenrolled_admin_is_recorded_as_refused(app, c, provider):
+    refused(signin(c, provider, preferred_username="admin", sub="admin-sub"))
+    (row,) = history_rows(app)
+    assert (row.username, row.reason) == ("admin", "sso_refused")
+
+
+def test_throttled_sso_callbacks_are_recorded_as_locked_once(app, c, provider):
+    for _ in range(5):
+        refused(c.post("/auth/oidc/callback", json={"code": "c", "state": "s", "binding": "b"}))
+    for _ in range(3):
+        assert c.post("/auth/oidc/callback", json={"code": "c", "state": "s",
+                                                   "binding": "b"}).status_code == 429
+    assert [r.reason for r in history_rows(app)] == ["sso_failed"] * 5 + ["locked"]
+
+
+def test_a_failing_history_write_never_breaks_sso(app, c, provider, monkeypatch):
+    from soc.api.iam import history
+
+    def boom(*a, **k):
+        raise RuntimeError("history is broken")
+
+    monkeypatch.setattr(history, "LoginHistory", boom)
+    assert signin(c, provider).status_code == 200
+    refused(signin(c, provider, nonce="wrong"))

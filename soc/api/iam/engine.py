@@ -134,7 +134,7 @@ def resolve(db: Session, user: User) -> Resolution:
                              IamPolicyAttachment.subject_id.in_(role_ids)))
     policies = db.scalars(
         select(IamPolicy).join(IamPolicyAttachment, IamPolicyAttachment.policy_id == IamPolicy.id)
-        .where(IamPolicy.disabled.is_(False), or_(*subjects)).distinct()).all()
+        .where(IamPolicy.disabled.is_(False), or_(*subjects))).unique().all()
     res = Resolution(all_access=False, base=base, role_ids=role_ids, group_ids=group_ids)
     for p in policies:
         (res.deny if p.effect == "deny" else res.allow).append(_rule(p))
