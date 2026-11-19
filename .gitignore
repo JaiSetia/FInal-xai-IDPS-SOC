@@ -6,6 +6,7 @@ __pycache__/
 build/
 dist/
 soc/web/dist-unified/
+soc/web/dist-iphone/
 .venv/
 venv/
 .env

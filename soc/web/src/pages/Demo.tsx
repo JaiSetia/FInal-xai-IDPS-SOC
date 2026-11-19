@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import { Link } from "react-router-dom";
-import { workspace } from "../workspace";
+import { phoneBuild, workspace } from "../workspace";
 import { api } from "../api/client";
 import type { DemoRun, DemoRunStatus, DemoState, DemoStepStatus } from "../api/types";
 import { useAuth } from "../auth";
@@ -114,7 +114,7 @@ export default function Demo() {
       <Card title="Attack run"
         actions={admin && (
           <div className="row-actions">
-            {!workspace.lab && <button type="button" className="primary" disabled={blocker !== null || act.busy || reloading}
+            {!phoneBuild && !workspace.lab && <button type="button" className="primary" disabled={blocker !== null || act.busy || reloading}
               aria-describedby={blocker ? reasonId : undefined} onClick={() => void start()}>
               {(act.busy || reloading) && !active ? "Starting…" : "Run demo"}
             </button>}
@@ -141,7 +141,7 @@ export default function Demo() {
             <span className="muted">It has not checked in during the last 30 seconds.</span>
           </div>
         )}
-        {admin && !workspace.lab && blocker && data && <p id={reasonId} className="muted small-text">{blocker}</p>}
+        {admin && !phoneBuild && !workspace.lab && blocker && data && <p id={reasonId} className="muted small-text">{blocker}</p>}
         <ErrorText error={error ?? act.error} />
 
         {!data ? <p className="muted">Loading…</p> : !run ? (

@@ -5,6 +5,7 @@
     "dev": "vite --mode unified",
     "dev:single": "vite",
     "build:unified": "tsc --noEmit && vite build --mode unified",
+    "build:iphone": "tsc --noEmit && vite build --mode iphone",
     "preview:unified": "vite preview --mode unified",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",

@@ -52,7 +52,7 @@ export default defineConfig(({ mode, command }) => {
   }
   return {
     plugins: [react()],
-    build: { outDir: unified ? "dist-unified" : "dist" },
+    build: { outDir: mode === "iphone" ? "dist-iphone" : unified ? "dist-unified" : "dist" },
     server: { host: "127.0.0.1", port: 5173, strictPort: unified, proxy },
     preview: { host: "127.0.0.1", port: unified ? 5173 : 4173, strictPort: unified, proxy },
     test: { environment: "jsdom", globals: true, setupFiles: ["./src/test/setup.ts"] },

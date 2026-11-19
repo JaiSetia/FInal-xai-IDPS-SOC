@@ -10,7 +10,8 @@ export function workspaceFor(path: string, unified: boolean) {
   };
 }
 
-export const workspace = workspaceFor(window.location.pathname, import.meta.env.MODE === "unified");
+export const phoneBuild = import.meta.env.MODE === "iphone";
+export const workspace = workspaceFor(window.location.pathname, phoneBuild || import.meta.env.MODE === "unified");
 
 // Carry the section across, never a record ID, search, or an SSO callback from another database.
 const sections = new Set(["alerts", "response", "cases", "maps", "assistant", "reports", "demo",
