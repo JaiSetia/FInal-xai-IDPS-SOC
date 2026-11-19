@@ -2,7 +2,10 @@
   "name": "idps-soc-web",
   "version": "0.2.0",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --mode unified",
+    "dev:single": "vite",
+    "build:unified": "tsc --noEmit && vite build --mode unified",
+    "preview:unified": "vite preview --mode unified",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",

@@ -4,9 +4,12 @@ import { api, ApiError } from "../api/client";
 import { useAuth, type LoginResult } from "../auth";
 import { CodeField, MfaEnrol, RecoveryCodes, type MfaEnabled } from "../components/Mfa";
 
+import WorkspacePicker from "../components/WorkspacePicker";
+import { workspace } from "../workspace";
+
 /** Where single sign-on keeps the browser binding between leaving for the provider and coming
  *  back (soc/api/oidc.py: only the browser that started a sign-in can finish it). */
-const SSO_KEY = "idps-sso-binding";
+const SSO_KEY = workspace.storageKey("idps-sso-binding");
 export const SSO_CALLBACK_PATH = "/auth/callback";
 
 interface SsoConfig { enabled: boolean; label: string | null }
@@ -50,7 +53,7 @@ export default function Login() {
 
   // Back from the identity provider: finish the sign-in, then drop the code from the address.
   useEffect(() => {
-    if (window.location.pathname !== SSO_CALLBACK_PATH || callbackDone.current) return;
+    if (window.location.pathname !== workspace.base + SSO_CALLBACK_PATH || callbackDone.current) return;
     callbackDone.current = true;
     const params = new URLSearchParams(window.location.search);
     let binding: string | null = null;
@@ -58,7 +61,7 @@ export default function Login() {
       binding = sessionStorage.getItem(SSO_KEY);
       sessionStorage.removeItem(SSO_KEY);
     } catch { /* storage unavailable */ }
-    window.history.replaceState(null, "", "/");
+    window.history.replaceState(null, "", workspace.base + "/");
     const codeParam = params.get("code");
     const state = params.get("state");
     if (params.get("error")) {
@@ -133,6 +136,7 @@ export default function Login() {
     <div className="login-wrap">
       <div className="card login">
         <h1>IDPS SOC</h1>
+        <WorkspacePicker />
         {step.kind === "password" && (
           <form onSubmit={submitPassword}>
             <label className="field">

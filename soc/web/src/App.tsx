@@ -15,6 +15,8 @@ import Alerts from "./pages/Alerts";
 import Cases from "./pages/Cases";
 import Demo from "./pages/Demo";
 import C6 from "./pages/C6";
+import { ModulePage, useMissingLabModules } from "./components/LabModules";
+import WorkspacePicker from "./components/WorkspacePicker";
 import Login from "./pages/Login";
 import CloudAlertsBadge from "./components/cloud/CloudAlertsBadge";
 import Response from "./pages/Response";
@@ -68,6 +70,7 @@ export default function App() {
   // UI hint only: the backend enforces every permission.
   const showIam = ["iam.users.view", "iam.roles.view", "iam.groups.view", "iam.policies.view", "iam.audit.view", "iam.logins.view"].some(can);
   const location = useLocation();
+  const missing = useMissingLabModules(Boolean(me));
 
   if (authLoading) return <p className="muted" style={{ padding: 24 }}>Loading…</p>;
   if (!me) return location.pathname.replace(/\/+$/, "") === "/privacy" ? <PublicPrivacy /> : <Login />;
@@ -77,6 +80,7 @@ export default function App() {
       <div className="shell">
         <header className="topbar">
           <div className="brand"><Shield />IDPS SOC</div>
+          <WorkspacePicker />
           <nav className="nav" aria-label="Main">
             <NavLink to="/" end>Dashboard</NavLink>
             <NavLink to="/alerts">Alerts</NavLink>
@@ -93,7 +97,7 @@ export default function App() {
             {me.role === "admin" && <NavLink to="/admin">Admin</NavLink>}
           </nav>
           <div className="topbar-status">
-            <CloudAlertsBadge />
+            {missing && !missing.includes("cloud") && <CloudAlertsBadge />}
             <LiveBadge />
             <ModeBadge />
             <div className="userbox">
@@ -117,10 +121,10 @@ export default function App() {
               <Route path="/maps" element={<Suspense fallback={loading}><Maps /></Suspense>} />
               <Route path="/account" element={<Account />} />
               <Route path="/reports" element={<Reports />} />
-              {me.role === "admin" && <Route path="/c6" element={<C6 />} />}
+              {me.role === "admin" && <Route path="/c6" element={<ModulePage name="c6" missing={missing}><C6 /></ModulePage>} />}
               <Route path="/demo" element={<Demo />} />
-              <Route path="/cloud/*" element={<Suspense fallback={loading}><CloudModule /></Suspense>} />
-              <Route path="/iam/*" element={<Suspense fallback={loading}><IamModule /></Suspense>} />
+              <Route path="/cloud/*" element={<ModulePage name="cloud" missing={missing}><Suspense fallback={loading}><CloudModule /></Suspense></ModulePage>} />
+              <Route path="/iam/*" element={<ModulePage name="iam" missing={missing}><Suspense fallback={loading}><IamModule /></Suspense></ModulePage>} />
               <Route path="/privacy" element={<Privacy />} />
               {/* Old addresses, kept so bookmarks and links in docs still work. */}
               <Route path="/metrics" element={<Redirect to="/" />} />

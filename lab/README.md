@@ -104,12 +104,13 @@ sensor mounts read-only at `/run/idps-soc`; keys, secret and database stay in th
 - **Signed models.** With `lab/keys/model-signing.pub` present (see [keys/README.md](keys/README.md)),
   the sensor refuses models without a valid signature from your key.
 
-To open the dashboard, run it from `soc/web` against the published port, trusting the lab CA:
+Open the unified dashboard from the repository root:
 
 ```sh
-docker compose exec sensor cat /run/idps-soc/ca.pem > /tmp/lab-soc-ca.pem
-cd ../soc/web && NODE_EXTRA_CA_CERTS=/tmp/lab-soc-ca.pem IDPS_SOC_API=https://127.0.0.1:8443 npm run dev
+npm --prefix soc/web run dev
 ```
+
+At **http://127.0.0.1:5173**, choose **Lab SOC** and use your lab account. The frontend trusts the public CA from the running SOC container. The [dashboard guide](../soc/web/README.md) covers the development workspace, certificate overrides and available modules.
 
 ### Live map: demo locations and the home marker
 

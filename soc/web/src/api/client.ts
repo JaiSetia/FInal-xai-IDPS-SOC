@@ -5,8 +5,10 @@
 // The dashboard never renders API data as HTML (no dangerouslySetInnerHTML), which is what
 // keeps a token in storage safe from injected markup in alert fields.
 
-const BASE = "/api";
-const STORAGE_KEY = "idps-soc-token";
+import { workspace } from "../workspace";
+
+const BASE = workspace.api;
+const STORAGE_KEY = workspace.storageKey("idps-soc-token");
 
 let token: string | null = null;
 try {

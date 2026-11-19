@@ -15,18 +15,9 @@
       "runtimeExecutable": "sh",
       "runtimeArgs": [
         "-c",
-        "cd soc/web && IDPS_SOC_API=http://127.0.0.1:8040 npm run dev -- --host 127.0.0.1"
+        "cd soc/web && npm run dev"
       ],
       "port": 5173
-    },
-    {
-      "name": "soc-web-lab",
-      "runtimeExecutable": "sh",
-      "runtimeArgs": [
-        "-c",
-        "cd soc/web && NODE_EXTRA_CA_CERTS=/private/tmp/claude-502/-Users-user2-Desktop-idps-final-year-project/7df73fa9-98e6-44e6-bd36-57f01c4ad66c/scratchpad/lab-soc-ca.pem IDPS_SOC_API=https://127.0.0.1:8443 npm run dev -- --host 127.0.0.1 --port 5174"
-      ],
-      "port": 5174
     },
     {
       "name": "soc-api-p3",
@@ -43,7 +34,7 @@
       "runtimeExecutable": "sh",
       "runtimeArgs": [
         "-c",
-        "cd soc/web && IDPS_SOC_API=http://127.0.0.1:8010 npm run dev -- --host 127.0.0.1 --port 5176"
+        "cd soc/web && IDPS_SOC_API=http://127.0.0.1:8010 npm run dev:single -- --host 127.0.0.1 --port 5176"
       ],
       "port": 5176,
       "autoPort": false
@@ -63,7 +54,7 @@
       "runtimeExecutable": "sh",
       "runtimeArgs": [
         "-c",
-        "cd soc/web && IDPS_SOC_API=http://127.0.0.1:8020 npm run dev -- --host 127.0.0.1 --port 5177"
+        "cd soc/web && IDPS_SOC_API=http://127.0.0.1:8020 npm run dev:single -- --host 127.0.0.1 --port 5177"
       ],
       "port": 5177,
       "autoPort": false
@@ -83,7 +74,7 @@
       "runtimeExecutable": "sh",
       "runtimeArgs": [
         "-c",
-        "cd soc/web && IDPS_SOC_API=http://127.0.0.1:8030 npm run dev -- --host 127.0.0.1 --port 5178"
+        "cd soc/web && IDPS_SOC_API=http://127.0.0.1:8030 npm run dev:single -- --host 127.0.0.1 --port 5178"
       ],
       "port": 5178,
       "autoPort": false

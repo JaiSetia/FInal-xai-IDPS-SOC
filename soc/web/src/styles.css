@@ -110,6 +110,8 @@ code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .nav a { padding: 10px 18px; border-radius: var(--radius-sm); color: var(--muted); font-size: 14px; }
 .nav a:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
 .nav a.active { background: var(--accent-soft); color: var(--accent-soft-text); font-weight: 600; }
+.workspace-picker { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
+.login .workspace-picker { margin-bottom: 16px; }
 .topbar-status { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
 .userbox { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
 .userbox button { min-height: 36px; padding: 0 12px; }
