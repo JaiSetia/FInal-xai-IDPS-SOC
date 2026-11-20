@@ -754,3 +754,41 @@ def test_cli_mfa_reset_makes_an_admin_enrol_again(cli_app, tmp_path):
     assert password_login(c)["mfa"] == "verify"
     assert cli.main(["mfa-reset", "admin"]) == 0
     assert password_login(c)["mfa"] == "enrol"
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_email_sign_in_is_bound_to_mailbox_and_challenge(app, c, clock, monkeypatch, expired):
+    import re
+
+    from soc.api import email_mfa
+
+    enrol_admin(c, clock)
+    settings = app.state.settings
+    settings.smtp_host, settings.smtp_from = "smtp.lab.test", "soc@lab.test"
+    settings.smtp_security = "starttls"
+    mailbox = "owner@lab.test"
+    with app.state.session_factory() as db:
+        db.scalar(select(User).where(User.username == "admin")).mfa_email = mailbox
+        db.commit()
+    messages = []
+    monkeypatch.setattr(email_mfa, "send_email", lambda s, msg, to, timeout: messages.append((msg, to)))
+    credentials = {"username": "admin", "password": ADMIN_PW, "request_email_code": True}
+    challenge = c.post("/auth/login", json=credentials).json()
+    assert challenge["email_status"] == "sent" and challenge["access_token"] is None
+    other = c.post("/auth/login", json=credentials).json()
+    assert other["email_status"] == "cooldown"
+    (msg, recipients), = messages
+    assert recipients == [mailbox] and msg["To"] == mailbox
+    code = re.search(r"\b[0-9]{8}\b", msg.get_content()).group()
+    def submit(token):
+        return c.post("/auth/mfa/verify", json={"mfa_token": token, "code": code})
+    assert submit(other["mfa_token"]).status_code == 401
+    if expired:
+        with app.state.session_factory() as db:
+            user = db.scalar(select(User).where(User.username == "admin"))
+            user.email_sent_at -= timedelta(minutes=6)
+            db.commit()
+        assert submit(challenge["mfa_token"]).status_code == 401
+    else:
+        assert submit(challenge["mfa_token"]).json()["access_token"]
+        assert submit(challenge["mfa_token"]).status_code == 401

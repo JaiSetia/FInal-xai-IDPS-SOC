@@ -20,7 +20,7 @@ function errorText(err: unknown): string {
 
 type Step =
   | { kind: "password" }
-  | { kind: "verify"; token: string }
+  | { kind: "verify"; token: string; email?: LoginResult["email_status"] }
   | { kind: "enrol"; token: string }
   | { kind: "codes"; result: MfaEnabled };
 
@@ -41,7 +41,9 @@ export default function Login() {
       await finish(res);
     } else if (res.mfa_token && (res.mfa === "verify" || res.mfa === "enrol")) {
       setCode("");
-      setStep({ kind: res.mfa, token: res.mfa_token });
+      setStep(res.mfa === "verify"
+        ? { kind: "verify", token: res.mfa_token, email: res.email_status }
+        : { kind: "enrol", token: res.mfa_token });
     } else {
       setError("Unexpected answer from the SOC API");
     }
@@ -162,8 +164,11 @@ export default function Login() {
         )}
         {step.kind === "verify" && (
           <form onSubmit={submitCode}>
-            <p className="muted">Two-factor sign-in is on for this account.</p>
-            <CodeField value={code} onChange={setCode} allowRecovery />
+            <p className="muted">{step.email === "sent" ? "We sent an eight-digit sign-in code to your account email. Enter it here within five minutes. You can also use your authenticator or a recovery code."
+              : step.email === "cooldown" ? "A code was recently requested. Use the original sign-in tab, or wait one minute and sign in again to receive a new email."
+              : step.email === "unavailable" ? "Email delivery failed. Use your authenticator or a recovery code, or try signing in again in one minute."
+              : "Two-factor sign-in is on for this account."}</p>
+            <CodeField value={code} onChange={setCode} allowRecovery emailSent={step.email === "sent"} />
             {error && <div className="error" role="alert">{error}</div>}
             <button className="primary" type="submit" disabled={busy || code.trim().length < 6}>
               {busy ? "Checking…" : "Verify"}

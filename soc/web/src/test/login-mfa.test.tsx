@@ -67,7 +67,7 @@ describe("Login password and code", () => {
     show();
     await fillPassword();
     await waitFor(() => expect(posts("GET /auth/me").length).toBeGreaterThanOrEqual(1));
-    expect(posts("POST /auth/login")[0].body).toEqual({ username: "alice", password: "pw" });
+    expect(posts("POST /auth/login")[0].body).toEqual({ username: "alice", password: "pw", request_email_code: true });
   });
 
   it("verifies a code then signs in", async () => {
@@ -79,6 +79,17 @@ describe("Login password and code", () => {
     fireEvent.click(screen.getByRole("button", { name: "Verify" }));
     await waitFor(() => expect(posts("GET /auth/me")).toHaveLength(1));
     expect(posts("POST /auth/mfa/verify")[0].body).toEqual({ mfa_token: "mt", code: "123456" });
+  });
+
+  it("submits an emailed code with its original challenge", async () => {
+    routes["POST /auth/login"] = () => ({ body: { mfa: "verify", mfa_token: "email-step", email_status: "sent" } });
+    routes["POST /auth/mfa/verify"] = () => ({ body: { access_token: "tok", expires_in: 60 } });
+    show();
+    await fillPassword();
+    fireEvent.change(await screen.findByLabelText("Sign-in code"), { target: { value: "01234567" } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify" }));
+    await waitFor(() => expect(posts("GET /auth/me")).toHaveLength(1));
+    expect(posts("POST /auth/mfa/verify")[0].body).toEqual({ mfa_token: "email-step", code: "01234567" });
   });
 
   it("shows an incorrect-code error and clears the field", async () => {

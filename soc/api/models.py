@@ -53,6 +53,10 @@ class User(Base):
     totp_last_step: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # HMACs of the unused one-time recovery codes (the codes themselves are shown once).
     recovery_codes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Operator-assigned MFA mailbox and the latest challenge-bound code.
+    mfa_email: Mapped[str | None] = mapped_column(String(254), nullable=True)
+    email_code_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    email_sent_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     # --- single sign-on (soc/api/oidc.py): the identity provider account linked to this user
     oidc_issuer: Mapped[str | None] = mapped_column(String(255), nullable=True)
     oidc_subject: Mapped[str | None] = mapped_column(String(255), nullable=True)

@@ -22,6 +22,7 @@ export interface LoginResult {
   expires_in: number | null;
   mfa?: "verify" | "enrol" | null;
   mfa_token?: string | null;
+  email_status?: "sent" | "cooldown" | "unavailable" | null;
 }
 
 interface AuthState {
@@ -83,7 +84,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (username: string, password: string) => {
     return api<LoginResult>("/auth/login", {
       method: "POST",
-      json: { username, password },
+      json: { username, password, request_email_code: true },
     });
   }, []);
 

@@ -28,12 +28,12 @@ export function svgDataUrl(svg: string): string {
 }
 
 /** Six digits from an authenticator app, or a recovery code (XXXXX-XXXXX). */
-export function CodeField({ value, onChange, allowRecovery, autoFocus = true }: {
-  value: string; onChange: (v: string) => void; allowRecovery: boolean; autoFocus?: boolean;
+export function CodeField({ value, onChange, allowRecovery, emailSent = false, autoFocus = true }: {
+  value: string; onChange: (v: string) => void; allowRecovery: boolean; emailSent?: boolean; autoFocus?: boolean;
 }) {
   return (
     <label className="field">
-      {allowRecovery ? "Code from your authenticator app (or a recovery code)" : "Code from your authenticator app"}
+      {emailSent ? "Sign-in code" : allowRecovery ? "Code from your authenticator app (or a recovery code)" : "Code from your authenticator app"}
       <input value={value} onChange={(e) => onChange(e.target.value)} required autoFocus={autoFocus}
         autoComplete="one-time-code" inputMode={allowRecovery ? "text" : "numeric"}
         maxLength={allowRecovery ? 16 : 8} spellCheck={false} />

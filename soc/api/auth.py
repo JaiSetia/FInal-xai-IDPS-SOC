@@ -11,7 +11,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from soc.api import mfa, security
+from soc.api import email_mfa, mfa, security
 from soc.api.common import audit
 from soc.api.db import get_db
 from soc.api.iam import engine as iam_engine
@@ -28,6 +28,7 @@ _UNAUTHORIZED = HTTPException(status.HTTP_401_UNAUTHORIZED, "not authenticated",
 
 
 class LoginRequest(BaseModel):
+    request_email_code: bool = False
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=security.MAX_PASSWORD_LENGTH)
 
@@ -36,6 +37,7 @@ class TokenResponse(BaseModel):
     """A login result: an access token, or (mfa set, access_token null) a challenge to answer at
     /auth/mfa/verify ("verify") or /auth/mfa/enrol/* ("enrol", an admin without MFA yet)."""
 
+    email_status: Literal["sent", "cooldown", "unavailable"] | None = None
     access_token: str | None = None
     token_type: str = "bearer"
     expires_in: int | None = None  # seconds
@@ -92,6 +94,8 @@ def login(body: LoginRequest, request: Request, db: Annotated[Session, Depends(g
         user.password_hash = security.hash_password(body.password)
         db.commit()
     result = after_first_factor(user, settings)
+    if body.request_email_code and result.mfa == "verify" and user.mfa_email:
+        result.email_status = email_mfa.deliver(db, settings, user, result.mfa_token)
     if result.access_token:  # no second step: the sign-in is complete (else: at /mfa/verify)
         record_login(db, username=user.username, user_id=user.id, success=True, reason="ok",
                      ip=ip, user_agent=agent)
@@ -371,7 +375,13 @@ def mfa_verify(body: MfaVerify, request: Request, db: Annotated[Session, Depends
     who = {"username": user.username, "user_id": user.id, "ip": client_ip(request),
            "user_agent": request.headers.get("user-agent"), "mfa_used": True}
     try:
-        _check_second_factor(db, request, user, body.code)
+        if len(body.code) == 8 and body.code.isascii() and body.code.isdigit():
+            attempt = _CodeAttempt(request, user)
+            if not email_mfa.consume(db, request.app.state.settings, user, body.mfa_token, body.code):
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, _BAD_CODE)
+            attempt.succeeded()
+        else:
+            _check_second_factor(db, request, user, body.code)
     except HTTPException as exc:
         record_login(db, success=False, reason=("locked" if exc.status_code == 429
                                                 else "mfa_failed"), **who)
@@ -525,6 +535,7 @@ def clear_mfa(user: User) -> None:
     user.totp_secret = user.totp_pending = None
     user.totp_last_step = None
     user.recovery_codes = None
+    user.mfa_email = user.email_code_hash = user.email_sent_at = None
     user.token_version += 1
 
 
