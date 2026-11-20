@@ -209,7 +209,7 @@ describe("create", () => {
   it("blank title disables the button", async () => {
     show();
     await tab("Open · 2");
-    const btn = screen.getByRole("button", { name: "Open case" });
+    const btn = screen.getByRole("button", { name: "Create case" });
     expect(btn).toBeDisabled();
     fireEvent.change(screen.getByLabelText("New case title"), { target: { value: "   " } });
     expect(btn).toBeDisabled();
@@ -220,7 +220,7 @@ describe("create", () => {
     await tab("Open · 2");
     const input = screen.getByLabelText("New case title");
     fireEvent.change(input, { target: { value: "  Brand new  " } });
-    fireEvent.click(screen.getByRole("button", { name: "Open case" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create case" }));
     await waitFor(() => expect(calls("POST", "/cases").length).toBe(1));
     expect(calls("POST")[0][1].json).toEqual({ title: "Brand new", alert_ids: [] });
     await waitFor(() => expect(screen.getByTestId("loc").textContent).toBe("/cases/99"));
@@ -428,11 +428,11 @@ describe("untrusted text", () => {
       title: evil, notes: [note({ text: evil, author: "<b>x</b>" })], alerts: [alertRow({ predicted_class: evil })],
     });
     const { container } = show("/cases/5");
-    await screen.findByRole("heading", { level: 2 });
+    await screen.findByRole("heading", { level: 2, name: evil });
     await act(async () => {});
     expect(container.querySelector("img")).toBeNull();
     expect(container.querySelector("b")?.textContent).not.toBeUndefined();
-    expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent(evil);
+    expect(screen.getByRole("heading", { level: 2, name: evil })).toHaveTextContent(evil);
     expect(screen.getByText(evil, { selector: ".note div" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: `#11 ${evil}` })).toBeInTheDocument();
     expect(screen.getByText("<b>x</b>")).toBeInTheDocument();

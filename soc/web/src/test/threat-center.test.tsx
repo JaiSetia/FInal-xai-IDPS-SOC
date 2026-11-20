@@ -322,7 +322,8 @@ describe("decisions card", () => {
     show();
     expect(await screen.findByText("Nothing waits for a decision.")).toBeInTheDocument();
     expect(screen.getByText("0 pending")).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Decide in Response →" })).toBeNull();
+    expect(screen.getByRole("link", { name: "Open response queue →" })).toHaveAttribute("href", "/response");
+    expect(screen.getByRole("link", { name: "Create case" })).toHaveAttribute("href", "/cases?new=1");
   });
 
   it("count, up to 3 items, summary text and link", async () => {

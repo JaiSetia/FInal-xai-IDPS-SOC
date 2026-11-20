@@ -19,7 +19,9 @@ in_image() { docker run --rm --network none --entrypoint sha256sum "$IMG" "$1" |
 
 check() {
   bad=0
-  for pair in "lab/cloud/guard.py:/opt/idps/lab/cloud/guard.py" \
+  for pair in "23csu441_1_23csu294_2_23csu095/idps/cloud/collector.py:/opt/idps/idps/cloud/collector.py" \
+              "23csu441_1_23csu294_2_23csu095/idps/cloud/__main__.py:/opt/idps/idps/cloud/__main__.py" \
+              "lab/cloud/guard.py:/opt/idps/lab/cloud/guard.py" \
               "models/cloud_xgboost.joblib:/opt/idps/cloud-model/cloud_xgboost.joblib" \
               "models/cloud_xgboost.joblib.sig:/opt/idps/cloud-model/cloud_xgboost.joblib.sig" \
               "models/cloud_xgboost.joblib.sha256:/opt/idps/cloud-model/cloud_xgboost.joblib.sha256" \

@@ -99,12 +99,13 @@ def _collect(args: argparse.Namespace) -> int:
         engine = ResponseEngine(settings, blocker=blocker, policy=policy)
         bundle = (load_cloud_bundle(config.model_path, config.model_public_key)
                   if config.model_path else None)
-        post = None
+        client = None
         token = resolve_sensor_token(config)
         if config.soc_url and token:
-            post = SocClient(config.soc_url, token, ca_file=config.soc_ca_file,
-                             client_cert=config.client_cert, client_key=config.client_key).post_alerts
-        collector = Collector(config, s3, bundle=bundle, engine=engine, blocker=blocker, post=post,
+            client = SocClient(config.soc_url, token, ca_file=config.soc_ca_file,
+                               client_cert=config.client_cert, client_key=config.client_key)
+        collector = Collector(config, s3, bundle=bundle, engine=engine, blocker=blocker,
+                              post=client.post_alerts if client else None, status_client=client,
                               guard=guard)
         if args.once:
             collector.check_guard(force=True)

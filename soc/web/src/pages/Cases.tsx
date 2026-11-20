@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState, type FormEvent } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api, query } from "../api/client";
 import { CASE_STATUSES, type CaseDetail, type CaseStatus, type CaseSummary, type Page } from "../api/types";
 import { ErrorText, PageHead, Pill, Segmented, useAction, useLoad, type Tone } from "../components/common";
@@ -15,6 +15,7 @@ export default function Cases() {
   // Only numeric ids reach the API path (a crafted link like /cases/..%2Fadmin must not).
   const selected = rawId === undefined ? null : /^\d{1,18}$/.test(rawId) ? rawId : "0";
   const navigate = useNavigate();
+  const [params] = useSearchParams();
   const [filter, setFilter] = useState<CaseStatus>("open");
   const [title, setTitle] = useState("");
   // Each status is fetched on its own (newest 200 each), so an old open case never drops out
@@ -75,16 +76,18 @@ export default function Cases() {
 
   return (
     <>
-      <PageHead title="Cases">
+      <PageHead title="Cases" />
+      <section className="card" aria-labelledby="new-case-heading">
+        <h2 id="new-case-heading">New case</h2>
         <form className="row-actions" style={{ alignItems: "flex-end" }} onSubmit={create}>
           <label className="field">New case title
-            <input value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)}
+            <input autoFocus={params.get("new") === "1"} required value={title} maxLength={200} onChange={(e) => setTitle(e.target.value)}
               placeholder="e.g. Port scan from 10.10.1.10" style={{ width: 280, maxWidth: "100%" }} />
           </label>
-          <button className="primary" type="submit" disabled={!title.trim() || act.busy}>Open case</button>
+          <button className="primary" type="submit" disabled={!title.trim() || act.busy}>Create case</button>
         </form>
-      </PageHead>
-      <ErrorText error={act.error} />
+        <ErrorText error={act.error} />
+      </section>
 
       <div className="grid cols-list-detail">
         <section ref={listRef} tabIndex={-1} className="card stack" aria-label="Case list" style={{ gap: 10, padding: 16 }}>

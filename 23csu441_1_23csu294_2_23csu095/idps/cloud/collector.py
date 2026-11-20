@@ -44,6 +44,8 @@ from idps.cloud.flowlogs import (
     to_flow_rows,
 )
 from idps.cloud.nacl import NaclBlocker, _aws_errors
+from idps.live.metrics import Metrics
+from idps.live.status import StatusReporter, build_status
 from idps.respond.engine import ResponseEngine
 from idps.respond.nft import BlockerError
 from idps.respond.policy import BENIGN_LABELS, Action, Detection
@@ -427,6 +429,7 @@ class Collector:
         engine: ResponseEngine | None = None,
         blocker: NaclBlocker | None = None,
         post: Callable[[list[dict]], dict] | None = None,
+        status_client: SocClient | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         sleep: Callable[[float], None] = time.sleep,
         guard: Callable[[], list[str]] | None = None,
@@ -446,12 +449,26 @@ class Collector:
         self._guard_due = 0.0
         self.checkpoint = Checkpoint(config.state_dir / "checkpoint.json")
         self.outbox = Outbox(config.state_dir / "outbox.json")
+        self.metrics = Metrics()
+        self.reporter = None
+        if status_client is not None and bundle is not None and engine is not None:
+            from idps.detect.bundle import read_digest
+            from idps.detect.signing import key_id, load_public_key
+
+            digest = read_digest(config.model_path) if config.model_path else None
+            signer = key_id(load_public_key(config.model_public_key)) if config.model_public_key else None
+            self.reporter = StatusReporter(status_client, lambda: build_status(
+                engine=engine, bundle=bundle, live_settings=config, metrics=self.metrics,
+                sink=self, interface="VPC Flow Logs", model_sha256=digest, signed_by=signer))
         if bundle is None:
             log.warning("no model configured (IDPS_CLOUD_MODEL): flow logs are only counted, "
                         "no alerts are produced")
         if post is None:
             log.warning("no SOC configured (IDPS_SOC_URL, IDPS_SOC_SENSOR_TOKEN): "
                         "alerts are not sent")
+
+    def pending(self) -> int:
+        return len(self.outbox)
 
     def run_once(self) -> CycleResult:
         result = CycleResult()
@@ -478,6 +495,8 @@ class Collector:
             raise CollectorError(f"S3 request failed: {exc}") from exc
         finally:
             self._flush_outbox(result)  # alerts of finished objects go out even if a later one failed
+        if self.reporter is not None and not result.soc_config_error:
+            self.reporter.report_once()
         log.info(json.dumps({"event": "cycle", **result.as_dict()}))
         return result
 
@@ -584,11 +603,13 @@ class Collector:
 
     def _score_chunk(self, rows: list[dict], result: CycleResult) -> None:
         predictions = score_frame(self.bundle, rows_to_frame(rows))
+        self.metrics.add("flows", len(predictions))
         flagged = [(row, p) for row, p in zip(rows, predictions, strict=True)
                    if p.label.strip().lower() not in BENIGN_LABELS]
         alerts = [a for row, p in flagged
                   if p.confidence >= self.config.min_alert_confidence
                   and (a := alert_payload(row, p)) is not None]
+        self.metrics.add("alerts", len(alerts))
         if self.engine is not None:  # blocking never waits for the SOC
             for row, p in flagged:
                 decision = self.engine.handle(Detection(
@@ -597,8 +618,10 @@ class Collector:
                 if decision.action is Action.BLOCK:
                     if self.engine.dry_run:
                         result.would_block += 1
+                        self.metrics.add("would_block")
                     else:
                         result.blocked += 1
+                        self.metrics.add("blocked")
         if self.post is not None and alerts:
             self.outbox.add(alerts)
             result.alerts_queued += len(alerts)

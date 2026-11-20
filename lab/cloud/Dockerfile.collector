@@ -5,7 +5,7 @@
 # ONE billing guard, the signed cloud model and the model-signing PUBLIC key. Rebuild after a
 # new model: build_collector.sh does (and its --check fails while the image is stale).
 FROM idps-lab-flowlog:latest
-COPY idps ./idps
+COPY 23csu441_1_23csu294_2_23csu095/idps ./idps
 COPY lab/cloud/guard.py ./lab/cloud/guard.py
 COPY --chmod=0444 models/cloud_xgboost.joblib models/cloud_xgboost.joblib.sha256 \
      models/cloud_xgboost.joblib.sig /opt/idps/cloud-model/

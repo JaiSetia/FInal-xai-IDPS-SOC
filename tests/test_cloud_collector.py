@@ -152,6 +152,30 @@ def test_first_run_looks_back_and_then_only_new_objects_are_processed(s3, tmp_pa
     assert set(saved["processed"]) == {a["Key"], b["Key"], c["Key"], d["Key"]}
 
 
+def test_cloud_status_reports_scored_flows_and_refreshes_in_quiet_cycles(s3, tmp_path):
+    from unittest.mock import Mock
+
+    from soc.api.routes.sensors import StatusReport
+
+    client = Mock()
+    bundle = FakeBundle()
+    bundle.model_name = "cloud-test"
+    collector = Collector(config(tmp_path), s3, bundle=bundle, status_client=client,
+                          engine=ResponseEngine(Settings(dry_run=True)), post=client.post_alerts,
+                          now=lambda: NOW)
+    stub_listing(s3, {"2023/11/13": [], "2023/11/14": [obj("a", 10)]})
+    stub_get(s3, "a")
+    collector.run_once()
+    stub_listing(s3, {"2023/11/13": [], "2023/11/14": []})
+    collector.run_once()
+    assert client.post_status.call_count == 2
+    for call in client.post_status.call_args_list:
+        status = StatusReport.model_validate(call.args[0])
+        assert status.interface == "VPC Flow Logs" and status.dry_run
+        assert status.counters.flows == 5 and status.counters.alerts == 2
+        assert status.outbox_pending == 0
+
+
 def test_a_late_object_older_than_the_newest_processed_one_is_still_read(s3, tmp_path):
     ckpt = Checkpoint(tmp_path / "c.json")
     newest = obj("newest", 10)

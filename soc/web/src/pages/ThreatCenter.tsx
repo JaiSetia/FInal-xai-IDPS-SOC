@@ -278,9 +278,9 @@ function Decisions() {
         ))}
         {pending.data && items.length === 0 && <li className="muted">Nothing waits for a decision.</li>}
       </ul>
-      {items.length > 0 && <Link to="/response" className="button-link">Decide in Response →</Link>}
+      <Link to="/response" className="button-link">{items.length ? "Decide in Response →" : "Open response queue →"}</Link>
       <p className="muted small-text" style={{ margin: "10px 0 0" }}>
-        The sensor polls every 5 s; its allowlist and dry-run setting still apply.
+        Review proposed blocks here before a sensor can apply them.
       </p>
     </Card>
   );
@@ -568,6 +568,7 @@ export default function ThreatCenter() {
   return (
     <>
       <PageHead title="Threat Center">
+        <Link to="/cases?new=1" className="button-link">Create case</Link>
         <form role="search" onSubmit={onSearch} className="tc-search">
           <input type="search" aria-label="Search alerts" value={search} onChange={(e) => setSearch(e.target.value)}
             placeholder="IP, alert #, or class" />

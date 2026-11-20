@@ -49,10 +49,14 @@ case "$rc" in
   *) fail "could not check the SOC's sensor CA file (exit $rc)" ;;
 esac
 
-nacl=$("$repo/lab/cloud/tf.sh" output -raw target_nacl_id 2>/dev/null | tail -n 1) || nacl=""
-case "$nacl" in
-  acl-[0-9a-f]*) ;;
-  *) fail "cannot read the emulated network ACL id (lab/cloud/tf.sh output target_nacl_id): has 'lab/cloud/tf.sh apply' run?" ;;
-esac
+if [ "${LAB_CLOUD_DRY_RUN:-false}" = true ]; then
+  nacl=""
+else
+  nacl=$("$repo/lab/cloud/tf.sh" output -raw target_nacl_id 2>/dev/null | tail -n 1) || nacl=""
+  case "$nacl" in
+    acl-[0-9a-f]*) ;;
+    *) fail "cannot read the emulated network ACL id (lab/cloud/tf.sh output target_nacl_id): has 'lab/cloud/tf.sh apply' run?" ;;
+  esac
+fi
 LAB_CLOUD_NACL_ID=$nacl $compose up -d --no-build collector-net collector
 echo "start_collector: started; logs: docker logs -f idps-collector"

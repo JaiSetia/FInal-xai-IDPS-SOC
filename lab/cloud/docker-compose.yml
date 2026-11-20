@@ -326,7 +326,7 @@ services:
       # source can be a victim's reply), mgmt_net (SOC, sensor, collector) and cloud_net. The
       # attacker 10.10.1.10 is not on the list and the code does not refuse private addresses,
       # so it can be denied. Dry-run off with an empty allowlist is refused by the settings.
-      IDPS_DRY_RUN: "false"
+      IDPS_DRY_RUN: ${LAB_CLOUD_DRY_RUN:-false}
       IDPS_ALLOWLIST: ${LAB_CLOUD_ALLOWLIST:-10.10.1.1,10.10.1.2,10.10.2.0/24,10.10.3.0/24,10.10.4.0/24}
       IDPS_CONFIDENCE_THRESHOLD: ${LAB_CLOUD_CONFIDENCE:-0.9}
       IDPS_BLOCK_TTL_SECONDS: ${LAB_CLOUD_BLOCK_TTL:-300}
