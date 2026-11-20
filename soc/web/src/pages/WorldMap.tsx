@@ -6,9 +6,9 @@ import { feature } from "topojson-client";
 import type { GeometryCollection, Topology } from "topojson-specification";
 import countriesTopo from "world-atlas/countries-110m.json";
 import { api, query } from "../api/client";
-import { SEVERITIES, type Alert, type GeoLocation, type LiveAlert, type LiveBlockEvent, type Severity } from "../api/types";
+import { SEVERITIES, type Alert, type GeoLocation, type LiveAlert, type LiveBlockEvent, type Page, type Severity } from "../api/types";
 import { Card, ErrorText, Pill, SeverityBadge, SourceTag, useLoad, useNow } from "../components/common";
-import { endpoint, oneLine } from "../format";
+import { dateTime, endpoint, oneLine } from "../format";
 import { useLiveBlocks } from "../live";
 import { useBlockMarks, useReducedMotion, type BlockMark } from "../liveBlocks";
 import { useLiveRefresh } from "../useLiveRefresh";
@@ -84,9 +84,17 @@ function markText(m: BlockMark | undefined): string {
  *  Center) draws only the map card, with the setup notices as one line under it.
  *  Live: each alert sends a shot along its line to the protected site, blocks mark their source,
  *  and (full page) a feed lists the latest events. With reduced motion there are no shots. */
-export default function WorldMap({ hours, compact = false }: { hours: number; compact?: boolean }) {
+export default function WorldMap({ hours, compact = false, playback = false }: { hours: number; compact?: boolean; playback?: boolean }) {
   const { data, error, reload } = useLoad(() => api<GeoAttacks>(`/geo/attacks${query({ hours })}`), [hours]);
-  const marks = useBlockMarks();
+  const recorded = useLoad(async () => {
+    if (!playback) return [];
+    const since = new Date(Date.now() - hours * 3_600_000).toISOString();
+    const page = await api<Page<Alert>>(`/alerts${query({ since, limit: FEED_SIZE })}`);
+    return page.items.slice().reverse();
+  }, [hours, playback]);
+  const [played, setPlayed] = useState(0);
+  const currentMarks = useBlockMarks();
+  const marks = playback ? new Map<string, BlockMark>() : currentMarks;
   const reduceMotion = useReducedMotion();
   const now = useNow(2000);
 
@@ -146,7 +154,7 @@ export default function WorldMap({ hours, compact = false }: { hours: number; co
         return next;
       });
     }
-    pushFeed({ key: ++seq.current, kind: "alert", at: t, alert: a, located: !!geo });
+    pushFeed({ key: ++seq.current, kind: "alert", at: playback ? Date.parse(a.received_at) : t, alert: a, located: !!geo });
     if (pausedRef.current || reduceMotion || !geo || !home) return;
     const d = arcFrom(geo.lon, geo.lat);
     if (!d) return;
@@ -158,12 +166,23 @@ export default function WorldMap({ hours, compact = false }: { hours: number; co
       shotsRef.current = shotsRef.current.filter((x) => x.key !== key);
       setShots(shotsRef.current);
     }, SHOT_MS + 600);
-  }, [arcFrom, home, later, pushFeed, reduceMotion]);
+  }, [arcFrom, home, later, playback, pushFeed, reduceMotion]);
 
-  useLiveRefresh(reload, onAlert);
+  const connected = useLiveRefresh(playback ? () => {} : reload, playback ? undefined : onAlert);
   useLiveBlocks(useCallback((e: LiveBlockEvent) => {
-    pushFeed({ key: ++seq.current, kind: "block", at: Date.now(), event: e });
-  }, [pushFeed]));
+    if (!playback) pushFeed({ key: ++seq.current, kind: "block", at: Date.now(), event: e });
+  }, [playback, pushFeed]));
+
+  useEffect(() => {
+    const alert = recorded.data?.[played];
+    if (!playback || paused || !alert || !data) return;
+    const timer = setTimeout(() => {
+      const event: LiveAlert = { ...alert, src_geo: data.points.find(p => p.ip === alert.src_ip) };
+      onAlert(event);
+      setPlayed(played + 1);
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [playback, paused, played, recorded.data, data, onAlert]);
 
   // "+N more" fades out once the flood is over.
   useEffect(() => {
@@ -172,7 +191,7 @@ export default function WorldMap({ hours, compact = false }: { hours: number; co
     return () => clearTimeout(t);
   }, [overflow]);
 
-  const points = useMemo(() => mergeLivePoints(data?.points ?? [], live), [data, live]);
+  const points = useMemo(() => mergeLivePoints(playback ? [] : data?.points ?? [], live), [data, live, playback]);
   const maxCount = Math.max(1, ...points.map((p) => p.count));
   const homeXY = home ? projection([home.lon, home.lat]) : null;
   const perMinute = recent.current.filter((x) => x > now - 60_000).length;
@@ -189,13 +208,15 @@ export default function WorldMap({ hours, compact = false }: { hours: number; co
 
   const rate = <Pill tone={perMinute > 0 ? "danger" : "neutral"}>{perMinute} / min</Pill>;
   const map = data && (
-    <Card title={compact ? "Live attack map" : "Where attacks come from"}
+    <Card title={playback ? "Recorded alert playback" : compact ? "Live attack map" : "Where attacks come from"}
       actions={
         <div className="row-actions" style={{ alignItems: "center" }}>
-          {rate}
+          {playback ? <Pill>{played} / {recorded.data?.length ?? 0} alerts</Pill> : rate}
+          {playback && played > 0 && played === recorded.data?.length &&
+            <button type="button" onClick={() => { setPlayed(0); setFeed([]); setLive(new Map()); setPaused(false); }}>Play again</button>}
           {compact
             ? <Link to={`/maps${query({ view: "world", hours: hours === 1 ? undefined : hours })}`}>Open maps →</Link>
-            : (
+            : (!playback || played < (recorded.data?.length ?? 0)) && (
               <button type="button" className="small" aria-pressed={paused}
                 onClick={() => { setPaused((p) => !p); setMissed(0); }}>
                 {paused ? `Resume${missed ? ` (${missed} new)` : ""}` : "Pause"}
@@ -247,8 +268,9 @@ export default function WorldMap({ hours, compact = false }: { hours: number; co
       </div>
       <p className="muted" style={{ marginBottom: 0 }}>
         {points.length} sources placed
-        {data.unlocated_sources ? `, ${data.unlocated_sources} with no known location (private or unknown addresses)` : ""}.
-        Dot size: number of alerts. Colour: highest severity. Red ring: blocked; dashed ring: a dry-run sensor would block it.
+        {!playback && data.unlocated_sources ? `, ${data.unlocated_sources} with no known location (private or unknown addresses)` : ""}.
+        Dot size: number of alerts. Colour: highest severity.
+        {!playback && " Red ring: blocked; dashed ring: a dry-run sensor would block it."}
         {data.demo && " Dashed outline: demo location, not real."}
         {reduceMotion && " Animation is off (your system asks for reduced motion)."}
       </p>
@@ -273,6 +295,11 @@ export default function WorldMap({ hours, compact = false }: { hours: number; co
   return (
     <>
       <ErrorText error={error} />
+      {playback && <>
+        <ErrorText error={recorded.error} />
+        <p className="muted">Playback shows up to {FEED_SIZE} saved alerts from this window, one every 1.5 seconds, with their original receipt times.</p>
+        {recorded.data?.length === 0 && <p>No saved alerts in this window. Choose a longer window to look further back.</p>}
+      </>}
       {data && (
         <>
           {data.geoip_status !== "ok" && (
@@ -293,12 +320,12 @@ export default function WorldMap({ hours, compact = false }: { hours: number; co
           )}
           <div className="grid cols-main-side">
             {map}
-            <LiveFeed items={feed} paused={paused} missed={missed} now={now} />
+            <LiveFeed items={feed} paused={paused} missed={missed} now={now} playback={playback} connected={connected} />
           </div>
           <Card title="Sources on the map">
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Source IP</th><th>Alerts</th><th>Highest severity</th><th>Response</th><th>Location</th></tr></thead>
+                <thead><tr><th>Source IP</th><th>Alerts</th><th>Highest severity</th>{!playback && <th>Response</th>}<th>Location</th></tr></thead>
                 <tbody>
                   {points.slice().sort((a, b) => b.count - a.count).slice(0, 50).map((p) => {
                     const m = marks.get(p.ip);
@@ -307,13 +334,13 @@ export default function WorldMap({ hours, compact = false }: { hours: number; co
                         <td className="mono">{p.ip}</td>
                         <td>{p.count}</td>
                         <td><SeverityBadge severity={p.max_severity} /></td>
-                        <td>{m === "blocked" ? <Pill tone="danger">blocked</Pill> : m === "would" ? <Pill tone="warn">would block · dry-run</Pill> : <Pill>observe</Pill>}</td>
+                        {!playback && <td>{m === "blocked" ? <Pill tone="danger">blocked</Pill> : m === "would" ? <Pill tone="warn">would block · dry-run</Pill> : <Pill>observe</Pill>}</td>}
                         <td>{[p.city, p.country].filter(Boolean).join(", ") || "—"}
                           {p.source === "demo" && <span className="muted"> (not real)</span>}</td>
                       </tr>
                     );
                   })}
-                  {points.length === 0 && <tr><td colSpan={5} className="muted">No located sources in this window.</td></tr>}
+                  {points.length === 0 && <tr><td colSpan={playback ? 4 : 5} className="muted">No located sources in this window.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -330,17 +357,23 @@ function ago(at: number, now: number): string {
 }
 
 /** The latest live events, newest first. Announced politely to screen readers, one at a time. */
-export function LiveFeed({ items, paused, missed, now }: { items: FeedItem[]; paused: boolean; missed: number; now: number }) {
+export function LiveFeed({ items, paused, missed, now, playback = false, connected = true }: {
+  items: FeedItem[]; paused: boolean; missed: number; now: number; playback?: boolean; connected?: boolean;
+}) {
   return (
-    <Card title="Live feed" className="live-feed"
-      actions={paused ? <Pill tone="warn">paused{missed ? ` · ${missed} new` : ""}</Pill> : <Pill tone="ok" dot>live</Pill>}>
+    <Card title={playback ? "Recorded feed" : "Live feed"} className="live-feed"
+      actions={paused ? <Pill tone="warn">paused{missed ? ` · ${missed} new` : ""}</Pill>
+        : playback ? <Pill>recorded</Pill> : <Pill tone={connected ? "ok" : "warn"} dot>{connected ? "live" : "offline"}</Pill>}>
       {items.length === 0
-        ? <p className="muted" style={{ margin: 0 }}>Waiting for attacks. New alerts and blocks appear here as the sensors report them.</p>
+        ? <div className="muted">{playback ? "No alerts played yet." : <>
+            Waiting for attacks. New alerts and blocks appear here as sensors report them.{" "}
+            <Link to="/maps?view=recorded&hours=168">Replay alerts from the last 7 days</Link>
+          </>}</div>
         : (
           <ol className="feed-list" aria-live="polite" aria-relevant="additions">
             {items.map((i) => i.kind === "alert" ? (
               <li key={i.key} className={`feed-item sev-${i.alert.severity}`}>
-                <span className="feed-time">{ago(i.at, now)}</span>
+                <span className="feed-time">{playback ? dateTime(i.alert.received_at) : ago(i.at, now)}</span>
                 <span>
                   <Link to={`/alerts/${i.alert.id}`}><b>{oneLine(i.alert.predicted_class, 40)}</b></Link>{" "}
                   <SourceTag source={i.alert.source} />{" "}

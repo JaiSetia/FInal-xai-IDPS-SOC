@@ -4,6 +4,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { ApiError } from "../api/client";
 import type { DemoRun, DemoState } from "../api/types";
 import Demo, { ACTIVE_POLL_MS, elapsed, IDLE_POLL_MS, runBlocker, STEP_HINTS } from "../pages/Demo";
+import { workspace } from "../workspace";
+import { report, sensorState, sensorsStatus } from "./sensor-fixtures";
 
 const h = vi.hoisted(() => ({ api: vi.fn(), role: "admin" }));
 vi.mock("../api/client", async (orig) => ({ ...(await orig<typeof import("../api/client")>()), api: h.api }));
@@ -49,6 +51,28 @@ const runButton = () => screen.getByRole("button", { name: "Run demo" });
 const posts = () => h.api.mock.calls.filter(([, o]) => o?.method === "POST").map(([p]) => p);
 
 describe("Live demo page", () => {
+  it("shows live sensor activity and the classroom replay route in the lab workspace", async () => {
+    const originalLab = workspace.lab;
+    workspace.lab = true;
+    try {
+      h.api.mockImplementation(async (path: string) => {
+        if (path === "/demo") return state;
+        if (path === "/sensors/status") return sensorsStatus([
+          sensorState({ name: "Classroom sensor", status: report({ counters: { flows: 42, alerts: 3, blocked: 0, would_block: 2 } }) }),
+          sensorState({ sensor_id: 2, name: "Replay sensor", status: report({ mode: "replay" }) }),
+        ]);
+        throw new Error("Unexpected route");
+      });
+      render(<MemoryRouter basename="/lab" initialEntries={["/lab/demo"]}><Demo /></MemoryRouter>);
+      expect(await screen.findByRole("rowheader", { name: "Classroom sensor" })).toBeInTheDocument();
+      expect(screen.getByRole("cell", { name: "42" })).toBeInTheDocument();
+      expect(screen.queryByText("Replay sensor")).toBeNull();
+      expect(screen.getByRole("link", { name: "Open C6 replay" })).toHaveAttribute("href", "/lab/c6");
+    } finally {
+      workspace.lab = originalLab;
+    }
+  });
+
   it("enables Run demo for an admin when the runner is online and nothing runs", async () => {
     renderPage();
     await screen.findByText("Runner online");

@@ -95,6 +95,33 @@ const stubReducedMotion = () => vi.stubGlobal("matchMedia", vi.fn(() => ({
 })));
 
 describe("WorldMap", () => {
+  it("plays stored alerts in order, pauses, and keeps live events out of playback", async () => {
+    vi.useFakeTimers();
+    const when = "2026-03-01T09:00:00Z";
+    const alerts = [2, 1].map(id => liveAlert({ id, src_ip: "8.8.8.8", received_at: when, predicted_class: `Recorded ${id}` }));
+    h.api.mockImplementation(async (path: string) => {
+      if (path.startsWith("/alerts?")) return { items: alerts };
+      if (path.startsWith("/geo/attacks")) return geo({ home: HOME, points: [point()] });
+      return { items: [] };
+    });
+    render(<MemoryRouter><WorldMap hours={168} playback /></MemoryRouter>);
+    await flush();
+    await tick(1500);
+    expect(feedItems()[0]).toHaveTextContent("Recorded 1");
+    expect(screen.getByRole("img")).toHaveAccessibleName("World map of 1 attack sources");
+    expect(h.onAlert).toBeUndefined();
+    blockNow(blockEv());
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    await tick(3000);
+    expect(feedItems()).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    await tick(1500);
+    expect(feedItems()[0]).toHaveTextContent("Recorded 2");
+    fireEvent.click(screen.getByRole("button", { name: "Play again" }));
+    expect(feedItems()).toHaveLength(0);
+    expect(h.api.mock.calls.every(([, opts]) => !opts?.method || opts.method === "GET")).toBe(true);
+  });
+
   it("requests /geo/attacks with the hours prop", async () => {
     show();
     await screen.findByText("Where attacks come from");

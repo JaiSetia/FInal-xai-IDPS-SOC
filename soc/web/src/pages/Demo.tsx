@@ -6,6 +6,7 @@ import type { DemoRun, DemoRunStatus, DemoState, DemoStepStatus } from "../api/t
 import { useAuth } from "../auth";
 import { Card, ErrorText, PageHead, Pill, useAction, useLoad, useNow, type Tone } from "../components/common";
 import { dateTime } from "../format";
+import { reporting, useSensors } from "../sensors";
 
 /** Poll every 2 s while a run is queued or running, otherwise every 10 s (to see the runner come online). */
 export const ACTIVE_POLL_MS = 2000;
@@ -69,6 +70,29 @@ function StepChip({ status }: { status: DemoStepStatus }) {
   return <span aria-live="polite"><Pill tone={c.tone}><span aria-hidden="true">{c.mark}</span> {c.text}</Pill></span>;
 }
 
+function LabSensorActivity({ admin }: { admin: boolean }) {
+  const { data, error } = useSensors();
+  const sensors = reporting(data).filter(sensor => sensor.status.mode === "live");
+  return (
+    <Card title="Live sensor activity" actions={admin && <Link to="/c6">Open C6 replay</Link>}>
+      <ErrorText error={error} />
+      {!data && !error && <p>Checking sensor reports…</p>}
+      {data && sensors.length === 0 && <p>No live sensor is reporting.</p>}
+      {sensors.length > 0 && <>
+        <p className="muted">Totals since each sensor started. Reports refresh every 30 seconds.</p>
+        <div className="table-wrap"><table>
+          <thead><tr><th>Sensor</th><th>Flows</th><th>Alerts</th><th>Would block</th><th>Blocked</th><th>Last report</th></tr></thead>
+          <tbody>{sensors.map(({ sensor_id, name, status, last_seen_at }) => (
+            <tr key={sensor_id}><th scope="row">{name}</th><td>{status.counters.flows.toLocaleString()}</td>
+              <td>{status.counters.alerts.toLocaleString()}</td><td>{status.counters.would_block.toLocaleString()}</td>
+              <td>{status.counters.blocked.toLocaleString()}</td><td>{dateTime(last_seen_at)}</td></tr>
+          ))}</tbody>
+        </table></div>
+      </>}
+    </Card>
+  );
+}
+
 /** Live demo: an admin starts the fixed lab attack run; everyone signed in can follow it. */
 export default function Demo() {
   const { me } = useAuth();
@@ -111,7 +135,8 @@ export default function Demo() {
           ? <Pill tone="ok" round dot>Runner online</Pill>
           : <Pill tone="warn" round dot>Runner offline</Pill>)}
       </PageHead>
-      <Card title="Attack run"
+      {workspace.lab && <LabSensorActivity admin={admin} />}
+      <Card title={workspace.lab ? "Live run progress" : "Attack run"}
         actions={admin && (
           <div className="row-actions">
             {!phoneBuild && !workspace.lab && <button type="button" className="primary" disabled={blocker !== null || act.busy || reloading}
@@ -124,10 +149,11 @@ export default function Demo() {
           </div>
         )}>
         <p className="muted" style={{ marginTop: 0 }}>
+          {workspace.lab ? "This workspace follows runs started on the lab host. Each step appears here when the runner reports it." : <>
           A fixed sequence of attacks from the lab's attacker container against the victims, run by the demo
           runner on the lab host. The SOC only records the request and shows progress; it never reaches the
           attacker. Results show up on the <Link to="/alerts">Alerts</Link>, <Link to="/response">Response</Link>{" "}
-          and <Link to="/">Dashboard</Link> pages like any other traffic.
+          and <Link to="/">Dashboard</Link> pages like any other traffic.</>}
         </p>
         {data && !data.enabled && (
           <div className="card notice-box" role="note">
