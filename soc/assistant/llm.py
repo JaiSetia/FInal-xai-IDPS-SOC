@@ -4,6 +4,7 @@ AnthropicLLM uses the official Anthropic Python SDK. Credentials come from the e
 (ANTHROPIC_API_KEY, or an `ant auth login` profile); they are never sent to the browser.
 """
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -52,6 +53,10 @@ class AnthropicLLM:
 
     def stream_turn(self, *, system: str, tools: list[dict], messages: list[dict],
                     on_text: Callable[[str], None]) -> Turn:
+        if any("gemini_call_id" in block or "gemini_signature" in block
+               for message in messages if isinstance(message["content"], list)
+               for block in message["content"]):
+            raise LLMError("Start a new conversation to switch from Gemini to Claude.")
         a = self._anthropic
         try:
             with self.client.beta.messages.stream(
@@ -106,10 +111,17 @@ def trim_before_fallback(content: list[dict]) -> list[dict]:
 
 
 def make_llm(model: str, effort: str) -> LLM | None:
-    """The real model, or None when no credentials are configured.
+    """Select Groq, Gemini, or Claude according to the available server credentials."""
+    if key := os.getenv("GROQ_API_KEY"):
+        from soc.assistant.groq import DEFAULT_MODEL as GROQ_DEFAULT
+        from soc.assistant.groq import GroqLLM
 
-    The SDK doesn't fail at construction without a key, so check for one explicitly.
-    """
+        return GroqLLM(key, os.getenv("IDPS_SOC_GROQ_MODEL") or GROQ_DEFAULT)
+    if key := os.getenv("GEMINI_API_KEY"):
+        from soc.assistant.gemini import DEFAULT_MODEL as GEMINI_DEFAULT
+        from soc.assistant.gemini import GeminiLLM
+
+        return GeminiLLM(key, os.getenv("IDPS_SOC_GEMINI_MODEL") or GEMINI_DEFAULT)
     try:
         llm = AnthropicLLM(model, effort)
     except AssistantUnavailable:

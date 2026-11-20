@@ -1122,11 +1122,13 @@ The full picture, what the admin does for a request and what erasure cannot reac
 ## SOC assistant
 
 A chat panel ("Assistant", and "Explain this alert with the assistant" on every alert) backed
-by Claude through the Anthropic Python SDK (`soc/assistant/`).
+by Claude, Google Gemini or Groq (`soc/assistant/`).
 
 **Turning it on.** Set `ANTHROPIC_API_KEY` in the API server's environment (never in the
-browser). Without it the assistant is switched off, the page says so, and everything else
-works. Each message costs API usage; limits below keep it bounded.
+browser), or set `GEMINI_API_KEY` for the Gemini Developer API. A configured Gemini key selects
+Gemini. `IDPS_SOC_GEMINI_MODEL` defaults to `gemini-3.8-flash`. For Groq set `GROQ_API_KEY`. It takes precedence over the other providers and uses
+`IDPS_SOC_GROQ_MODEL` (default `openai/gpt-oss-20b`). Without any provider credential the
+assistant is switched off. Each message costs API usage; limits below keep it bounded.
 
 | Setting (`IDPS_SOC_` prefix) | Default | Meaning |
 |---|---|---|
@@ -1135,7 +1137,7 @@ works. Each message costs API usage; limits below keep it bounded.
 | `ASSISTANT_RATE_PER_10MIN` | 20 | Messages per user per 10 minutes |
 | `ASSISTANT_MAX_TURNS` | 30 | Messages per conversation |
 
-Requests use server-side fallbacks (`fallbacks: "default"`), so if the model declines a
+Claude requests use server-side fallbacks (`fallbacks: "default"`), so if the model declines a
 request the API retries it on a fallback model automatically. The system prompt and tool list
 are constant and prompt-cached.
 

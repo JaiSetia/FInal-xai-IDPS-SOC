@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+import idps
 from soc.api import access_log
 from soc.api.common import IPAddress, audit, clean_reason
 from soc.api.models import (
@@ -32,7 +33,7 @@ from soc.api.models import (
 )
 from soc.api.settings import SocSettings
 
-PLAYBOOK_DIR = Path(__file__).resolve().parents[2] / "docs" / "playbooks"
+PLAYBOOK_DIR = Path(idps.__file__).resolve().parents[1] / "docs" / "playbooks"
 MAX_RESULT_CHARS = 20_000
 
 # Each playbook covers one attack family; the model asks by the predicted class name.

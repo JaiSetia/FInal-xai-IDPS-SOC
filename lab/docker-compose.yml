@@ -138,7 +138,7 @@ services:
     hostname: soc
     cap_add: [NET_ADMIN]
     environment:
-      SOC_EGRESS_HOSTS: ${LAB_SOC_EGRESS_HOSTS:-}
+      SOC_EGRESS_HOSTS: "${LAB_SOC_EGRESS_HOSTS:-}${ANTHROPIC_API_KEY:+,api.anthropic.com}${GEMINI_API_KEY:+,generativelanguage.googleapis.com}${GROQ_API_KEY:+,api.groq.com}"
       # Email: the SOC may reach its configured mail server on its configured port (and nothing
       # else on that port). Blank LAB_SMTP_HOST = no email, no exception.
       SOC_EGRESS_SMTP_HOST: ${LAB_SMTP_HOST:-}
@@ -193,6 +193,11 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     environment:
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      IDPS_SOC_GROQ_MODEL: ${IDPS_SOC_GROQ_MODEL:-openai/gpt-oss-20b}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      IDPS_SOC_GEMINI_MODEL: ${IDPS_SOC_GEMINI_MODEL:-gemini-3.8-flash}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       LAB_SOC_ADMIN_PASSWORD: ${LAB_SOC_ADMIN_PASSWORD:-}
       # postgres (default; soc-db) or sqlite (the old soc.db file in the SOC's volume).
       LAB_SOC_DATABASE: ${LAB_SOC_DATABASE:-postgres}

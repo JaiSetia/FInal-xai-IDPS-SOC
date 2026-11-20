@@ -291,7 +291,7 @@ def test_needs_login(client):
 def test_no_credentials_means_switched_off(monkeypatch):
     from soc.assistant.llm import make_llm
 
-    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "GEMINI_API_KEY", "GROQ_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ANTHROPIC_PROFILE", "idps-test-profile-that-does-not-exist")
     assert make_llm("claude-opus-5-5", "medium") is None
@@ -500,3 +500,80 @@ def test_the_assistant_is_told_nothing_about_the_allowlist_network(client, senso
     chat(client, analyst_headers, "block the gateway")
     results = json.dumps(llm.calls[-1]["messages"][-1]["content"])
     assert "10.10.1.1/32" not in results and "on the block allowlist" in results
+
+
+def test_gemini_chat_stream_and_tool_roundtrip(client, soc_app, analyst_headers, monkeypatch):
+    import io
+
+    from soc.assistant import gemini
+    from soc.assistant.llm import make_llm
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-only")
+    soc_app.state.assistant_llm = make_llm("claude", "medium")
+    requests = []
+    parts = iter([[{"functionCall": {"id": "g1", "name": "metrics_summary", "args": {"hours": 1}},
+                    "thoughtSignature": "test-signature"}], [{"text": "Metrics received."}]])
+
+    class Connection:
+        def __init__(self, host, timeout):
+            assert host == "generativelanguage.googleapis.com"
+
+        def request(self, method, path, body, headers):
+            assert method == "POST" and path.endswith(":streamGenerateContent?alt=sse")
+            assert headers["x-goog-api-key"] == "test-only"
+            requests.append(json.loads(body))
+
+        def getresponse(self):
+            chunk = {"candidates": [{"content": {"parts": next(parts)}, "finishReason": "STOP"}]}
+            response = io.BytesIO(f"data: {json.dumps(chunk)}\n\n".encode())
+            response.status = 200
+            return response
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gemini.http.client, "HTTPSConnection", Connection)
+    events = chat(client, analyst_headers, "Summarize the last hour.")
+    assert {"type": "tool_result", "name": "metrics_summary", "ok": True} in events
+    assert {"type": "text", "text": "Metrics received."} in events
+    assert events[-1]["stop_reason"] == "end_turn"
+    assert requests[1]["contents"][-2]["parts"][0]["thoughtSignature"] == "test-signature"
+    response = requests[1]["contents"][-1]["parts"][0]["functionResponse"]
+    assert response["id"] == "g1" and response["name"] == "metrics_summary"
+    assert "<soc_data>" in response["response"]["output"]
+    assert len(requests[0]["tools"][0]["functionDeclarations"]) == len(TOOLS)
+
+
+def test_gemini_incomplete_or_blocked_stream_cannot_run_tools():
+    from soc.assistant.gemini import _reply
+
+    part = {"functionCall": {"name": "propose_block", "args": {}}}
+    chunk = {"content": {"parts": [part]}}
+    with pytest.raises(LLMError):
+        _reply(iter([{"candidates": [chunk]}]), lambda _: None)
+    blocked = _reply(iter([{"candidates": [{**chunk, "finishReason": "SAFETY"}]}]), lambda _: None)
+    assert blocked.stop_reason == "refusal" and not blocked.content
+
+
+def test_groq_stream_reassembles_calls_and_returns_results():
+    from soc.assistant.groq import _messages, _reply
+    from soc.assistant.sse import events
+
+    chunks = [
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "c1", "function": {
+            "name": "metrics_summary", "arguments": '{"hou'}}]}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": 'rs":1}'}}]},
+                      "finish_reason": "tool_calls"}]},
+    ]
+    stream = [f"data: {json.dumps(chunk)}\n\n".encode() for chunk in chunks]
+    turn = _reply(events(b"".join([*stream, b"data: [DONE]\n"]).splitlines(keepends=True)), lambda _: None)
+    assert turn.stop_reason == "tool_use"
+    call, = turn.content
+    assert call == {"type": "tool_use", "id": "c1", "name": "metrics_summary", "input": {"hours": 1}}
+    history = [{"role": "assistant", "content": turn.content},
+               {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "ok"}]}]
+    request = _messages("system", history)
+    assert request[-2]["tool_calls"][0]["function"]["name"] == "metrics_summary"
+    assert request[-1] == {"role": "tool", "tool_call_id": "c1", "content": "ok"}
+    with pytest.raises(LLMError):
+        _reply(iter(chunks[:1]), lambda _: None)

@@ -81,8 +81,8 @@ def assistant_status(request: Request, user: AnyUser):
     llm = request.app.state.assistant_llm
     if llm is None:
         return Status(enabled=False, model=None,
-                      reason="No Anthropic API key is configured on the SOC server "
-                             "(ANTHROPIC_API_KEY), so the assistant is switched off.")
+                      reason="No model API key is configured on the SOC server "
+                             "(GROQ_API_KEY, GEMINI_API_KEY or ANTHROPIC_API_KEY).")
     return Status(enabled=True, model=llm.model)
 
 
@@ -218,7 +218,7 @@ async def chat(body: ChatIn, request: Request, user: AnyUser):
     llm = app.state.assistant_llm
     if llm is None:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
-                            "the assistant is switched off (no Anthropic API key configured)")
+                            "the assistant is switched off (no model API key configured)")
     slots = _slots(app)
     if not slots.acquire(blocking=False):
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,

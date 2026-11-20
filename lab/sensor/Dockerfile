@@ -8,8 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # data, secrets and git history out of the image.
 WORKDIR /opt/idps
 COPY pyproject.toml README.md requirements.lock ./
-COPY idps ./idps
+COPY 23csu441_1_23csu294_2_23csu095/idps ./idps
 COPY soc ./soc
+COPY 23csu441_1_23csu294_2_23csu095/docs/playbooks ./docs/playbooks
 # Trained models are copied in because bind mounts of ~/Desktop are blocked on macOS.
 COPY models ./models
 # The public key models must be signed with, if you made one (lab/keys/README.md).
