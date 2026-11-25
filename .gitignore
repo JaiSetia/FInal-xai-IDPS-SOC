@@ -52,3 +52,8 @@ deploy/sensor-data/
 deploy/soc.env
 deploy/sensor.extra.env
 deploy/caddy-root.crt
+
+# Local assistant config
+CLAUDE.md
+.claude/
+~$*
